@@ -504,9 +504,11 @@ def handle_approvals_command(agent, text: str) -> tuple[bool, str]:
 
 def handle_approve_command(agent, text: str) -> tuple[bool, str]:
     """Handle `/approve` command."""
-    raw = (text or "").strip().lower()
-    if raw != "/approve":
+    parts = (text or "").strip().split()
+    if not parts or parts[0].lower() != "/approve":
         return False, ""
+    if len(parts) != 1:
+        return True, "Usage: /approve"
 
     approver = getattr(agent, "approve_pending_request", None)
     if callable(approver):
@@ -519,9 +521,11 @@ def handle_approve_command(agent, text: str) -> tuple[bool, str]:
 
 def handle_deny_command(agent, text: str) -> tuple[bool, str]:
     """Handle `/deny` command."""
-    raw = (text or "").strip().lower()
-    if raw != "/deny":
+    parts = (text or "").strip().split()
+    if not parts or parts[0].lower() != "/deny":
         return False, ""
+    if len(parts) != 1:
+        return True, "Usage: /deny"
 
     denier = getattr(agent, "deny_pending_request", None)
     if callable(denier):
@@ -534,9 +538,11 @@ def handle_deny_command(agent, text: str) -> tuple[bool, str]:
 
 def handle_approve_next_command(agent, text: str) -> tuple[bool, str]:
     """Handle `/approve_next` command."""
-    raw = (text or "").strip().lower()
-    if raw != "/approve_next":
+    parts = (text or "").strip().split()
+    if not parts or parts[0].lower() != "/approve_next":
         return False, ""
+    if len(parts) != 1:
+        return True, "Usage: /approve_next"
 
     approver = getattr(agent, "approve_next_dangerous_action", None)
     if callable(approver):

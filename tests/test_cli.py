@@ -362,6 +362,20 @@ class TestCliCommands:
         assert action == "approve_next"
         assert msg == "Approve-next unavailable: session approval state not wired."
 
+    @pytest.mark.parametrize(
+        ("command", "expected_action", "expected_msg"),
+        [
+            ("/approve extra", "approve", "Usage: /approve"),
+            ("/deny extra", "deny", "Usage: /deny"),
+            ("/approve_next extra", "approve_next", "Usage: /approve_next"),
+        ],
+    )
+    def test_handle_repl_command_malformed_approve_commands_stay_local(self, command, expected_action, expected_msg):
+        action, msg = _handle_repl_command(SimpleNamespace(), command)
+
+        assert action == expected_action
+        assert msg == expected_msg
+
     def test_bare_slash_shows_command_list(self):
         agent = SimpleNamespace(
             llm=SimpleNamespace(model="test"),
@@ -1260,8 +1274,11 @@ class TestCliLocalInteractiveCommands:
             ("/approvals", "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0"),
             ("/approvals status", "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0"),
             ("/approve", "No pending dangerous request to approve."),
+            ("/approve extra", "Usage: /approve"),
             ("/deny", "No pending dangerous request to deny."),
+            ("/deny extra", "Usage: /deny"),
             ("/approve_next", "Approve-next unavailable: session approval state not wired."),
+            ("/approve_next extra", "Usage: /approve_next"),
         ],
     )
     def test_local_shell_commands_do_not_call_agent_run(self, command, expected):
