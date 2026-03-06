@@ -10,6 +10,7 @@ if TYPE_CHECKING:
 
 
 DEFAULT_SKILL_NAME = "general"
+SESSION_SKILL_PROFILE_PREFIX = "__skill__:"
 _DEFAULT_ALLOWED_TOOLS = ("*",)
 _DEFAULT_MAX_MODE = "implement"
 
@@ -161,6 +162,44 @@ def get_builtin_skill(name: str | None) -> BuiltinSkill | None:
     if not key:
         return None
     return BUILTIN_SKILLS.get(key)
+
+
+def list_builtin_skills() -> list[BuiltinSkill]:
+    return list(BUILTIN_SKILLS.values())
+
+
+def make_session_skill_profile_name(base_profile_name: str, skill_name: str) -> str:
+    base = str(base_profile_name or "default").strip().lower() or "default"
+    skill = str(skill_name or "").strip().lower()
+    return f"{SESSION_SKILL_PROFILE_PREFIX}{base}:{skill}"
+
+
+def is_session_skill_profile_name(profile_name: str | None) -> bool:
+    return str(profile_name or "").startswith(SESSION_SKILL_PROFILE_PREFIX)
+
+
+def ensure_session_skill_profile(config, *, skill_name: str, base_profile_name: str = "default") -> str:
+    from archon.config import ProfileConfig
+
+    skill = get_builtin_skill(skill_name)
+    if skill is None:
+        raise ValueError(f"Unknown skill '{skill_name}'")
+
+    profiles = getattr(config, "profiles", None)
+    if not isinstance(profiles, dict):
+        config.profiles = {"default": ProfileConfig()}
+        profiles = config.profiles
+
+    base_name = str(base_profile_name or "default").strip() or "default"
+    base_profile = profiles.get(base_name) or profiles.get("default") or ProfileConfig()
+    profile_name = make_session_skill_profile_name(base_name, skill.name)
+    profiles[profile_name] = ProfileConfig(
+        allowed_tools=list(getattr(base_profile, "allowed_tools", _DEFAULT_ALLOWED_TOOLS)),
+        max_mode=str(getattr(base_profile, "max_mode", _DEFAULT_MAX_MODE) or _DEFAULT_MAX_MODE),
+        execution_backend=str(getattr(base_profile, "execution_backend", "host") or "host"),
+        skill=skill.name,
+    )
+    return profile_name
 
 
 def resolve_skill_profile(profile: ProfileConfig | None) -> ResolvedSkillProfile:

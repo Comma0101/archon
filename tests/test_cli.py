@@ -28,6 +28,7 @@ from archon.cli import (
 )
 from archon.cli_interactive_commands import chat_cmd as _chat_cmd
 from archon.control.hooks import HookBus
+from archon.prompt import build_skill_guidance as _build_skill_guidance
 
 
 class TestCliFormatting:
@@ -645,6 +646,66 @@ class TestCliCommands:
         assert permissions_action == "permissions"
         assert "profile=missing-profile->default" in permissions_msg
 
+    def test_handle_repl_command_skills_lists_available_and_active_skill(self):
+        agent = self._make_local_command_agent()
+
+        action, msg = _handle_repl_command(agent, "/skills")
+
+        assert action == "skills"
+        assert msg == (
+            "Skills: active=none | available=general, coder, researcher, operator, sales, memory_curator"
+        )
+
+    def test_handle_repl_command_skills_show_reports_skill_details(self):
+        agent = self._make_local_command_agent()
+
+        action, msg = _handle_repl_command(agent, "/skills show coder")
+
+        assert action == "skills"
+        assert msg == (
+            "Skill coder: mode=implement | provider=anthropic | model=claude-sonnet-4-6 | tools=20"
+        )
+
+    def test_handle_repl_command_skills_use_sets_session_skill_profile(self):
+        agent = self._make_local_command_agent()
+
+        action, msg = _handle_repl_command(agent, "/skills use coder")
+
+        assert action == "skills"
+        assert msg == "Skill set to: coder"
+        assert agent.policy_profile != "safe"
+        assert agent.policy_profile.startswith("__skill__:")
+        assert _build_skill_guidance(agent.config, profile_name=agent.policy_profile)
+        assert "Active skill: coder" in _build_skill_guidance(
+            agent.config, profile_name=agent.policy_profile
+        )
+
+        list_action, list_msg = _handle_repl_command(agent, "/skills")
+        assert list_action == "skills"
+        assert list_msg == (
+            "Skills: active=coder | available=general, coder, researcher, operator, sales, memory_curator"
+        )
+
+        profile_action, profile_msg = _handle_repl_command(agent, "/profile show")
+        assert profile_action == "profile"
+        assert profile_msg == "Policy profile: safe | skill: coder | available: default, safe"
+
+        permissions_action, permissions_msg = _handle_repl_command(agent, "/permissions")
+        assert permissions_action == "permissions"
+        assert permissions_msg == (
+            "Permissions: profile=safe | skill=coder | mode=review | tools=2 [read_file,shell]"
+        )
+
+    def test_handle_repl_command_skills_clear_restores_base_profile(self):
+        agent = self._make_local_command_agent()
+        _handle_repl_command(agent, "/skills use coder")
+
+        action, msg = _handle_repl_command(agent, "/skills clear")
+
+        assert action == "skills"
+        assert msg == "Skill cleared"
+        assert agent.policy_profile == "safe"
+
     def test_chat_cmd_handles_status_locally_without_model_turn(self):
         outputs = []
 
@@ -943,6 +1004,21 @@ class TestCliLocalInteractiveCommands:
         assert expected in outputs
         assert agent.run_calls == []
 
+    def test_local_skills_commands_do_not_call_agent_run(self):
+        agent = _LocalCommandAgent()
+
+        outputs = [
+            re.sub(r"\x1b\[[0-9;]*m", "", text)
+            for text, _err in _run_local_command_session(
+                agent,
+                ["/skills use coder", "/skills clear", "quit"],
+            )
+        ]
+
+        assert "Skill set to: coder" in outputs
+        assert "Skill cleared" in outputs
+        assert agent.run_calls == []
+
 
 class TestSlashCompleter:
     def test_matches_prefix(self):
@@ -959,6 +1035,10 @@ class TestSlashCompleter:
     def test_mcp_prefix_matches_command(self):
         assert _slash_completer("/mc", 0) == "/mcp"
         assert _slash_completer("/mc", 1) is None
+
+    def test_skills_prefix_matches_command(self):
+        assert _slash_completer("/sk", 0) == "/skills"
+        assert _slash_completer("/sk", 1) is None
 
     def test_empty_returns_all(self):
         results = []
@@ -996,6 +1076,14 @@ class TestSlashCompleter:
         assert _slash_completer("o", 1) == "off"
         assert _slash_completer("o", 2) is None
 
+    def test_skills_subcommand_completion_from_line_buffer(self, monkeypatch):
+        monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/skills ")
+        assert _slash_completer("", 0) == "list"
+        assert _slash_completer("", 1) == "show"
+        assert _slash_completer("", 2) == "use"
+        assert _slash_completer("", 3) == "clear"
+        assert _slash_completer("", 4) is None
+
 
 class TestPickSlashCommand:
     def test_run_picker_returns_none_for_empty_items(self):
@@ -1022,10 +1110,13 @@ class TestPickSlashCommand:
         assert "/model-set" in _SLASH_SUBVALUES
         assert "/calls" in _SLASH_SUBVALUES
         assert "/profile" in _SLASH_SUBVALUES
+        assert "/skills" in _SLASH_SUBVALUES
         call_values = [value for value, _desc in _SLASH_SUBVALUES["/calls"]]
         assert call_values == ["status", "on", "off"]
         profile_values = [value for value, _desc in _SLASH_SUBVALUES["/profile"]]
         assert profile_values == ["show", "set default"]
+        skill_values = [value for value, _desc in _SLASH_SUBVALUES["/skills"]]
+        assert skill_values == ["list", "show coder", "use coder", "clear"]
 
     def test_pick_slash_command_two_level(self, monkeypatch):
         picks = iter(["/calls", "on"])

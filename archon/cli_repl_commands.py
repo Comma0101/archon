@@ -9,6 +9,12 @@ from typing import Callable
 from archon.calls.store import list_call_job_summaries, load_call_job_summary
 from archon.control.jobs import format_job_summary, format_job_summary_list
 from archon.control.policy import resolve_profile
+from archon.control.skills import (
+    ensure_session_skill_profile,
+    get_builtin_skill,
+    is_session_skill_profile_name,
+    list_builtin_skills,
+)
 from archon.mcp import MCPClient
 from archon.workers.session_store import list_worker_job_summaries, load_worker_job_summary
 
@@ -33,15 +39,18 @@ def handle_status_command(agent, text: str) -> tuple[bool, str]:
     llm = getattr(agent, "llm", None)
     provider = str(getattr(llm, "provider", "") or getattr(getattr(cfg, "llm", None), "provider", "") or "").strip() or "unknown"
     model = str(getattr(llm, "model", "") or getattr(getattr(cfg, "llm", None), "model", "") or "").strip() or "unknown"
-    profile = str(getattr(agent, "policy_profile", "") or "").strip() or "default"
+    profile_display, _resolved_name, _profile, _profile_missing = _resolve_profile_diagnostics(agent, cfg)
     total_tokens = max(
         0,
         int(getattr(agent, "total_input_tokens", 0) or 0) + int(getattr(agent, "total_output_tokens", 0) or 0),
     )
     parts = [
         f"model={provider}/{model}",
-        f"profile={profile}",
+        f"profile={profile_display}",
     ]
+    active_skill = _active_skill_name(agent)
+    if active_skill:
+        parts.append(f"skill={active_skill}")
     orchestrator_mode = _describe_orchestrator_mode(cfg)
     if orchestrator_mode != "legacy":
         parts.append(f"orchestrator={orchestrator_mode}")
@@ -90,14 +99,75 @@ def handle_permissions_command(agent, text: str) -> tuple[bool, str]:
         return False, ""
 
     cfg = getattr(agent, "config", None)
-    profile_display, resolved_name, profile, profile_missing = _resolve_profile_diagnostics(agent, cfg)
+    profile_display, _resolved_name, profile, _profile_missing = _resolve_profile_diagnostics(agent, cfg)
     allowed_tools = sorted(str(item).strip() for item in profile.allowed_tools if str(item).strip())
+    skill_suffix = f" | skill={profile.skill_name}" if getattr(profile, "skill_name", "") else ""
     return True, (
         "Permissions: "
-        f"profile={profile_display if profile_missing else resolved_name} | "
+        f"profile={profile_display}{skill_suffix} | "
         f"mode={profile.max_mode} | "
         f"tools={len(allowed_tools)} [{','.join(allowed_tools)}]"
     )
+
+
+def handle_skills_command(agent, text: str) -> tuple[bool, str]:
+    """Handle `/skills` command (list/show/use/clear)."""
+    raw = (text or "").strip()
+    parts = raw.split()
+    if not parts or parts[0].lower() != "/skills":
+        return False, ""
+
+    sub = parts[1].strip().lower() if len(parts) > 1 else "list"
+    skills = list_builtin_skills()
+    available_names = [skill.name for skill in skills]
+
+    if sub in {"list", "show", "status"} and len(parts) == 1:
+        active_skill = _active_skill_name(agent)
+        active_label = active_skill or "none"
+        return True, f"Skills: active={active_label} | available={', '.join(available_names)}"
+
+    if sub == "list":
+        active_skill = _active_skill_name(agent)
+        active_label = active_skill or "none"
+        return True, f"Skills: active={active_label} | available={', '.join(available_names)}"
+
+    if sub == "show":
+        if len(parts) < 3 or not parts[2].strip():
+            return True, "Usage: /skills [list|show <name>|use <name>|clear]"
+        skill = get_builtin_skill(parts[2].strip())
+        if skill is None:
+            return True, f"Unknown skill '{parts[2].strip()}'. Available: {', '.join(available_names)}"
+        return True, (
+            f"Skill {skill.name}: "
+            f"mode={skill.max_mode} | "
+            f"provider={skill.preferred_provider or 'unspecified'} | "
+            f"model={skill.preferred_model or 'unspecified'} | "
+            f"tools={len(skill.allowed_tools)}"
+        )
+
+    if sub == "use":
+        if len(parts) < 3 or not parts[2].strip():
+            return True, "Usage: /skills [list|show <name>|use <name>|clear]"
+        skill = get_builtin_skill(parts[2].strip())
+        if skill is None:
+            return True, f"Unknown skill '{parts[2].strip()}'. Available: {', '.join(available_names)}"
+        cfg = getattr(agent, "config", None)
+        base_profile = _skill_base_profile_name(agent)
+        profile_name = ensure_session_skill_profile(
+            cfg,
+            skill_name=skill.name,
+            base_profile_name=base_profile,
+        )
+        _set_agent_policy_profile(agent, profile_name)
+        setattr(agent, "_skills_base_profile", base_profile)
+        setattr(agent, "_skills_active_name", skill.name)
+        return True, f"Skill set to: {skill.name}"
+
+    if sub == "clear":
+        _clear_session_skill(agent)
+        return True, "Skill cleared"
+
+    return True, "Usage: /skills [list|show <name>|use <name>|clear]"
 
 
 def handle_model_list_command(text: str, model_catalog: dict[str, tuple[str, ...]]) -> tuple[bool, str]:
@@ -324,13 +394,25 @@ def handle_profile_command(agent, text: str) -> tuple[bool, str]:
 
     sub = parts[1].strip().lower() if len(parts) > 1 else "show"
     cfg_profiles = getattr(getattr(agent, "config", None), "profiles", {}) or {}
-    available = [str(name) for name in cfg_profiles.keys()] if isinstance(cfg_profiles, dict) else []
+    available = (
+        [
+            str(name)
+            for name in cfg_profiles.keys()
+            if not is_session_skill_profile_name(str(name))
+        ]
+        if isinstance(cfg_profiles, dict)
+        else []
+    )
     if not available:
         available = ["default"]
 
     if sub in {"show", "status", "list"}:
-        active = str(getattr(agent, "policy_profile", "") or "").strip() or "default"
-        return True, f"Policy profile: {active} | available: {', '.join(available)}"
+        active, _resolved_name, profile, _profile_missing = _resolve_profile_diagnostics(
+            agent,
+            getattr(agent, "config", None),
+        )
+        skill_suffix = f" | skill: {profile.skill_name}" if getattr(profile, "skill_name", "") else ""
+        return True, f"Policy profile: {active}{skill_suffix} | available: {', '.join(available)}"
 
     if sub == "set":
         if len(parts) < 3 or not parts[2].strip():
@@ -338,6 +420,7 @@ def handle_profile_command(agent, text: str) -> tuple[bool, str]:
         profile_name = parts[2].strip()
         if profile_name not in available:
             return True, f"Unknown profile '{profile_name}'. Available: {', '.join(available)}"
+        _clear_session_skill(agent)
         setter = getattr(agent, "set_policy_profile", None)
         if callable(setter):
             setter(profile_name)
@@ -487,6 +570,47 @@ def _format_mcp_counts(cfg) -> str:
     return f"{enabled}/{len(servers)}"
 
 
+def _active_skill_name(agent) -> str:
+    cfg = getattr(agent, "config", None)
+    _display_name, _resolved_name, profile, _missing = _resolve_profile_diagnostics(agent, cfg)
+    skill_name = str(getattr(profile, "skill_name", "") or "").strip().lower()
+    return skill_name
+
+
+def _skill_base_profile_name(agent) -> str:
+    base_profile = str(getattr(agent, "_skills_base_profile", "") or "").strip()
+    if base_profile:
+        return base_profile
+    active_profile = str(getattr(agent, "policy_profile", "") or "").strip() or "default"
+    if is_session_skill_profile_name(active_profile):
+        return "default"
+    return active_profile
+
+
+def _set_agent_policy_profile(agent, profile_name: str) -> None:
+    setter = getattr(agent, "set_policy_profile", None)
+    if callable(setter):
+        setter(profile_name)
+    else:
+        setattr(agent, "policy_profile", profile_name)
+
+
+def _clear_session_skill(agent) -> None:
+    cfg = getattr(agent, "config", None)
+    profiles = getattr(cfg, "profiles", None)
+    current_profile = str(getattr(agent, "policy_profile", "") or "").strip()
+    base_profile = str(getattr(agent, "_skills_base_profile", "") or "").strip() or "default"
+    active_session_skill = is_session_skill_profile_name(current_profile)
+    if isinstance(profiles, dict) and active_session_skill:
+        profiles.pop(current_profile, None)
+    if active_session_skill or hasattr(agent, "_skills_base_profile"):
+        _set_agent_policy_profile(agent, base_profile)
+    if hasattr(agent, "_skills_base_profile"):
+        delattr(agent, "_skills_base_profile")
+    if hasattr(agent, "_skills_active_name"):
+        delattr(agent, "_skills_active_name")
+
+
 def _llm_runtime_ready(agent, cfg) -> bool:
     llm = getattr(agent, "llm", None)
     if str(getattr(llm, "api_key", "") or "").strip():
@@ -506,6 +630,10 @@ def _llm_runtime_ready(agent, cfg) -> bool:
 def _resolve_profile_diagnostics(agent, cfg):
     requested_name = str(getattr(agent, "policy_profile", "") or "").strip() or "default"
     profiles = getattr(cfg, "profiles", {}) or {}
+    if is_session_skill_profile_name(requested_name):
+        base_name = str(getattr(agent, "_skills_base_profile", "") or "").strip() or "default"
+        resolved_name, profile = resolve_profile(cfg, profile_name=requested_name)
+        return base_name, requested_name, profile, False
     profile_exists = isinstance(profiles, dict) and requested_name in profiles
     resolved_name, profile = resolve_profile(cfg, profile_name=requested_name)
     if profile_exists or requested_name == resolved_name:
@@ -542,7 +670,7 @@ def handle_repl_command(
     if raw.lower() in {"/help", "/?"}:
         return (
             "help",
-            "Commands: /help, /reset, /status, /cost, /doctor, /permissions, /model, /model-list, /model-set <provider>-<model>, /calls [status|on|off], /profile [show|set <name>], /mcp [servers|tools <server>], /jobs [limit], /job <id>, /paste\n"
+            "Commands: /help, /reset, /status, /cost, /doctor, /permissions, /skills [list|show <name>|use <name>|clear], /model, /model-list, /model-set <provider>-<model>, /calls [status|on|off], /profile [show|set <name>], /mcp [servers|tools <server>], /jobs [limit], /job <id>, /paste\n"
             "Multiline paste: paste normally (bracketed paste) or use /paste fallback, end with /end.",
         )
     handled, msg = handle_status_command(agent, raw)
@@ -557,6 +685,9 @@ def handle_repl_command(
     handled, msg = handle_permissions_command(agent, raw)
     if handled:
         return "permissions", msg
+    handled, msg = handle_skills_command(agent, raw)
+    if handled:
+        return "skills", msg
     handled, msg = handle_mcp_command(agent, raw)
     if handled:
         return "mcp", msg
