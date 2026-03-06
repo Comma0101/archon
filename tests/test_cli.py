@@ -23,6 +23,8 @@ from archon.cli import (
     _pick_slash_command,
     _SLASH_COMMANDS,
 )
+from archon.cli_interactive_commands import chat_cmd as _chat_cmd
+from archon.control.hooks import HookBus
 
 
 class TestCliFormatting:
@@ -383,6 +385,154 @@ class TestCliCommands:
         assert "job_kind: worker_session" in msg
         assert "job_status: ok" in msg
         assert "job_summary: Looks good" in msg
+
+
+class _FakeReadline:
+    def set_completer(self, _fn):
+        return None
+
+    def set_completer_delims(self, _value):
+        return None
+
+    def parse_and_bind(self, _value):
+        return None
+
+
+class _FakeSpinner:
+    def start(self, _label="thinking"):
+        return None
+
+    def stop(self):
+        return None
+
+
+class _RouteEventAgent:
+    def __init__(self, events_by_message):
+        self.events_by_message = events_by_message
+        self.hooks = HookBus()
+        self.config = SimpleNamespace(
+            telegram=SimpleNamespace(
+                enabled=False,
+                connect_on_chat=False,
+                allowed_user_ids=[],
+                poll_timeout_sec=30,
+            ),
+            llm=SimpleNamespace(model="test-model"),
+        )
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
+        self.log_label = ""
+        self._turn_no = 0
+        self.on_thinking = None
+        self.on_tool_call = None
+
+    def run(self, text):
+        self._turn_no += 1
+        turn_id = f"t{self._turn_no:03d}"
+        for lane, reason in self.events_by_message.get(text, []):
+            self.hooks.emit_kind(
+                "orchestrator.route",
+                task_id=turn_id,
+                payload={
+                    "turn_id": turn_id,
+                    "lane": lane,
+                    "reason": reason,
+                },
+            )
+        self.total_input_tokens += 10
+        self.total_output_tokens += 2
+        return f"ok:{text}"
+
+    def reset(self):
+        return None
+
+
+def _run_chat_session(agent, inputs):
+    outputs = []
+    input_iter = iter(inputs)
+    session_ids = iter(["sess-1", "sess-2", "sess-3"])
+    tick = {"value": 0}
+
+    def fake_input(_prompt):
+        value = next(input_iter)
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    def fake_handle_repl_command(_agent, text):
+        if text == "/reset":
+            return "reset", ""
+        return None, ""
+
+    def fake_time():
+        tick["value"] += 1
+        return float(tick["value"])
+
+    _chat_cmd(
+        make_agent_fn=lambda: agent,
+        make_telegram_adapter_fn=lambda _cfg: None,
+        new_session_id_fn=lambda: next(session_ids),
+        save_exchange_fn=lambda *_args: None,
+        slash_completer_fn=lambda *_args: None,
+        pick_slash_command_fn=lambda: None,
+        is_bracketed_paste_start_fn=lambda _text: False,
+        collect_bracketed_paste_fn=lambda *_args, **_kwargs: "",
+        is_paste_command_fn=lambda _text: False,
+        collect_paste_message_fn=lambda *_args, **_kwargs: "",
+        handle_repl_command_fn=fake_handle_repl_command,
+        is_model_runtime_error_fn=lambda _err: False,
+        format_session_summary_fn=_format_session_summary,
+        format_chat_response_fn=lambda text: text,
+        format_turn_stats_fn=_format_turn_stats,
+        make_readline_prompt_fn=lambda label, _ansi: label,
+        spinner_cls=_FakeSpinner,
+        ansi_prompt_user="",
+        ansi_error="",
+        ansi_reset="",
+        click_echo_fn=lambda text="", err=False: outputs.append((text, err)),
+        input_fn=fake_input,
+        readline_module=_FakeReadline(),
+        time_time_fn=fake_time,
+        version="test",
+    )
+    return outputs
+
+
+class TestCliRouteState:
+    @staticmethod
+    def _plain_outputs(outputs):
+        return [re.sub(r"\x1b\[[0-9;]*m", "", text) for text, _err in outputs]
+
+    def test_chat_session_counts_route_once_per_turn(self):
+        agent = _RouteEventAgent(
+            {
+                "hello": [
+                    ("job", "broad_scope_request"),
+                    ("job", "broad_scope_request"),
+                ]
+            }
+        )
+
+        outputs = self._plain_outputs(_run_chat_session(agent, ["hello", "quit"]))
+        summary = next(text for text in outputs if text.startswith("Session:") and "turns" in text)
+
+        assert "routes:" in summary
+        assert "job=1" in summary
+        assert "job=2" not in summary
+
+    def test_chat_reset_clears_route_counts_for_new_session(self):
+        agent = _RouteEventAgent(
+            {
+                "hello": [("fast", "simple_chat")],
+                "again": [("job", "broad_scope_request")],
+            }
+        )
+
+        outputs = self._plain_outputs(_run_chat_session(agent, ["hello", "/reset", "again", "quit"]))
+        summary = next(text for text in outputs if text.startswith("Session:") and "turns" in text)
+
+        assert "job=1" in summary
+        assert "fast=1" not in summary
 
 
 class TestSlashCompleter:

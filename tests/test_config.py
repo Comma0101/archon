@@ -147,6 +147,28 @@ def test_load_config_mcp_read_only_servers(monkeypatch, tmp_path):
     assert server.command == ["python", "server.py"]
 
 
+def test_load_config_mcp_server_names_are_normalized_lowercase(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config" / "archon"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        "\n".join(
+            [
+                "[mcp.servers.Docs]",
+                "enabled = true",
+                'mode = "read_only"',
+                'transport = "stdio"',
+                'command = ["python", "server.py"]',
+            ]
+        )
+    )
+    monkeypatch.setattr("archon.config.CONFIG_DIR", config_dir)
+
+    cfg = load_config()
+
+    assert "docs" in cfg.mcp.servers
+    assert "Docs" not in cfg.mcp.servers
+
+
 def test_builtin_skill_registry_contains_expected_skills():
     assert DEFAULT_SKILL_NAME == "general"
     assert set(BUILTIN_SKILLS.keys()) == {

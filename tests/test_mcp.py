@@ -74,3 +74,27 @@ def test_mcp_client_rejects_non_read_only_servers():
 
     assert result["error"].startswith("Error:")
     assert "read_only" in result["error"]
+
+
+def test_mcp_client_normalizes_server_name_lookup():
+    client = MCPClient(
+        MCPConfig(
+            servers={
+                "Docs": MCPServerConfig(
+                    enabled=True,
+                    mode="read_only",
+                    transport="stdio",
+                    command=["python", "server.py"],
+                )
+            }
+        )
+    )
+
+    result = client.invoke(
+        "docs",
+        {"prompt": "hello"},
+        transport_fn=lambda _server, _payload: "ok",
+    )
+
+    assert result["server"] == "docs"
+    assert result["content"] == "ok"

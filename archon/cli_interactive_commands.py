@@ -52,6 +52,7 @@ def chat_cmd(
     spinner = spinner_cls()
     route_state = {"lane": "", "reason": ""}
     route_counts: dict[str, int] = {}
+    counted_route_turn_ids: set[str] = set()
 
     def on_thinking():
         spinner.start("thinking")
@@ -61,12 +62,14 @@ def chat_cmd(
 
     def on_route(event: HookEvent):
         payload = event.payload or {}
+        turn_id = str(payload.get("turn_id", "")).strip()
         lane = str(payload.get("lane", "")).strip().lower()
         reason = str(payload.get("reason", "")).strip()
         route_state["lane"] = lane
         route_state["reason"] = reason
-        if lane:
+        if lane and turn_id and turn_id not in counted_route_turn_ids:
             route_counts[lane] = route_counts.get(lane, 0) + 1
+            counted_route_turn_ids.add(turn_id)
         if lane and lane != "fast":
             spinner.start(f"route {lane}")
 
@@ -153,6 +156,8 @@ def chat_cmd(
                     agent.reset()
                     session_id = new_session_id_fn()
                     turn_count = 0
+                    route_counts.clear()
+                    counted_route_turn_ids.clear()
                     click_echo_fn(f"History cleared. New session: {session_id}")
                     continue
                 if action in {"help", "model", "calls", "profile", "jobs", "job"}:

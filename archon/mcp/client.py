@@ -13,6 +13,11 @@ TransportFn = Callable[[MCPServerConfig, dict], object]
 class MCPClient:
     def __init__(self, config: MCPConfig):
         self.config = config
+        self._servers = {
+            str(name).strip().lower(): server
+            for name, server in getattr(config, "servers", {}).items()
+            if str(name).strip()
+        }
 
     def invoke(
         self,
@@ -21,8 +26,8 @@ class MCPClient:
         *,
         transport_fn: TransportFn,
     ) -> dict:
-        server_key = str(server_name or "").strip()
-        server = self.config.servers.get(server_key)
+        server_key = str(server_name or "").strip().lower()
+        server = self._servers.get(server_key)
         if server is None or not server.enabled:
             return {"error": f"Error: MCP server '{server_key}' is not available"}
         if str(server.mode or "").strip().lower() != "read_only":

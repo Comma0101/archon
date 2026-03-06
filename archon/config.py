@@ -319,7 +319,10 @@ def load_config() -> Config:
                 if not isinstance(server_name, str) or not isinstance(server_value, dict):
                     continue
                 command = server_value.get("command", [])
-                parsed_servers[server_name.strip()] = MCPServerConfig(
+                normalized_name = server_name.strip().lower()
+                if not normalized_name:
+                    continue
+                parsed_servers[normalized_name] = MCPServerConfig(
                     enabled=bool(server_value.get("enabled", False)),
                     mode=str(server_value.get("mode", "read_only")).strip().lower() or "read_only",
                     transport=str(server_value.get("transport", "stdio")).strip().lower() or "stdio",
