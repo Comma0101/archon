@@ -1,9 +1,10 @@
 """Tests for call mission Archon tools (Phase 1)."""
 
 import json
+from datetime import datetime, timezone
 
 from archon.calls.models import CallMission
-from archon.calls.store import call_mission_path, save_call_mission
+from archon.calls.store import call_mission_path, load_call_job_summary, save_call_mission
 from archon.config import Config
 from archon.safety import Level
 from archon.tools import ToolRegistry
@@ -69,6 +70,67 @@ class TestCallMissionTools:
 
         assert "call_session_id: call_1" in out
         assert "status: queued" in out
+
+    def test_load_call_job_summary_normalizes_mission(self, monkeypatch):
+        mission = CallMission(
+            call_session_id="call_job_1",
+            goal="Call and confirm store hours",
+            target_number="+15551112222",
+            status="completed",
+            updated_at=1708732810.0,
+            evaluation_summary="Goal achieved clearly.",
+        )
+        monkeypatch.setattr(
+            "archon.calls.store.load_call_mission",
+            lambda sid: mission if sid == "call_job_1" else None,
+        )
+
+        job = load_call_job_summary("call_job_1")
+
+        assert job is not None
+        assert job.job_id == "call:call_job_1"
+        assert job.kind == "call_mission"
+        assert job.status == "completed"
+        assert job.summary == "Goal achieved clearly."
+        assert job.last_update_at == datetime.fromtimestamp(
+            1708732810.0, tz=timezone.utc
+        ).isoformat().replace("+00:00", "Z")
+
+    def test_call_mission_status_includes_job_summary(self, monkeypatch):
+        monkeypatch.setattr(
+            "archon.tooling.call_mission_tools.call_runner.call_mission_status",
+            lambda call_session_id: {
+                "ok": True,
+                "call_session_id": call_session_id,
+                "status": "queued",
+                "goal": "Call me",
+            },
+        )
+        monkeypatch.setattr(
+            "archon.tooling.call_mission_tools.load_call_job_summary",
+            lambda sid: type(
+                "JobSummary",
+                (),
+                {
+                    "to_dict": lambda self: {
+                        "job_id": "call:call_job_2",
+                        "kind": "call_mission",
+                        "status": "queued",
+                        "summary": "Call me",
+                        "last_update_at": "2026-02-24T00:00:10Z",
+                    }
+                },
+            )(),
+        )
+
+        registry = make_registry()
+        out = registry.execute("call_mission_status", {"call_session_id": "call_job_2"})
+
+        assert "job_id: call:call_job_2" in out
+        assert "job_kind: call_mission" in out
+        assert "job_status: queued" in out
+        assert "job_summary: Call me" in out
+        assert "job_last_update_at: 2026-02-24T00:00:10Z" in out
 
     def test_call_mission_status_runner_surfaces_and_persists_realtime_fields(self, monkeypatch, tmp_path):
         monkeypatch.setattr(

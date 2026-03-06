@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 
 from archon.calls import runner as call_runner
+from archon.calls.store import list_call_job_summaries, load_call_job_summary
+from archon.control.jobs import format_job_summary, format_job_summary_list, job_summary_from_dict
 from archon.safety import Level
 
 
@@ -56,7 +58,22 @@ def _format_result(payload: dict) -> str:
             lines.append(f"voice_service_status: {voice_service.get('status')}")
         if voice_service.get("base_url"):
             lines.append(f"voice_service_base_url: {voice_service.get('base_url')}")
+    job = payload.get("job")
+    if isinstance(job, dict):
+        lines.extend(["", "job:", format_job_summary_dict(job)])
+    jobs = payload.get("jobs")
+    if isinstance(jobs, list) and jobs:
+        lines.extend(["", "job_summaries:", format_job_summary_list_dicts(jobs)])
     return "\n".join(lines) if lines else str(payload)
+
+
+def format_job_summary_dict(job: dict) -> str:
+    return format_job_summary(job_summary_from_dict(job))
+
+
+def format_job_summary_list_dicts(jobs: list[dict]) -> str:
+    normalized = [job_summary_from_dict(job) for job in jobs if isinstance(job, dict)]
+    return format_job_summary_list(normalized)
 
 
 def register_call_mission_tools(registry) -> None:
@@ -101,7 +118,12 @@ def register_call_mission_tools(registry) -> None:
     )
 
     def call_mission_status(call_session_id: str) -> str:
-        return _format_result(call_runner.call_mission_status(call_session_id))
+        payload = call_runner.call_mission_status(call_session_id)
+        if isinstance(payload, dict) and payload.get("ok"):
+            job = load_call_job_summary(str(payload.get("call_session_id", "")))
+            if job is not None:
+                payload = {**payload, "job": job.to_dict()}
+        return _format_result(payload)
 
     registry.register(
         "call_mission_status",
@@ -119,7 +141,13 @@ def register_call_mission_tools(registry) -> None:
     )
 
     def call_mission_list(limit: int = 20) -> str:
-        return _format_result(call_runner.list_call_missions(limit=int(limit)))
+        payload = call_runner.list_call_missions(limit=int(limit))
+        if isinstance(payload, dict) and payload.get("ok"):
+            payload = {
+                **payload,
+                "jobs": [job.to_dict() for job in list_call_job_summaries(limit=int(limit))],
+            }
+        return _format_result(payload)
 
     registry.register(
         "call_mission_list",

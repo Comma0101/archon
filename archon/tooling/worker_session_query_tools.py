@@ -1,5 +1,7 @@
 """Worker session query/status tool registrations."""
 
+from archon.control.jobs import format_job_summary, format_job_summary_list, summarize_worker_session
+
 
 def register_worker_session_query_tools(registry, ns) -> None:
     _truncate = lambda *a, **k: ns._truncate(*a, **k)
@@ -56,6 +58,7 @@ def register_worker_session_query_tools(registry, ns) -> None:
                 for event in events:
                     preview = _truncate(str(event.payload), 300).replace("\n", " ")
                     lines.append(f"- {event.kind}: {preview}")
+        lines.extend(["", "job:", format_job_summary(summarize_worker_session(record))])
         return "\n".join(lines)
 
     registry.register(
@@ -86,7 +89,16 @@ def register_worker_session_query_tools(registry, ns) -> None:
     # worker_list
     def worker_list(limit: int = 10) -> str:
         records = list_worker_sessions(limit=max(1, min(int(limit), 100)))
-        return format_worker_session_list(records)
+        if not records:
+            return format_worker_session_list(records)
+        return "\n".join(
+            [
+                format_worker_session_list(records),
+                "",
+                "job_summaries:",
+                format_job_summary_list([summarize_worker_session(record) for record in records]),
+            ]
+        )
 
     registry.register(
         "worker_list",
@@ -178,4 +190,3 @@ def register_worker_session_query_tools(registry, ns) -> None:
         },
         worker_poll,
     )
-

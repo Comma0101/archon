@@ -4,6 +4,7 @@ import os
 import tempfile
 from pathlib import Path
 
+from archon.control.jobs import job_summary_from_worker_record
 from archon.config import Config
 from archon.execution.runner import run_task
 from archon.news.models import NewsDigest
@@ -11,7 +12,10 @@ from archon.news.models import NewsRunResult
 from archon.tools import ToolRegistry
 from archon.workers.base import WorkerEvent, WorkerResult, WorkerTask
 from archon.workers.runtime import ActiveWorkerRun
-from archon.workers.session_store import WorkerSessionRecord
+from archon.workers.session_store import (
+    WorkerSessionRecord,
+    load_worker_job_summary,
+)
 
 
 def make_registry():
@@ -553,6 +557,39 @@ class TestDelegateCodeTask:
         assert "selected_worker: codex" in result
         assert "effective_worker: codex" in result
         assert "Final review message" in result
+        assert "job_id: worker:sess-1" in result
+        assert "job_kind: worker_session" in result
+        assert "job_status: ok" in result
+        assert "job_summary: Looks good" in result
+        assert "job_last_update_at: 2026-02-24T00:00:10Z" in result
+
+    def test_worker_job_summary_normalizes_record_fields(self):
+        record = WorkerSessionRecord(
+            session_id="sess-job",
+            created_at="2026-02-24T00:00:00Z",
+            updated_at="2026-02-24T00:00:10Z",
+            completed_at="2026-02-24T00:00:10Z",
+            requested_worker="auto",
+            selected_worker="codex",
+            mode="review",
+            status="ok",
+            repo_path="/tmp/repo",
+            task="Review code",
+            constraints="",
+            timeout_sec=900,
+            summary="Looks good",
+            exit_code=0,
+            error="",
+            event_count=1,
+        )
+
+        job = job_summary_from_worker_record(record)
+
+        assert job.job_id == "worker:sess-job"
+        assert job.kind == "worker_session"
+        assert job.status == "ok"
+        assert job.summary == "Looks good"
+        assert job.last_update_at == "2026-02-24T00:00:10Z"
 
     def test_worker_status_shows_effective_worker_when_selected_blank(self, monkeypatch):
         reg = make_registry()
@@ -583,6 +620,71 @@ class TestDelegateCodeTask:
         result = reg.execute("worker_status", {"session_id": "sess-running"})
         assert "selected_worker: " in result
         assert "effective_worker: opencode" in result
+
+    def test_load_worker_job_summary_normalizes_session_record(self, monkeypatch):
+        record = WorkerSessionRecord(
+            session_id="sess-job",
+            created_at="2026-02-24T00:00:00Z",
+            updated_at="2026-02-24T00:00:10Z",
+            completed_at="2026-02-24T00:00:10Z",
+            requested_worker="auto",
+            selected_worker="codex",
+            mode="review",
+            status="ok",
+            repo_path="/tmp/repo",
+            task="Review code",
+            constraints="",
+            timeout_sec=900,
+            summary="Looks good",
+            exit_code=0,
+            error="",
+        )
+        monkeypatch.setattr(
+            "archon.workers.session_store.load_worker_session",
+            lambda sid: record if sid == "sess-job" else None,
+        )
+
+        job = load_worker_job_summary("sess-job")
+
+        assert job is not None
+        assert job.job_id == "worker:sess-job"
+        assert job.kind == "worker_session"
+        assert job.status == "ok"
+        assert job.summary == "Looks good"
+        assert job.last_update_at == "2026-02-24T00:00:10Z"
+
+    def test_worker_status_includes_job_summary_block(self, monkeypatch):
+        reg = make_registry()
+        record = WorkerSessionRecord(
+            session_id="sess-job",
+            created_at="2026-02-24T00:00:00Z",
+            updated_at="2026-02-24T00:00:10Z",
+            completed_at="2026-02-24T00:00:10Z",
+            requested_worker="auto",
+            selected_worker="codex",
+            mode="review",
+            status="ok",
+            repo_path="/tmp/repo",
+            task="Review code",
+            constraints="",
+            timeout_sec=900,
+            summary="Looks good",
+            exit_code=0,
+            error="",
+            event_count=1,
+        )
+        monkeypatch.setattr("archon.tooling.worker_tools.load_worker_session", lambda sid: record if sid == "sess-job" else None)
+        monkeypatch.setattr("archon.tooling.worker_tools.load_worker_result", lambda sid: None)
+        monkeypatch.setattr("archon.tooling.worker_tools.load_worker_events", lambda sid, limit=25: [])
+        monkeypatch.setattr("archon.tooling.worker_tools.list_worker_approvals", lambda sid, pending_only=True: [])
+
+        result = reg.execute("worker_status", {"session_id": "sess-job"})
+
+        assert "job_id: worker:sess-job" in result
+        assert "job_kind: worker_session" in result
+        assert "job_status: ok" in result
+        assert "job_summary: Looks good" in result
+        assert "job_last_update_at: 2026-02-24T00:00:10Z" in result
 
     def test_worker_list_tool_formats_records(self, monkeypatch):
         reg = make_registry()

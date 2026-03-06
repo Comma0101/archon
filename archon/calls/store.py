@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from archon.calls.models import CallMission
+from archon.control.jobs import JobSummary, summarize_call_mission
 from archon.config import CALLS_EVENTS_DIR, CALLS_MISSIONS_DIR
 
 
@@ -111,6 +112,13 @@ def load_call_mission(call_session_id: str) -> CallMission | None:
     return CallMission.from_dict(data)
 
 
+def load_call_job_summary(call_session_id: str) -> JobSummary | None:
+    mission = load_call_mission(call_session_id)
+    if mission is None:
+        return None
+    return summarize_call_mission(mission)
+
+
 def list_call_missions(limit: int = 20) -> list[CallMission]:
     _ensure_dirs()
     missions: list[CallMission] = []
@@ -121,6 +129,10 @@ def list_call_missions(limit: int = 20) -> list[CallMission]:
             continue
         missions.append(CallMission.from_dict(data))
     return missions
+
+
+def list_call_job_summaries(limit: int = 20) -> list[JobSummary]:
+    return [summarize_call_mission(mission) for mission in list_call_missions(limit=limit)]
 
 
 def append_call_event(call_session_id: str, event: dict) -> dict:

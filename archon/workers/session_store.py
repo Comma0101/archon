@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from archon.control.jobs import JobSummary, summarize_worker_session
 from archon.config import STATE_DIR
 from archon.workers.base import WorkerEvent, WorkerResult, WorkerTask
 from archon.workers.session_store_format import (
@@ -374,6 +375,13 @@ def load_worker_result(session_id: str) -> WorkerResult | None:
         return WorkerResult.from_dict(result_data)
 
 
+def load_worker_job_summary(session_id: str) -> JobSummary | None:
+    record = load_worker_session(session_id)
+    if record is None:
+        return None
+    return summarize_worker_session(record)
+
+
 def load_worker_task(session_id: str) -> WorkerTask | None:
     with _STORE_LOCK:
         path = WORKER_SESSIONS_DIR / f"{session_id}.json"
@@ -444,6 +452,10 @@ def list_worker_sessions(limit: int = 20) -> list[WorkerSessionRecord]:
                     continue
         records.sort(key=lambda r: (r.updated_at, r.session_id), reverse=True)
         return records[: max(1, int(limit))]
+
+
+def list_worker_job_summaries(limit: int = 20) -> list[JobSummary]:
+    return [summarize_worker_session(record) for record in list_worker_sessions(limit=limit)]
 
 
 def _write_session_record(
