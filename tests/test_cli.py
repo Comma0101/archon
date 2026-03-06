@@ -315,6 +315,12 @@ class TestCliCommands:
         assert action == "approvals"
         assert msg == "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0"
 
+    def test_handle_repl_command_approvals_status_alias_reports_default_state(self):
+        action, msg = _handle_repl_command(SimpleNamespace(), "/approvals status")
+
+        assert action == "approvals"
+        assert msg == "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0"
+
     def test_handle_repl_command_approvals_toggle_reports_requested_mode_without_state(self):
         action, msg = _handle_repl_command(SimpleNamespace(), "/approvals on")
 
@@ -1246,6 +1252,7 @@ class TestCliLocalInteractiveCommands:
             ("/doctor", "Doctor: llm=ok | profile=ok | calls=on | mcp=1/2"),
             ("/permissions", "Permissions: profile=safe | mode=review | tools=2 [read_file,shell]"),
             ("/approvals", "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0"),
+            ("/approvals status", "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0"),
             ("/approve", "No pending dangerous request to approve."),
             ("/deny", "No pending dangerous request to deny."),
             ("/approve_next", "Approve-next unavailable: session approval state not wired."),

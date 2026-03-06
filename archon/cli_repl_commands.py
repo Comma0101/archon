@@ -474,7 +474,7 @@ def handle_approvals_command(agent, text: str) -> tuple[bool, str]:
 
     if len(parts) == 1:
         sub = "status"
-    elif len(parts) == 2 and parts[1].strip().lower() in {"on", "off"}:
+    elif len(parts) == 2 and parts[1].strip().lower() in {"status", "on", "off"}:
         sub = parts[1].strip().lower()
     else:
         return True, "Usage: /approvals [on|off]"
