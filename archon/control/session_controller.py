@@ -2,9 +2,35 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+
+_DEEP_SCOPE_SCOPE_PATTERNS = (
+    re.compile(r"\brepo\b"),
+    re.compile(r"\brepository\b"),
+    re.compile(r"\bproject\b"),
+    re.compile(r"\bcodebase\b"),
+    re.compile(r"\bfolder\b"),
+    re.compile(r"\bdirectory\b"),
+)
+_DEEP_SCOPE_BROAD_PATTERNS = (
+    re.compile(r"\bdeep\b"),
+    re.compile(r"\bcomprehensive\b"),
+    re.compile(r"\bthorough\b"),
+    re.compile(r"\bentire\b"),
+    re.compile(r"\bwhole\b"),
+    re.compile(r"\bfull\b"),
+    re.compile(r"\bend[- ]to[- ]end\b"),
+)
+_DEEP_SCOPE_UNDERSTAND_PATTERNS = (
+    re.compile(r"\bunderstand\b"),
+    re.compile(r"\bmap out\b"),
+    re.compile(r"\blearn\b"),
+    re.compile(r"\breview architecture\b"),
+    re.compile(r"\barchitecture review\b"),
+)
 
 
 def runtime_quiet_seconds(active_run: Any) -> int | None:
@@ -50,42 +76,21 @@ def choose_delegate_execution_mode(
     if mode_value in {"implement", "debug"}:
         return "background", "mode_requires_session"
 
-    task_l = (task or "").lower()
-    scope_keywords = (
-        "repo",
-        "repository",
-        "project",
-        "codebase",
-        "folder",
-        "directory",
-    )
-    broad_keywords = (
-        "deep",
-        "comprehensive",
-        "thorough",
-        "entire",
-        "whole",
-        "full",
-        "end-to-end",
-        "end to end",
-    )
-    understand_keywords = (
-        "understand",
-        "map out",
-        "learn",
-        "review architecture",
-        "architecture review",
-    )
-    has_scope = any(k in task_l for k in scope_keywords)
-    has_broad = any(k in task_l for k in broad_keywords)
-    has_understand = any(k in task_l for k in understand_keywords)
-    if has_scope and (has_broad or has_understand):
+    if is_broad_scope_request(task):
         return "background", "deep_scope_request"
 
     if int(timeout_sec) >= 1200 and mode_value in {"review", "analyze"}:
         return "background", "long_timeout_review"
 
     return "oneshot", "auto_small_task"
+
+
+def is_broad_scope_request(task: str) -> bool:
+    task_l = (task or "").lower()
+    has_scope = _matches_any_pattern(task_l, _DEEP_SCOPE_SCOPE_PATTERNS)
+    has_broad = _matches_any_pattern(task_l, _DEEP_SCOPE_BROAD_PATTERNS)
+    has_understand = _matches_any_pattern(task_l, _DEEP_SCOPE_UNDERSTAND_PATTERNS)
+    return has_scope and (has_broad or has_understand)
 
 
 def detect_delegate_continue_target_worker(
@@ -191,3 +196,7 @@ def find_latest_worker_session_for_repo(
             continue
         return record
     return None
+
+
+def _matches_any_pattern(text: str, patterns: tuple[re.Pattern[str], ...]) -> bool:
+    return any(pattern.search(text) for pattern in patterns)

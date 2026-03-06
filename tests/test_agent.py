@@ -35,13 +35,20 @@ def make_agent(responses: list[LLMResponse], stream_chunks: list | None = None) 
     return agent
 
 
-def expected_route_payload(*, turn_id: str, mode: str, path: str) -> dict:
+def expected_route_payload(
+    *,
+    turn_id: str,
+    mode: str,
+    path: str,
+    lane: str = "operator",
+    reason: str = "static_default_until_classifier",
+) -> dict:
     return {
         "turn_id": turn_id,
         "mode": mode,
         "path": path,
-        "lane": "operator",
-        "reason": "static_default_until_classifier",
+        "lane": lane,
+        "reason": reason,
         "surface": "terminal",
         "skill": "default",
     }
@@ -621,7 +628,45 @@ class TestAgentLoop:
         assert fallback_events[0].payload["fallback"] == "legacy"
         assert fallback_events[0].payload["error_type"] == "RuntimeError"
 
-    def test_orchestrator_hybrid_route_hook_includes_lane_metadata(self, monkeypatch):
+    @pytest.mark.parametrize(
+        ("user_message", "expected_lane", "expected_reason"),
+        [
+            ("hi there", "fast", "simple_chat"),
+            ("show me git status", "operator", "bounded_file_or_status_request"),
+            (
+                "do a deep review of the whole repo",
+                "job",
+                "broad_or_delegated_request",
+            ),
+            (
+                "can you try delegating this task",
+                "job",
+                "broad_or_delegated_request",
+            ),
+            (
+                "please hand this off",
+                "job",
+                "broad_or_delegated_request",
+            ),
+            (
+                "run this in background",
+                "job",
+                "broad_or_delegated_request",
+            ),
+            (
+                "do a deep review of the whole repo and delegate anything that needs follow-up",
+                "job",
+                "broad_or_delegated_request",
+            ),
+        ],
+    )
+    def test_orchestrator_hybrid_route_hook_classifies_lane(
+        self,
+        monkeypatch,
+        user_message,
+        expected_lane,
+        expected_reason,
+    ):
         responses = [
             LLMResponse(
                 text="ok",
@@ -639,7 +684,7 @@ class TestAgentLoop:
         route_events = []
         agent.hooks.register("orchestrator.route", route_events.append)
 
-        result = agent.run("hybrid route metadata")
+        result = agent.run(user_message)
 
         assert result == "ok"
         assert len(route_events) == 1
@@ -647,6 +692,81 @@ class TestAgentLoop:
             turn_id="t001",
             mode="hybrid",
             path="hybrid_planner_v0",
+            lane=expected_lane,
+            reason=expected_reason,
+        )
+
+    @pytest.mark.parametrize(
+        "user_message",
+        [
+            "my skillset needs work",
+            "this is difficult to explain",
+            "show the report summary",
+            "what is your relationship status",
+        ],
+    )
+    def test_orchestrator_hybrid_route_avoids_operator_false_positives(
+        self,
+        monkeypatch,
+        user_message,
+    ):
+        responses = [
+            LLMResponse(
+                text="ok",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "ok"}],
+                input_tokens=1,
+                output_tokens=1,
+            )
+        ]
+        agent = make_agent(responses)
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        agent.config.orchestrator.enabled = True
+        agent.config.orchestrator.mode = "hybrid"
+        route_events = []
+        agent.hooks.register("orchestrator.route", route_events.append)
+
+        result = agent.run(user_message)
+
+        assert result == "ok"
+        assert len(route_events) == 1
+        assert route_events[0].payload == expected_route_payload(
+            turn_id="t001",
+            mode="hybrid",
+            path="hybrid_planner_v0",
+            lane="fast",
+            reason="simple_chat",
+        )
+
+    def test_orchestrator_hybrid_route_ignores_negated_delegate_phrase(self, monkeypatch):
+        responses = [
+            LLMResponse(
+                text="ok",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "ok"}],
+                input_tokens=1,
+                output_tokens=1,
+            )
+        ]
+        agent = make_agent(responses)
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        agent.config.orchestrator.enabled = True
+        agent.config.orchestrator.mode = "hybrid"
+        route_events = []
+        agent.hooks.register("orchestrator.route", route_events.append)
+
+        result = agent.run("I don't want to delegate this, just answer directly.")
+
+        assert result == "ok"
+        assert len(route_events) == 1
+        assert route_events[0].payload == expected_route_payload(
+            turn_id="t001",
+            mode="hybrid",
+            path="hybrid_planner_v0",
+            lane="fast",
+            reason="simple_chat",
         )
 
     def test_orchestrator_hybrid_stream_route_hook_includes_lane_metadata(self, monkeypatch):
@@ -666,7 +786,7 @@ class TestAgentLoop:
         route_events = []
         agent.hooks.register("orchestrator.route", route_events.append)
 
-        chunks = list(agent.run_stream("hybrid stream route metadata"))
+        chunks = list(agent.run_stream("hi there"))
 
         assert chunks == ["ok"]
         assert len(route_events) == 1
@@ -674,6 +794,8 @@ class TestAgentLoop:
             turn_id="t001",
             mode="hybrid",
             path="hybrid_stream_planner_v0",
+            lane="fast",
+            reason="simple_chat",
         )
 
     def test_orchestrator_legacy_route_hook_includes_default_metadata(self, monkeypatch):
@@ -692,7 +814,7 @@ class TestAgentLoop:
         route_events = []
         agent.hooks.register("orchestrator.route", route_events.append)
 
-        result = agent.run("legacy route metadata")
+        result = agent.run("show me git status")
 
         assert result == "ok"
         assert len(route_events) == 1
@@ -700,6 +822,8 @@ class TestAgentLoop:
             turn_id="t001",
             mode="legacy",
             path="legacy_direct",
+            lane="operator",
+            reason="bounded_file_or_status_request",
         )
 
     def test_route_payload_ignores_future_route_contract_fields(self, monkeypatch):
@@ -720,12 +844,16 @@ class TestAgentLoop:
             turn_id="t001",
             mode="hybrid",
             path="hybrid_planner_v0",
+            lane="operator",
+            reason="bounded_file_or_status_request",
         )
 
         assert payload == expected_route_payload(
             turn_id="t001",
             mode="hybrid",
             path="hybrid_planner_v0",
+            lane="operator",
+            reason="bounded_file_or_status_request",
         )
 
     def test_iteration_limit(self):

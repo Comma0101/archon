@@ -96,6 +96,7 @@ class Agent:
             response = orchestrate_response(
                 mode=self._orchestrator_mode(),
                 turn_id=turn_id,
+                user_message=user_message,
                 run_legacy=lambda: _chat_with_retry(
                     self.llm,
                     turn_system_prompt,
@@ -226,6 +227,7 @@ class Agent:
             collected_text, response = orchestrate_stream_response(
                 mode=self._orchestrator_mode(),
                 turn_id=turn_id,
+                user_message=user_message,
                 run_legacy_stream=lambda: _chat_stream_collect_with_retry(
                     self.llm,
                     turn_system_prompt,
