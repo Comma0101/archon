@@ -3,7 +3,9 @@
 import re
 from types import SimpleNamespace
 
-from archon.config import Config, MCPServerConfig
+import pytest
+
+from archon.config import Config, MCPServerConfig, ProfileConfig
 from archon.cli import _format_chat_response
 from archon.cli import _is_paste_command, _collect_paste_message
 from archon.cli import (
@@ -136,6 +138,32 @@ class TestCliPasteMode:
 
 
 class TestCliCommands:
+    @staticmethod
+    def _make_local_command_agent():
+        cfg = Config()
+        cfg.llm.provider = "openai"
+        cfg.llm.model = "gpt-5-mini"
+        cfg.calls.enabled = True
+        cfg.mcp.servers = {
+            "docs": MCPServerConfig(enabled=True, mode="read_only", transport="stdio"),
+            "build": MCPServerConfig(enabled=False, mode="read_write", transport="stdio"),
+        }
+        cfg.profiles = {
+            "default": ProfileConfig(),
+            "safe": ProfileConfig(allowed_tools=["shell", "read_file"], max_mode="review"),
+        }
+        return SimpleNamespace(
+            llm=SimpleNamespace(provider="openai", model="gpt-5-mini"),
+            config=cfg,
+            policy_profile="safe",
+            total_input_tokens=120,
+            total_output_tokens=30,
+        )
+
+    def test_slash_commands_include_local_shell_status_commands(self):
+        names = {name for name, _desc in _SLASH_COMMANDS}
+        assert {"/status", "/cost", "/doctor", "/permissions"} <= names
+
     def test_handle_model_command_shows_current(self):
         agent = SimpleNamespace(
             llm=SimpleNamespace(provider="google", model="old-model"),
@@ -446,6 +474,199 @@ class TestCliCommands:
         assert "search_docs" in msg
         assert "Search the docs" in msg
 
+    def test_handle_repl_command_status_reports_compact_local_summary(self):
+        agent = self._make_local_command_agent()
+
+        action, msg = _handle_repl_command(agent, "/status")
+
+        assert action == "status"
+        assert msg == "Status: model=openai/gpt-5-mini | profile=safe | calls=on | mcp=1/2 | tokens=150"
+
+    def test_handle_repl_command_cost_reports_session_token_totals(self):
+        agent = self._make_local_command_agent()
+
+        action, msg = _handle_repl_command(agent, "/cost")
+
+        assert action == "cost"
+        assert msg == "Cost: total_tokens=150 | input=120 | output=30"
+
+    def test_handle_repl_command_doctor_reports_compact_health_summary(self):
+        agent = self._make_local_command_agent()
+
+        action, msg = _handle_repl_command(agent, "/doctor")
+
+        assert action == "doctor"
+        assert msg == "Doctor: llm=ok | profile=ok | calls=on | mcp=1/2"
+
+    def test_handle_repl_command_permissions_reports_active_profile_permissions(self):
+        agent = self._make_local_command_agent()
+
+        action, msg = _handle_repl_command(agent, "/permissions")
+
+        assert action == "permissions"
+        assert msg == "Permissions: profile=safe | mode=review | tools=2 [read_file,shell]"
+
+    def test_handle_repl_command_status_reports_compact_shell_state(self):
+        cfg = Config()
+        cfg.orchestrator.enabled = True
+        cfg.orchestrator.mode = "hybrid"
+        cfg.orchestrator.shadow_eval = False
+        cfg.calls.enabled = True
+        cfg.mcp.servers = {
+            "exa": MCPServerConfig(
+                enabled=True,
+                mode="read_only",
+                transport="stdio",
+                command=["node", "exa.js"],
+            )
+        }
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(provider="google", model="gemini-x"),
+            total_input_tokens=120,
+            total_output_tokens=30,
+            policy_profile="safe",
+            config=cfg,
+        )
+
+        action, msg = _handle_repl_command(agent, "/status")
+
+        assert action == "status"
+        assert "Status:" in msg
+        assert "model=google/gemini-x" in msg
+        assert "profile=safe" in msg
+        assert "orchestrator=hybrid" in msg
+        assert "calls=on" in msg
+        assert "mcp=1/1" in msg
+        assert "tokens=150" in msg
+
+    def test_handle_repl_command_cost_reports_session_token_usage(self):
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(provider="google", model="gemini-x"),
+            total_input_tokens=47000,
+            total_output_tokens=921,
+            config=Config(),
+        )
+
+        action, msg = _handle_repl_command(agent, "/cost")
+
+        assert action == "cost"
+        assert "Cost:" in msg
+        assert "total_tokens=47,921" in msg
+        assert "input=47,000" in msg
+        assert "output=921" in msg
+
+    def test_handle_repl_command_doctor_reports_ready_when_core_runtime_is_configured(self):
+        cfg = Config()
+        cfg.llm.provider = "google"
+        cfg.llm.api_key = "test-key"
+        cfg.calls.enabled = False
+        cfg.telegram.enabled = False
+        cfg.mcp.servers = {
+            "exa": MCPServerConfig(
+                enabled=True,
+                mode="read_only",
+                transport="stdio",
+                command=["node", "exa.js"],
+            )
+        }
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(provider="google", model="gemini-x"),
+            config=cfg,
+        )
+
+        action, msg = _handle_repl_command(agent, "/doctor")
+
+        assert action == "doctor"
+        assert "Doctor:" in msg
+        assert "llm=ok" in msg
+        assert "profile=ok" in msg
+        assert "calls=off" in msg
+        assert "mcp=1/1" in msg
+
+    def test_handle_repl_command_permissions_reports_active_policy(self):
+        cfg = Config()
+        cfg.safety.default_action = "confirm"
+        cfg.orchestrator.enabled = True
+        cfg.orchestrator.mode = "hybrid"
+        cfg.orchestrator.shadow_eval = False
+        cfg.profiles = {
+            "default": cfg.profiles["default"],
+            "safe": type(cfg.profiles["default"])(
+                allowed_tools=["memory_read"],
+                max_mode="review",
+                execution_backend="host",
+            ),
+        }
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(provider="google", model="gemini-x"),
+            policy_profile="safe",
+            config=cfg,
+        )
+
+        action, msg = _handle_repl_command(agent, "/permissions")
+
+        assert action == "permissions"
+        assert "Permissions:" in msg
+        assert "profile=safe" in msg
+        assert "mode=review" in msg
+        assert "tools=1 [memory_read]" in msg
+
+    def test_chat_cmd_handles_status_locally_without_model_turn(self):
+        outputs = []
+
+        class _FailIfRunAgent:
+            def __init__(self):
+                self.hooks = HookBus()
+                self.config = Config()
+                self.config.llm.model = "test-model"
+                self.total_input_tokens = 0
+                self.total_output_tokens = 0
+                self.log_label = ""
+                self.policy_profile = "default"
+                self.on_thinking = None
+                self.on_tool_call = None
+
+            def run(self, _text):
+                raise AssertionError("agent.run should not be called for /status")
+
+            def reset(self):
+                return None
+
+        agent = _FailIfRunAgent()
+        inputs = iter(["/status", "quit"])
+        session_ids = iter(["sess-1", "sess-2"])
+
+        _chat_cmd(
+            make_agent_fn=lambda: agent,
+            make_telegram_adapter_fn=lambda _cfg: None,
+            new_session_id_fn=lambda: next(session_ids),
+            save_exchange_fn=lambda *_args: None,
+            slash_completer_fn=lambda *_args: None,
+            pick_slash_command_fn=lambda: None,
+            is_bracketed_paste_start_fn=lambda _text: False,
+            collect_bracketed_paste_fn=lambda *_args, **_kwargs: "",
+            is_paste_command_fn=lambda _text: False,
+            collect_paste_message_fn=lambda *_args, **_kwargs: "",
+            handle_repl_command_fn=_handle_repl_command,
+            is_model_runtime_error_fn=lambda _err: False,
+            format_session_summary_fn=_format_session_summary,
+            format_chat_response_fn=lambda text: text,
+            format_turn_stats_fn=_format_turn_stats,
+            make_readline_prompt_fn=lambda label, _ansi: label,
+            spinner_cls=_FakeSpinner,
+            ansi_prompt_user="",
+            ansi_error="",
+            ansi_reset="",
+            click_echo_fn=lambda text="", err=False: outputs.append((text, err)),
+            input_fn=lambda _prompt: next(inputs),
+            readline_module=_FakeReadline(),
+            time_time_fn=lambda: 0.0,
+            version="test",
+        )
+
+        plain = [re.sub(r"\x1b\[[0-9;]*m", "", text) for text, _err in outputs]
+        assert any(text.startswith("Status:") for text in plain)
+
 
 class _FakeReadline:
     def set_completer(self, _fn):
@@ -507,6 +728,39 @@ class _RouteEventAgent:
         return None
 
 
+class _LocalCommandAgent:
+    def __init__(self):
+        cfg = Config()
+        cfg.llm.provider = "openai"
+        cfg.llm.model = "gpt-5-mini"
+        cfg.calls.enabled = True
+        cfg.mcp.servers = {
+            "docs": MCPServerConfig(enabled=True, mode="read_only", transport="stdio"),
+            "build": MCPServerConfig(enabled=False, mode="read_write", transport="stdio"),
+        }
+        cfg.profiles = {
+            "default": ProfileConfig(),
+            "safe": ProfileConfig(allowed_tools=["shell", "read_file"], max_mode="review"),
+        }
+        self.hooks = HookBus()
+        self.config = cfg
+        self.llm = SimpleNamespace(provider="openai", model="gpt-5-mini")
+        self.policy_profile = "safe"
+        self.total_input_tokens = 120
+        self.total_output_tokens = 30
+        self.log_label = ""
+        self.run_calls = []
+        self.on_thinking = None
+        self.on_tool_call = None
+
+    def run(self, text):
+        self.run_calls.append(text)
+        raise AssertionError(f"agent.run should not be called for local command: {text}")
+
+    def reset(self):
+        return None
+
+
 def _run_chat_session(agent, inputs):
     outputs = []
     input_iter = iter(inputs)
@@ -558,6 +812,47 @@ def _run_chat_session(agent, inputs):
     return outputs
 
 
+def _run_local_command_session(agent, inputs):
+    outputs = []
+    input_iter = iter(inputs)
+    session_ids = iter(["sess-1", "sess-2"])
+
+    def fake_input(_prompt):
+        value = next(input_iter)
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    _chat_cmd(
+        make_agent_fn=lambda: agent,
+        make_telegram_adapter_fn=lambda _cfg: None,
+        new_session_id_fn=lambda: next(session_ids),
+        save_exchange_fn=lambda *_args: None,
+        slash_completer_fn=lambda *_args: None,
+        pick_slash_command_fn=lambda: None,
+        is_bracketed_paste_start_fn=lambda _text: False,
+        collect_bracketed_paste_fn=lambda *_args, **_kwargs: "",
+        is_paste_command_fn=lambda _text: False,
+        collect_paste_message_fn=lambda *_args, **_kwargs: "",
+        handle_repl_command_fn=_handle_repl_command,
+        is_model_runtime_error_fn=lambda _err: False,
+        format_session_summary_fn=_format_session_summary,
+        format_chat_response_fn=lambda text: text,
+        format_turn_stats_fn=_format_turn_stats,
+        make_readline_prompt_fn=lambda label, _ansi: label,
+        spinner_cls=_FakeSpinner,
+        ansi_prompt_user="",
+        ansi_error="",
+        ansi_reset="",
+        click_echo_fn=lambda text="", err=False: outputs.append((text, err)),
+        input_fn=fake_input,
+        readline_module=_FakeReadline(),
+        time_time_fn=lambda: 1.0,
+        version="test",
+    )
+    return outputs
+
+
 class TestCliRouteState:
     @staticmethod
     def _plain_outputs(outputs):
@@ -593,6 +888,25 @@ class TestCliRouteState:
 
         assert "job=1" in summary
         assert "fast=1" not in summary
+
+
+class TestCliLocalInteractiveCommands:
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            ("/status", "Status: model=openai/gpt-5-mini | profile=safe | calls=on | mcp=1/2 | tokens=150"),
+            ("/cost", "Cost: total_tokens=150 | input=120 | output=30"),
+            ("/doctor", "Doctor: llm=ok | profile=ok | calls=on | mcp=1/2"),
+            ("/permissions", "Permissions: profile=safe | mode=review | tools=2 [read_file,shell]"),
+        ],
+    )
+    def test_local_shell_commands_do_not_call_agent_run(self, command, expected):
+        agent = _LocalCommandAgent()
+
+        outputs = [re.sub(r"\x1b\[[0-9;]*m", "", text) for text, _err in _run_local_command_session(agent, [command, "quit"])]
+
+        assert expected in outputs
+        assert agent.run_calls == []
 
 
 class TestSlashCompleter:

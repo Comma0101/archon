@@ -8,6 +8,7 @@ from typing import Callable
 
 from archon.calls.store import list_call_job_summaries, load_call_job_summary
 from archon.control.jobs import format_job_summary, format_job_summary_list
+from archon.control.policy import resolve_profile
 from archon.mcp import MCPClient
 from archon.workers.session_store import list_worker_job_summaries, load_worker_job_summary
 
@@ -20,6 +21,86 @@ def handle_model_command(agent, text: str) -> tuple[bool, str]:
     provider = str(getattr(agent.llm, "provider", "") or "").strip() or "unknown"
     model = str(getattr(agent.llm, "model", "") or "").strip() or "unknown"
     return True, f"Current model: {provider}/{model}"
+
+
+def handle_status_command(agent, text: str) -> tuple[bool, str]:
+    """Handle `/status` command with a compact shell summary."""
+    raw = (text or "").strip().lower()
+    if raw != "/status":
+        return False, ""
+
+    cfg = getattr(agent, "config", None)
+    llm = getattr(agent, "llm", None)
+    provider = str(getattr(llm, "provider", "") or getattr(getattr(cfg, "llm", None), "provider", "") or "").strip() or "unknown"
+    model = str(getattr(llm, "model", "") or getattr(getattr(cfg, "llm", None), "model", "") or "").strip() or "unknown"
+    profile = str(getattr(agent, "policy_profile", "") or "").strip() or "default"
+    total_tokens = max(
+        0,
+        int(getattr(agent, "total_input_tokens", 0) or 0) + int(getattr(agent, "total_output_tokens", 0) or 0),
+    )
+    parts = [
+        f"model={provider}/{model}",
+        f"profile={profile}",
+    ]
+    orchestrator_mode = _describe_orchestrator_mode(cfg)
+    if orchestrator_mode != "legacy":
+        parts.append(f"orchestrator={orchestrator_mode}")
+    calls_state = "on" if bool(getattr(getattr(cfg, "calls", None), "enabled", False)) else "off"
+    parts.append(f"calls={calls_state}")
+    parts.append(f"mcp={_format_mcp_counts(cfg)}")
+    parts.append(f"tokens={total_tokens:,}")
+    return True, "Status: " + " | ".join(parts)
+
+
+def handle_cost_command(agent, text: str) -> tuple[bool, str]:
+    """Handle `/cost` command with compact token totals."""
+    raw = (text or "").strip().lower()
+    if raw != "/cost":
+        return False, ""
+
+    total_input = max(0, int(getattr(agent, "total_input_tokens", 0) or 0))
+    total_output = max(0, int(getattr(agent, "total_output_tokens", 0) or 0))
+    total = total_input + total_output
+    return True, f"Cost: total_tokens={total:,} | input={total_input:,} | output={total_output:,}"
+
+
+def handle_doctor_command(agent, text: str) -> tuple[bool, str]:
+    """Handle `/doctor` command with lightweight local health checks."""
+    raw = (text or "").strip().lower()
+    if raw != "/doctor":
+        return False, ""
+
+    cfg = getattr(agent, "config", None)
+    llm_ready = _llm_runtime_ready(agent, cfg)
+    profile_name = str(getattr(agent, "policy_profile", "") or "").strip() or "default"
+    resolved_name, _profile = resolve_profile(cfg, profile_name=profile_name)
+    profile_ready = bool(resolved_name)
+    calls_state = "on" if bool(getattr(getattr(cfg, "calls", None), "enabled", False)) else "off"
+    return True, (
+        "Doctor: "
+        f"llm={'ok' if llm_ready else 'missing'} | "
+        f"profile={'ok' if profile_ready else 'missing'} | "
+        f"calls={calls_state} | "
+        f"mcp={_format_mcp_counts(cfg)}"
+    )
+
+
+def handle_permissions_command(agent, text: str) -> tuple[bool, str]:
+    """Handle `/permissions` command with compact policy details."""
+    raw = (text or "").strip().lower()
+    if raw != "/permissions":
+        return False, ""
+
+    cfg = getattr(agent, "config", None)
+    profile_name = str(getattr(agent, "policy_profile", "") or "").strip() or "default"
+    resolved_name, profile = resolve_profile(cfg, profile_name=profile_name)
+    allowed_tools = sorted(str(item).strip() for item in profile.allowed_tools if str(item).strip())
+    return True, (
+        "Permissions: "
+        f"profile={resolved_name} | "
+        f"mode={profile.max_mode} | "
+        f"tools={len(allowed_tools)} [{','.join(allowed_tools)}]"
+    )
 
 
 def handle_model_list_command(text: str, model_catalog: dict[str, tuple[str, ...]]) -> tuple[bool, str]:
@@ -387,6 +468,47 @@ def handle_job_command(agent, text: str) -> tuple[bool, str]:
     return True, format_job_summary(job)
 
 
+def _describe_orchestrator_mode(cfg) -> str:
+    orchestrator = getattr(cfg, "orchestrator", None)
+    if orchestrator is None:
+        return "legacy"
+    enabled = bool(getattr(orchestrator, "enabled", False))
+    mode = str(getattr(orchestrator, "mode", "legacy") or "legacy").strip().lower() or "legacy"
+    if not enabled:
+        return "legacy"
+    return mode
+
+
+def _count_enabled_mcp_servers(cfg) -> int:
+    servers = getattr(getattr(cfg, "mcp", None), "servers", {}) or {}
+    return sum(1 for server in servers.values() if bool(getattr(server, "enabled", False)))
+
+
+def _format_mcp_counts(cfg) -> str:
+    servers = getattr(getattr(cfg, "mcp", None), "servers", {}) or {}
+    enabled = _count_enabled_mcp_servers(cfg)
+    return f"{enabled}/{len(servers)}"
+
+
+def _llm_runtime_ready(agent, cfg) -> bool:
+    llm = getattr(agent, "llm", None)
+    provider = str(getattr(llm, "provider", "") or getattr(getattr(cfg, "llm", None), "provider", "") or "").strip()
+    model = str(getattr(llm, "model", "") or getattr(getattr(cfg, "llm", None), "model", "") or "").strip()
+    if provider and model:
+        return True
+
+    llm_cfg = getattr(cfg, "llm", None)
+    provider = str(getattr(llm_cfg, "provider", "") or "").strip().lower()
+    if str(getattr(llm_cfg, "api_key", "") or "").strip():
+        return True
+    env_name = {
+        "google": "GEMINI_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+    }.get(provider)
+    return bool(env_name and str(os.environ.get(env_name, "")).strip())
+
+
 def handle_repl_command(
     agent,
     text: str,
@@ -412,9 +534,21 @@ def handle_repl_command(
     if raw.lower() in {"/help", "/?"}:
         return (
             "help",
-            "Commands: /help, /reset, /model, /model-list, /model-set <provider>-<model>, /calls [status|on|off], /profile [show|set <name>], /mcp [servers|tools <server>], /jobs [limit], /job <id>, /paste\n"
+            "Commands: /help, /reset, /status, /cost, /doctor, /permissions, /model, /model-list, /model-set <provider>-<model>, /calls [status|on|off], /profile [show|set <name>], /mcp [servers|tools <server>], /jobs [limit], /job <id>, /paste\n"
             "Multiline paste: paste normally (bracketed paste) or use /paste fallback, end with /end.",
         )
+    handled, msg = handle_status_command(agent, raw)
+    if handled:
+        return "status", msg
+    handled, msg = handle_cost_command(agent, raw)
+    if handled:
+        return "cost", msg
+    handled, msg = handle_doctor_command(agent, raw)
+    if handled:
+        return "doctor", msg
+    handled, msg = handle_permissions_command(agent, raw)
+    if handled:
+        return "permissions", msg
     handled, msg = handle_mcp_command(agent, raw)
     if handled:
         return "mcp", msg

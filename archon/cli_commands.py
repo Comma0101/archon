@@ -12,6 +12,10 @@ import tty
 SLASH_COMMANDS = [
     ("/help", "Show commands and usage"),
     ("/reset", "Clear conversation history"),
+    ("/status", "Show current shell status"),
+    ("/cost", "Show session token usage"),
+    ("/doctor", "Run local shell health checks"),
+    ("/permissions", "Show current policy permissions"),
     ("/model", "Show current provider/model"),
     ("/model-list", "List model presets by provider"),
     ("/model-set", "Set model via <provider>-<model>"),
