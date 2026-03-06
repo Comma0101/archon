@@ -117,6 +117,36 @@ def test_load_config_agent_tool_result_caps(monkeypatch, tmp_path):
     assert cfg.agent.tool_result_worker_max_chars == 1800
 
 
+def test_load_config_mcp_read_only_servers(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config" / "archon"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        "\n".join(
+            [
+                "[mcp]",
+                "result_max_chars = 1800",
+                "",
+                "[mcp.servers.docs]",
+                "enabled = true",
+                'mode = "read_only"',
+                'transport = "stdio"',
+                'command = ["python", "server.py"]',
+            ]
+        )
+    )
+    monkeypatch.setattr("archon.config.CONFIG_DIR", config_dir)
+
+    cfg = load_config()
+
+    assert cfg.mcp.result_max_chars == 1800
+    assert "docs" in cfg.mcp.servers
+    server = cfg.mcp.servers["docs"]
+    assert server.enabled is True
+    assert server.mode == "read_only"
+    assert server.transport == "stdio"
+    assert server.command == ["python", "server.py"]
+
+
 def test_builtin_skill_registry_contains_expected_skills():
     assert DEFAULT_SKILL_NAME == "general"
     assert set(BUILTIN_SKILLS.keys()) == {

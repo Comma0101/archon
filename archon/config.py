@@ -113,6 +113,20 @@ class WebConfig:
 
 
 @dataclass
+class MCPServerConfig:
+    enabled: bool = False
+    mode: str = "read_only"  # read_only | read_write
+    transport: str = "stdio"
+    command: list[str] = field(default_factory=list)
+
+
+@dataclass
+class MCPConfig:
+    result_max_chars: int = 2000
+    servers: dict[str, MCPServerConfig] = field(default_factory=dict)
+
+
+@dataclass
 class NewsScheduleConfig:
     run_after_hour_local: int = 8
 
@@ -165,6 +179,7 @@ class Config:
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     web: WebConfig = field(default_factory=WebConfig)
+    mcp: MCPConfig = field(default_factory=MCPConfig)
     news: NewsConfig = field(default_factory=NewsConfig)
     calls: CallsConfig = field(default_factory=CallsConfig)
 
@@ -292,6 +307,27 @@ def load_config() -> Config:
         cfg.web.brave_api_key = str(
             web.get("brave_api_key", cfg.web.brave_api_key)
         )
+
+        mcp = data.get("mcp", {})
+        cfg.mcp.result_max_chars = int(
+            mcp.get("result_max_chars", cfg.mcp.result_max_chars)
+        )
+        servers_raw = mcp.get("servers", {})
+        if isinstance(servers_raw, dict):
+            parsed_servers: dict[str, MCPServerConfig] = {}
+            for server_name, server_value in servers_raw.items():
+                if not isinstance(server_name, str) or not isinstance(server_value, dict):
+                    continue
+                command = server_value.get("command", [])
+                parsed_servers[server_name.strip()] = MCPServerConfig(
+                    enabled=bool(server_value.get("enabled", False)),
+                    mode=str(server_value.get("mode", "read_only")).strip().lower() or "read_only",
+                    transport=str(server_value.get("transport", "stdio")).strip().lower() or "stdio",
+                    command=[str(item).strip() for item in command if str(item).strip()]
+                    if isinstance(command, list)
+                    else [],
+                )
+            cfg.mcp.servers = parsed_servers
 
         news = data.get("news", {})
         cfg.news.enabled = bool(news.get("enabled", cfg.news.enabled))

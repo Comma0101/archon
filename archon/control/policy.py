@@ -81,11 +81,46 @@ def evaluate_tool_policy(
     )
 
 
+def evaluate_mcp_policy(
+    *,
+    config: Config,
+    server_name: str,
+    profile_name: str = "default",
+) -> PolicyDecision:
+    server = str(server_name or "").strip().lower()
+    capability = f"mcp:{server}" if server else "mcp"
+    profile_key, profile = resolve_profile(config, profile_name=profile_name)
+    allowed = _mcp_is_allowed(profile, capability)
+    if allowed:
+        return PolicyDecision(
+            decision="allow",
+            reason="allowed",
+            profile=profile_key,
+            tool_name=capability,
+            mode="read",
+        )
+    decision = "deny" if _policy_enforced(config) else "shadow_deny"
+    return PolicyDecision(
+        decision=decision,
+        reason="mcp_not_allowed",
+        profile=profile_key,
+        tool_name=capability,
+        mode="read",
+    )
+
+
 def _tool_is_allowed(profile: ResolvedSkillProfile, tool_name: str) -> bool:
     allowed = [str(item).strip() for item in profile.allowed_tools if str(item).strip()]
     if not allowed:
         return False
     return "*" in allowed or tool_name in allowed
+
+
+def _mcp_is_allowed(profile: ResolvedSkillProfile, capability: str) -> bool:
+    allowed = [str(item).strip().lower() for item in profile.allowed_tools if str(item).strip()]
+    if not allowed:
+        return False
+    return "*" in allowed or "mcp" in allowed or capability in allowed
 
 
 def _mode_is_allowed(profile: ResolvedSkillProfile, requested_mode: str) -> bool:
