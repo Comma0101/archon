@@ -415,8 +415,47 @@ class TestCliCommands:
         action, msg = _handle_repl_command(agent, "/jobs")
 
         assert action == "jobs"
+        assert msg.startswith("Jobs: showing=2 | active=1")
         assert "worker:sess-1" in msg
         assert "call:call-1" in msg
+
+    def test_handle_repl_command_jobs_active_filters_non_terminal_jobs(self, monkeypatch):
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+        )
+        jobs = [
+            SimpleNamespace(
+                job_id="worker:sess-1",
+                kind="worker_session",
+                status="running",
+                summary="Still going",
+                last_update_at="2026-02-24T00:00:10Z",
+            ),
+            SimpleNamespace(
+                job_id="call:call-1",
+                kind="call_mission",
+                status="queued",
+                summary="Waiting to start",
+                last_update_at="2026-02-24T00:00:09Z",
+            ),
+            SimpleNamespace(
+                job_id="worker:sess-2",
+                kind="worker_session",
+                status="ok",
+                summary="Done",
+                last_update_at="2026-02-24T00:00:08Z",
+            ),
+        ]
+        monkeypatch.setattr("archon.cli_repl_commands._collect_job_summaries", lambda limit=10: jobs)
+
+        action, msg = _handle_repl_command(agent, "/jobs active 2")
+
+        assert action == "jobs"
+        assert msg.startswith("Jobs: showing=2 | active=2 | filter=active")
+        assert "worker:sess-1" in msg
+        assert "call:call-1" in msg
+        assert "worker:sess-2" not in msg
 
     def test_handle_repl_command_job_shows_summary(self, monkeypatch):
         agent = SimpleNamespace(

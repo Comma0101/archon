@@ -591,6 +591,57 @@ def _load_job_summary(job_ref: str):
     return load_call_job_summary(ref)
 
 
+_ACTIVE_JOB_STATUSES = {
+    "approved",
+    "pending",
+    "paused",
+    "queued",
+    "running",
+    "starting",
+    "waiting_approval",
+}
+
+
+def _job_is_active(job) -> bool:
+    return str(getattr(job, "status", "") or "").strip().lower() in _ACTIVE_JOB_STATUSES
+
+
+def _parse_jobs_args(parts: list[str]) -> tuple[str, int] | None:
+    view = "all"
+    limit = 10
+    for token in parts[1:]:
+        value = str(token or "").strip()
+        if not value:
+            continue
+        lowered = value.lower()
+        if lowered in {"all", "active"}:
+            if view != "all":
+                return None
+            view = lowered
+            continue
+        try:
+            limit = int(value)
+        except ValueError:
+            return None
+    return view, max(1, limit)
+
+
+def _format_jobs_list(jobs, *, view: str, limit: int) -> str:
+    scan_limit = max(limit, 100) if view == "active" else limit
+    recent_jobs = list(jobs[:scan_limit])
+    active_count = sum(1 for job in recent_jobs if _job_is_active(job))
+    if view == "active":
+        selected = [job for job in recent_jobs if _job_is_active(job)][:limit]
+        if not selected:
+            return "Jobs: none active"
+        header = f"Jobs: showing={len(selected)} | active={active_count} | filter=active"
+        return header + "\n" + format_job_summary_list(selected)
+    if not recent_jobs:
+        return "Jobs: none"
+    header = f"Jobs: showing={len(recent_jobs)} | active={active_count}"
+    return header + "\n" + format_job_summary_list(recent_jobs)
+
+
 def handle_jobs_command(agent, text: str) -> tuple[bool, str]:
     """Handle `/jobs` command (list recent cross-surface jobs)."""
     _ = agent
@@ -599,17 +650,14 @@ def handle_jobs_command(agent, text: str) -> tuple[bool, str]:
     if not parts or parts[0].lower() != "/jobs":
         return False, ""
 
-    limit = 10
-    if len(parts) > 1:
-        try:
-            limit = int(parts[1])
-        except ValueError:
-            return True, "Usage: /jobs [limit]"
+    parsed = _parse_jobs_args(parts)
+    if parsed is None:
+        return True, "Usage: /jobs [active|all] [limit]"
+    view, limit = parsed
 
-    jobs = _collect_job_summaries(limit=limit)
-    if not jobs:
-        return True, "Jobs: none"
-    return True, "Jobs:\n" + format_job_summary_list(jobs)
+    scan_limit = max(limit, 100) if view == "active" else limit
+    jobs = _collect_job_summaries(limit=scan_limit)
+    return True, _format_jobs_list(jobs, view=view, limit=limit)
 
 
 def handle_job_command(agent, text: str) -> tuple[bool, str]:
@@ -779,7 +827,7 @@ def handle_repl_command(
     if raw.lower() in {"/help", "/?"}:
         return (
             "help",
-            "Commands: /help, /reset, /status, /cost, /compact, /context, /doctor, /permissions, /skills [list|show <name>|use <name>|clear], /plugins [list|show <name>], /model, /model-list, /model-set <provider>-<model>, /calls [status|on|off], /profile [show|set <name>], /mcp [servers|tools <server>], /jobs [limit], /job <id>, /paste\n"
+            "Commands: /help, /reset, /status, /cost, /compact, /context, /doctor, /permissions, /skills [list|show <name>|use <name>|clear], /plugins [list|show <name>], /model, /model-list, /model-set <provider>-<model>, /calls [status|on|off], /profile [show|set <name>], /mcp [servers|tools <server>], /jobs [active|all] [limit], /job <id>, /paste\n"
             "Multiline paste: paste normally (bracketed paste) or use /paste fallback, end with /end.",
         )
     handled, msg = handle_status_command(agent, raw)
