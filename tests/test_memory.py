@@ -126,6 +126,45 @@ class TestMemoryIndex:
         assert by_path["compactions/tasks/task-1.md"]["kind"] == "compaction_summary"
         assert by_path["compactions/tasks/task-1.md"]["layer"] == "task"
 
+    def test_compact_history_preserves_tool_use_blocks(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("archon.memory.MEMORY_DIR", tmp_path)
+
+        artifact = memory.compact_history(
+            [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_1",
+                            "name": "read_file",
+                            "input": {"path": "/tmp/demo.txt"},
+                        }
+                    ],
+                }
+            ],
+            layer="session",
+            summary_id="sess-tool-use",
+        )
+
+        text = memory.read(artifact["path"])
+        assert "tool_use read_file" in text
+        assert "/tmp/demo.txt" in text
+
+    def test_compact_history_marks_omitted_messages_when_truncated(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("archon.memory.MEMORY_DIR", tmp_path)
+
+        artifact = memory.compact_history(
+            [{"role": "user", "content": f"message {idx}"} for idx in range(10)],
+            layer="session",
+            summary_id="sess-many",
+            max_entries=8,
+        )
+
+        text = memory.read(artifact["path"])
+        assert "Omitted 2 earlier messages" in text
+        assert "message 9" in text
+
     def test_prefetch_for_query_prefers_compaction_summary_when_relevant(self, monkeypatch, tmp_path):
         monkeypatch.setattr("archon.memory.MEMORY_DIR", tmp_path)
 

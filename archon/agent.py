@@ -488,21 +488,22 @@ class Agent:
             trim_to_chars = int(self.history_trim_to_chars)
         except Exception:
             return
-        if max_msgs <= 0 or trim_to <= 0:
-            return
-        if trim_to >= max_msgs:
+        message_trim_enabled = max_msgs > 0 and trim_to > 0
+        if message_trim_enabled and trim_to >= max_msgs:
             trim_to = max(1, max_msgs - 1)
         if max_chars > 0 and trim_to_chars >= max_chars:
             trim_to_chars = max(1, max_chars - 1)
 
         history_chars = _estimate_history_chars(self.history)
         pending_compactions: list[dict] = []
-        if len(self.history) <= max_msgs and (max_chars <= 0 or history_chars <= max_chars):
+        over_message_budget = message_trim_enabled and len(self.history) > max_msgs
+        over_char_budget = max_chars > 0 and trim_to_chars > 0 and history_chars > max_chars
+        if not over_message_budget and not over_char_budget:
             self._pending_compactions = []
             return
 
         # First apply the message-count trim if needed.
-        if len(self.history) > max_msgs:
+        if over_message_budget:
             dropped_for_compaction = list(self.history[:-trim_to])
             self.history = self.history[-trim_to:]
             history_chars = _estimate_history_chars(self.history)

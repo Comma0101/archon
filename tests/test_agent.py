@@ -1525,6 +1525,54 @@ class TestAgentLoop:
         assert sent_history[1]["content"] == "hi"
         assert len(sent_history) == 3
 
+    def test_run_still_applies_char_trim_when_message_trim_is_disabled(self, monkeypatch):
+        response = LLMResponse(
+            text="ok",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "ok"}],
+            input_tokens=1,
+            output_tokens=1,
+        )
+        llm = MagicMock()
+        llm.chat = MagicMock(return_value=response)
+        agent = Agent(llm, ToolRegistry(archon_source_dir=None), Config())
+        agent._system_prompt = "test prompt"
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+
+        compaction_calls = []
+
+        def fake_compact_history(messages, layer="session", summary_id="latest", max_entries=8):
+            compaction_calls.append((layer, list(messages)))
+            return {
+                "path": f"compactions/{layer}s/history-t001.md",
+                "layer": layer,
+                "summary": f"{layer} compaction summary",
+            }
+
+        monkeypatch.setattr("archon.agent.memory_store.compact_history", fake_compact_history)
+        agent.history_max_messages = 0
+        agent.history_trim_to = 0
+        agent.history_max_chars = 250
+        agent.history_trim_to_chars = 150
+        agent.history = [
+            {"role": "user", "content": "a" * 100},
+            {"role": "assistant", "content": [{"type": "text", "text": "b" * 100}]},
+            {"role": "user", "content": "c" * 100},
+        ]
+
+        result = agent.run("hi")
+
+        assert result == "ok"
+        assert compaction_calls
+        assert compaction_calls[0][0] == "task"
+        system_prompt = llm.chat.call_args[0][0]
+        sent_history = llm.chat.call_args[0][1]
+        assert "compactions/tasks/history-t001.md" in system_prompt
+        assert sent_history[0]["content"] == "c" * 100
+        assert sent_history[1]["content"] == "hi"
+        assert len(sent_history) == 3
+
     def test_run_keeps_session_and_task_compactions_when_message_and_char_trim_both_apply(self, monkeypatch):
         response = LLMResponse(
             text="ok",

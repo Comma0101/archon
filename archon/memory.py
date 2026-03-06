@@ -688,21 +688,30 @@ def compact_history(
         rel_path = f"compactions/sessions/{summary_id}.md"
         title = "# Session Compaction Summary"
 
-    selected = list(messages or [])[-max(1, int(max_entries)) :]
+    all_messages = list(messages or [])
+    selected = all_messages[-max(1, int(max_entries)) :]
+    omitted_count = max(0, len(all_messages) - len(selected))
     bullets: list[str] = []
+    summary_source = ""
+    if omitted_count:
+        bullets.append(f"- assistant: Omitted {omitted_count} earlier messages during compaction.")
     for message in selected:
         role = str(message.get("role", "unknown") or "unknown").strip()
         text = _flatten_message_content(message.get("content"))
         if not text:
             continue
-        bullets.append(f"- {role}: {text}")
+        bullet = f"- {role}: {text}"
+        bullets.append(bullet)
+        if not summary_source:
+            summary_source = bullet[2:]
 
     if not bullets:
         bullets.append("- assistant: No compactable history content.")
+        summary_source = "assistant: No compactable history content."
 
     content = title + "\n\n" + "\n".join(bullets) + "\n"
     path = write(rel_path, content)
-    summary = bullets[0][2:] if bullets else ""
+    summary = summary_source
     return {
         "path": path,
         "layer": layer_value,
@@ -721,6 +730,17 @@ def _flatten_message_content(content: object, max_chars: int = 240) -> str:
             item_type = str(item.get("type", "")).strip()
             if item_type == "text":
                 piece = str(item.get("text", "")).strip()
+            elif item_type == "tool_use":
+                tool_name = str(item.get("name", "")).strip()
+                tool_input = item.get("input")
+                if tool_name:
+                    try:
+                        rendered_input = json.dumps(tool_input or {}, sort_keys=True)
+                    except Exception:
+                        rendered_input = str(tool_input or "").strip()
+                    piece = f"tool_use {tool_name} {rendered_input}".strip()
+                else:
+                    piece = ""
             elif item_type == "tool_result":
                 piece = str(item.get("content", "")).strip()
             else:
