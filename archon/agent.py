@@ -451,6 +451,37 @@ class Agent:
         self.total_input_tokens = 0
         self.total_output_tokens = 0
 
+    def compact_context(self) -> dict:
+        """Explicitly compact current conversation history into a session artifact."""
+        messages = list(self.history)
+        pending_compactions = list(self._pending_compactions)
+        compacted_messages = len(messages)
+        if not messages:
+            return {
+                "compacted_messages": 0,
+                "path": "",
+                "summary": "",
+            }
+
+        artifact = self._compact_history_segment(
+            messages,
+            layer="session",
+        )
+        if artifact is None:
+            return {
+                "compacted_messages": compacted_messages,
+                "path": "",
+                "summary": "",
+            }
+
+        self.history = []
+        self._pending_compactions = pending_compactions + [artifact]
+        return {
+            "compacted_messages": compacted_messages,
+            "path": str(artifact.get("path", "") or "").strip(),
+            "summary": str(artifact.get("summary", "") or "").strip(),
+        }
+
     def set_policy_profile(self, profile_name: str) -> None:
         value = (profile_name or "").strip()
         if value:

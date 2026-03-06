@@ -167,6 +167,8 @@ def chat_cmd(
                     "help",
                     "status",
                     "cost",
+                    "compact",
+                    "context",
                     "doctor",
                     "permissions",
                     "skills",

@@ -90,6 +90,94 @@ class TestAgentLoop:
 
         assert "mcp_call" in {schema["name"] for schema in tools.get_schemas()}
 
+    def test_compact_context_persists_history_artifact_and_clears_history(self, monkeypatch):
+        agent = make_agent([])
+        agent._pending_compactions = [
+            {
+                "path": "compactions/tasks/history-existing.md",
+                "layer": "task",
+                "summary": "older task compaction",
+            }
+        ]
+        agent.history = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]
+        monkeypatch.setattr(
+            "archon.agent.memory_store.compact_history",
+            lambda messages, layer="session", summary_id="latest": {
+                "path": "compactions/sessions/history-manual.md",
+                "layer": layer,
+                "summary": "user: hello",
+            },
+        )
+
+        result = agent.compact_context()
+
+        assert result["compacted_messages"] == 2
+        assert result["path"] == "compactions/sessions/history-manual.md"
+        assert result["summary"] == "user: hello"
+        assert agent.history == []
+        assert agent._pending_compactions == [
+            {
+                "path": "compactions/tasks/history-existing.md",
+                "layer": "task",
+                "summary": "older task compaction",
+            },
+            {
+                "path": "compactions/sessions/history-manual.md",
+                "layer": "session",
+                "summary": "user: hello",
+            }
+        ]
+
+    def test_compact_context_preserves_history_when_compaction_fails(self, monkeypatch):
+        agent = make_agent([])
+        agent.history = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]
+        monkeypatch.setattr("archon.agent.memory_store.compact_history", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+
+        result = agent.compact_context()
+
+        assert result == {
+            "compacted_messages": 2,
+            "path": "",
+            "summary": "",
+        }
+        assert agent.history == [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]
+        assert agent._pending_compactions == []
+
+    def test_compact_context_without_history_keeps_pending_compactions(self):
+        agent = make_agent([])
+        agent._pending_compactions = [
+            {
+                "path": "compactions/sessions/history-existing.md",
+                "layer": "session",
+                "summary": "existing summary",
+            }
+        ]
+
+        result = agent.compact_context()
+
+        assert result == {
+            "compacted_messages": 0,
+            "path": "",
+            "summary": "",
+        }
+        assert agent.history == []
+        assert agent._pending_compactions == [
+            {
+                "path": "compactions/sessions/history-existing.md",
+                "layer": "session",
+                "summary": "existing summary",
+            }
+        ]
+
     def test_policy_enforced_deny_blocks_mcp_server_execution(self, monkeypatch):
         responses = [
             LLMResponse(

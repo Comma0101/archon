@@ -750,6 +750,51 @@ class TestCliCommands:
         assert action == "plugins"
         assert msg == "Plugin mcp:docs: type=mcp | enabled=on | mode=read_only | transport=stdio"
 
+    def test_handle_repl_command_compact_reports_artifact_summary(self):
+        class _CompactAgent:
+            def __init__(self):
+                self.llm = SimpleNamespace(provider="openai", model="gpt-5-mini")
+                self.config = Config()
+                self.history = [
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": "hi"},
+                ]
+                self._pending_compactions = []
+
+            def compact_context(self):
+                self.history = []
+                self._pending_compactions = [
+                    {
+                        "path": "compactions/sessions/history-manual.md",
+                        "layer": "session",
+                        "summary": "user: hello",
+                    }
+                ]
+                return {
+                    "compacted_messages": 2,
+                    "path": "compactions/sessions/history-manual.md",
+                    "summary": "user: hello",
+                }
+
+        agent = _CompactAgent()
+
+        action, msg = _handle_repl_command(agent, "/compact")
+
+        assert action == "compact"
+        assert msg == (
+            "Compact: history_messages=2 | path=compactions/sessions/history-manual.md | summary=user: hello"
+        )
+
+    def test_handle_repl_command_context_reports_history_and_pending_compactions(self):
+        agent = self._make_local_command_agent()
+        agent.history = [{"role": "user", "content": "hello"}]
+        agent._pending_compactions = [{"path": "compactions/sessions/history-manual.md"}]
+
+        action, msg = _handle_repl_command(agent, "/context")
+
+        assert action == "context"
+        assert msg == "Context: history_messages=1 | pending_compactions=1"
+
     def test_chat_cmd_handles_status_locally_without_model_turn(self):
         outputs = []
 
@@ -900,6 +945,22 @@ class _LocalCommandAgent:
 
     def reset(self):
         return None
+
+    def compact_context(self):
+        history_messages = len(self.history)
+        self.history = []
+        self._pending_compactions = [
+            {
+                "path": "compactions/sessions/local-shell.md",
+                "layer": "session",
+                "summary": "assistant: local shell compaction",
+            }
+        ]
+        return {
+            "compacted_messages": history_messages,
+            "path": "compactions/sessions/local-shell.md",
+            "summary": "assistant: local shell compaction",
+        }
 
 
 def _run_chat_session(agent, inputs):
@@ -1079,6 +1140,23 @@ class TestCliLocalInteractiveCommands:
         assert "Plugin mcp:docs: type=mcp | enabled=on | mode=read_only | transport=stdio" in outputs
         assert agent.run_calls == []
 
+    def test_local_context_commands_do_not_call_agent_run(self):
+        agent = _LocalCommandAgent()
+        agent.history = [{"role": "user", "content": "hello"}]
+
+        outputs = [
+            re.sub(r"\x1b\[[0-9;]*m", "", text)
+            for text, _err in _run_local_command_session(
+                agent,
+                ["/context", "/compact", "/context", "quit"],
+            )
+        ]
+
+        assert "Context: history_messages=1 | pending_compactions=0" in outputs
+        assert "Compact: history_messages=1 | path=compactions/sessions/local-shell.md | summary=assistant: local shell compaction" in outputs
+        assert "Context: history_messages=0 | pending_compactions=1" in outputs
+        assert agent.run_calls == []
+
     def test_local_control_commands_do_not_mutate_agent_history(self):
         agent = _LocalCommandAgent()
 
@@ -1110,6 +1188,12 @@ class TestSlashCompleter:
     def test_plugins_prefix_matches_command(self):
         assert _slash_completer("/pl", 0) == "/plugins"
         assert _slash_completer("/pl", 1) is None
+
+    def test_compact_prefix_matches_command(self):
+        assert _slash_completer("/co", 0) == "/cost"
+        assert _slash_completer("/co", 1) == "/compact"
+        assert _slash_completer("/co", 2) == "/context"
+        assert _slash_completer("/co", 3) is None
 
     def test_empty_returns_all(self):
         results = []
