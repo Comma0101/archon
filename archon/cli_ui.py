@@ -78,6 +78,16 @@ def _format_chat_response(text: str) -> str:
     return "\n".join(rendered)
 
 
+def _format_terminal_approval_required(command_preview: str) -> str:
+    """Format a compact shell-local approval prompt for blocked dangerous actions."""
+    preview = (command_preview or "").strip() or "(unknown command)"
+    return (
+        f"{ANSI_ERROR}approval required{ANSI_RESET}: dangerous action blocked\n"
+        f"request: {preview}\n"
+        f"{ANSI_DIM}use /approve, /deny, /approve_next, or /approvals{ANSI_RESET}"
+    )
+
+
 def _format_turn_stats(
     elapsed: float,
     turn_in: int,

@@ -2,7 +2,31 @@
 
 from __future__ import annotations
 
+from archon.cli_ui import _format_terminal_approval_required
 from archon.control.contracts import HookEvent
+from archon.safety import Level
+
+
+PENDING_APPROVAL_TTL_SEC = 5 * 60
+APPROVAL_COMMAND_PREVIEW_LIMIT = 240
+
+
+def _truncate_terminal_approval_command(command: str, limit: int = APPROVAL_COMMAND_PREVIEW_LIMIT) -> str:
+    command = (command or "").strip()
+    if len(command) <= limit:
+        return command
+    return command[: max(0, limit - 3)] + "..."
+
+
+def _looks_like_safety_gate_rejection(response: str | None) -> bool:
+    if not isinstance(response, str):
+        return False
+    lowered = response.lower()
+    return (
+        "rejected by safety gate" in lowered
+        or "self-modification rejected" in lowered
+        or lowered.startswith("forbidden:")
+    )
 
 
 def chat_cmd(
@@ -54,6 +78,79 @@ def chat_cmd(
     phase_state = {"label": ""}
     route_counts: dict[str, int] = {}
     counted_route_turn_ids: set[str] = set()
+    approval_state = {
+        "dangerous_mode": False,
+        "approve_next_tokens": 0,
+        "pending_request": None,
+        "next_approval_id": 1,
+        "current_user_input": "",
+        "blocked_pending_id": "",
+    }
+
+    def pending_is_expired(pending: dict | None) -> bool:
+        if not isinstance(pending, dict):
+            return False
+        expires_at = pending.get("expires_at")
+        return isinstance(expires_at, (int, float)) and expires_at <= time_time_fn()
+
+    def clear_expired_pending() -> dict | None:
+        pending = approval_state.get("pending_request")
+        if pending_is_expired(pending):
+            if isinstance(pending, dict):
+                pending["status"] = "expired"
+            approval_state["pending_request"] = None
+            return None
+        return pending if isinstance(pending, dict) else None
+
+    def queue_pending_approval(command: str) -> dict:
+        now = time_time_fn()
+        approval_id = f"{session_id}:{approval_state['next_approval_id']}"
+        approval_state["next_approval_id"] += 1
+        pending = {
+            "approval_id": approval_id,
+            "status": "pending",
+            "created_at": now,
+            "expires_at": now + PENDING_APPROVAL_TTL_SEC,
+            "blocked_command_preview": _truncate_terminal_approval_command(command),
+            "blocked_user_input": str(approval_state.get("current_user_input") or ""),
+        }
+        approval_state["pending_request"] = pending
+        return pending
+
+    def get_terminal_approval_status() -> dict:
+        pending = clear_expired_pending()
+        preview = ""
+        if pending is not None:
+            preview = str(pending.get("blocked_command_preview") or "").strip()
+        return {
+            "dangerous_mode": bool(approval_state.get("dangerous_mode", False)),
+            "approve_next_tokens": max(0, int(approval_state.get("approve_next_tokens", 0) or 0)),
+            "pending": preview or "none",
+            "pending_command_preview": preview,
+            "pending_request": dict(pending) if pending is not None else None,
+        }
+
+    def confirm_for_terminal_session(command: str, level: Level) -> bool:
+        approval_state["blocked_pending_id"] = ""
+        if level == Level.SAFE:
+            return True
+        if level == Level.FORBIDDEN:
+            return False
+        if bool(approval_state.get("dangerous_mode", False)):
+            return True
+        tokens = max(0, int(approval_state.get("approve_next_tokens", 0) or 0))
+        if tokens > 0:
+            approval_state["approve_next_tokens"] = tokens - 1
+            return True
+        pending = queue_pending_approval(command)
+        approval_state["blocked_pending_id"] = str(pending.get("approval_id") or "")
+        return False
+
+    tools = getattr(agent, "tools", None)
+    if tools is not None and hasattr(tools, "confirmer"):
+        tools.confirmer = confirm_for_terminal_session
+    agent.get_terminal_approval_status = get_terminal_approval_status
+    agent._terminal_approval_state = approval_state
 
     def on_thinking():
         spinner.start("thinking")
@@ -161,6 +258,12 @@ def chat_cmd(
                     turn_count = 0
                     route_counts.clear()
                     counted_route_turn_ids.clear()
+                    approval_state["dangerous_mode"] = False
+                    approval_state["approve_next_tokens"] = 0
+                    approval_state["pending_request"] = None
+                    approval_state["next_approval_id"] = 1
+                    approval_state["current_user_input"] = ""
+                    approval_state["blocked_pending_id"] = ""
                     click_echo_fn(f"History cleared. New session: {session_id}")
                     continue
                 if action in {
@@ -192,17 +295,36 @@ def chat_cmd(
                 route_state["lane"] = ""
                 route_state["reason"] = ""
                 phase_state["label"] = ""
+                approval_state["current_user_input"] = user_input
+                approval_state["blocked_pending_id"] = ""
+                clear_expired_pending()
                 pre_in = agent.total_input_tokens
                 pre_out = agent.total_output_tokens
                 t0 = time_time_fn()
                 response = agent.run(user_input)
                 elapsed = time_time_fn() - t0
                 spinner.stop()
+                blocked_pending_id = str(approval_state.get("blocked_pending_id") or "")
+                pending = clear_expired_pending()
+                approval_output = None
+                if (
+                    blocked_pending_id
+                    and pending is not None
+                    and str(pending.get("approval_id") or "") == blocked_pending_id
+                    and _looks_like_safety_gate_rejection(response)
+                ):
+                    approval_output = _format_terminal_approval_required(
+                        str(pending.get("blocked_command_preview") or "")
+                    )
                 turn_in = agent.total_input_tokens - pre_in
                 turn_out = agent.total_output_tokens - pre_out
                 turn_count += 1
-                save_exchange_fn(session_id, user_input, response or "")
-                click_echo_fn(format_chat_response_fn(response or ""))
+                rendered_output = approval_output if approval_output is not None else (response or "")
+                save_exchange_fn(session_id, user_input, rendered_output)
+                if approval_output is not None:
+                    click_echo_fn(approval_output)
+                else:
+                    click_echo_fn(format_chat_response_fn(response or ""))
                 click_echo_fn(
                     format_turn_stats_fn(
                         elapsed,

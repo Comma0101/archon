@@ -30,6 +30,7 @@ from archon.cli_interactive_commands import chat_cmd as _chat_cmd
 from archon.cli_interactive_commands import _tool_spinner_label
 from archon.control.hooks import HookBus
 from archon.prompt import build_skill_guidance as _build_skill_guidance
+from archon.safety import Level
 
 
 class TestCliFormatting:
@@ -1134,6 +1135,43 @@ class _LocalCommandAgent:
         }
 
 
+class _DangerousActionAgent:
+    def __init__(self, command_by_message):
+        self.command_by_message = command_by_message
+        self.hooks = HookBus()
+        self.config = SimpleNamespace(
+            telegram=SimpleNamespace(
+                enabled=False,
+                connect_on_chat=False,
+                allowed_user_ids=[],
+                poll_timeout_sec=30,
+            ),
+            llm=SimpleNamespace(model="test-model"),
+        )
+        self.tools = SimpleNamespace(confirmer=lambda _command, _level: False)
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
+        self.log_label = ""
+        self.run_calls = []
+        self.on_thinking = None
+        self.on_tool_call = None
+
+    def run(self, text):
+        self.run_calls.append(text)
+        command = self.command_by_message.get(text, text)
+        if self.on_tool_call:
+            self.on_tool_call("shell", {"command": command})
+        allowed = self.tools.confirmer(command, Level.DANGEROUS)
+        self.total_input_tokens += 10
+        self.total_output_tokens += 2
+        if not allowed:
+            return "Command rejected by safety gate."
+        return f"ran:{command}"
+
+    def reset(self):
+        return None
+
+
 def _run_chat_session(agent, inputs):
     outputs = []
     input_iter = iter(inputs)
@@ -1335,6 +1373,49 @@ class TestCliLocalInteractiveCommands:
         assert "Compact: history_messages=1 | path=compactions/sessions/local-shell.md | summary=assistant: local shell compaction" in outputs
         assert "Context: history_messages=0 | pending_compactions=1" in outputs
         assert agent.run_calls == []
+
+
+class TestCliPendingApprovalInteractiveChat:
+    @staticmethod
+    def _plain_outputs(outputs):
+        return [re.sub(r"\x1b\[[0-9;]*m", "", text) for text, _err in outputs]
+
+    def test_chat_pending_approval_state_is_exposed_to_status_commands(self):
+        agent = _DangerousActionAgent({"danger": "rm important.txt"})
+
+        outputs = self._plain_outputs(_run_local_command_session(agent, ["danger", "/approvals", "quit"]))
+
+        approval_output = next(text for text in outputs if "approval required" in text.lower())
+        assert "approval required: dangerous action blocked" in approval_output.lower()
+        assert "request: rm important.txt" in approval_output
+        assert "use /approve, /deny, /approve_next, or /approvals" in approval_output
+        assert "Command rejected by safety gate." not in outputs
+        assert "Approvals: dangerous_mode=off | pending=rm important.txt | approve_next_tokens=0" in outputs
+
+        status = agent.get_terminal_approval_status()
+        pending = status["pending_request"]
+        assert pending["status"] == "pending"
+        assert pending["blocked_command_preview"] == "rm important.txt"
+        assert pending["blocked_user_input"] == "danger"
+
+    def test_chat_pending_approval_replaces_the_previous_request(self):
+        agent = _DangerousActionAgent(
+            {
+                "first": "rm first.txt",
+                "second": "systemctl restart nginx",
+            }
+        )
+
+        outputs = self._plain_outputs(_run_local_command_session(agent, ["first", "second", "/approvals", "quit"]))
+
+        assert outputs.count("Command rejected by safety gate.") == 0
+        assert "Approvals: dangerous_mode=off | pending=systemctl restart nginx | approve_next_tokens=0" in outputs
+
+        status = agent.get_terminal_approval_status()
+        pending = status["pending_request"]
+        assert pending["status"] == "pending"
+        assert pending["blocked_command_preview"] == "systemctl restart nginx"
+        assert pending["blocked_user_input"] == "second"
 
     def test_local_control_commands_do_not_mutate_agent_history(self):
         agent = _LocalCommandAgent()
