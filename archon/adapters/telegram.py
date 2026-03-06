@@ -29,6 +29,7 @@ from archon.adapters.telegram_client import (
 )
 from archon.audio.stt import transcribe_audio_bytes
 from archon.audio.tts import convert_wav_to_ogg_opus, synthesize_speech_wav
+from archon.cli_repl_commands import handle_job_command, handle_jobs_command
 from archon.config import ensure_dirs, load_config
 from archon.history import new_session_id, save_exchange
 from archon.news.runner import get_or_build_news_digest
@@ -217,7 +218,7 @@ class TelegramAdapter:
                 chat_id,
                 body,
                 "Archon is connected.\n"
-                "Commands: /help, /reset, /news, /news_status, /approve, /deny, /approvals\n"
+                "Commands: /help, /reset, /jobs, /job <id>, /news, /news_status, /approve, /deny, /approvals\n"
                 "Dangerous commands can be approved with inline buttons or /approve.",
             )
             return
@@ -228,6 +229,8 @@ class TelegramAdapter:
                 body,
                 "Send a message to chat with Archon.\n"
                 "/reset - clear this chat's agent history\n"
+                "/jobs - list recent jobs across workers and calls\n"
+                "/job <id> - show one normalized job summary\n"
                 "/news - fetch or reuse today's AI news digest\n"
                 "/news refresh - force refresh today's digest\n"
                 "/news_status - show daily news state/cache status\n"
@@ -256,6 +259,16 @@ class TelegramAdapter:
         if cmd == "/news":
             self._send_typing(chat_id)
             self._send_text_and_record(chat_id, body, self._build_news_reply(body))
+            return
+
+        handled, msg = handle_jobs_command(None, body)
+        if handled:
+            self._send_text_and_record(chat_id, body, msg)
+            return
+
+        handled, msg = handle_job_command(None, body)
+        if handled:
+            self._send_text_and_record(chat_id, body, msg)
             return
 
         if cmd == "/approve_next":

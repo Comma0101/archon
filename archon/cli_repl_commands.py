@@ -6,6 +6,10 @@ import os
 import re
 from typing import Callable
 
+from archon.calls.store import list_call_job_summaries, load_call_job_summary
+from archon.control.jobs import format_job_summary, format_job_summary_list
+from archon.workers.session_store import list_worker_job_summaries, load_worker_job_summary
+
 
 def handle_model_command(agent, text: str) -> tuple[bool, str]:
     """Handle `/model` command (show current provider/model)."""
@@ -265,6 +269,64 @@ def handle_profile_command(agent, text: str) -> tuple[bool, str]:
     return True, "Usage: /profile [show|set <name>]"
 
 
+def _collect_job_summaries(limit: int = 10):
+    max_items = max(1, int(limit))
+    jobs = list_worker_job_summaries(limit=max_items) + list_call_job_summaries(limit=max_items)
+    jobs.sort(key=lambda job: (job.last_update_at, job.job_id), reverse=True)
+    return jobs[:max_items]
+
+
+def _load_job_summary(job_ref: str):
+    ref = str(job_ref or "").strip()
+    if not ref:
+        return None
+    if ref.startswith("worker:"):
+        return load_worker_job_summary(ref.split(":", 1)[1])
+    if ref.startswith("call:"):
+        return load_call_job_summary(ref.split(":", 1)[1])
+    job = load_worker_job_summary(ref)
+    if job is not None:
+        return job
+    return load_call_job_summary(ref)
+
+
+def handle_jobs_command(agent, text: str) -> tuple[bool, str]:
+    """Handle `/jobs` command (list recent cross-surface jobs)."""
+    _ = agent
+    raw = (text or "").strip()
+    parts = raw.split()
+    if not parts or parts[0].lower() != "/jobs":
+        return False, ""
+
+    limit = 10
+    if len(parts) > 1:
+        try:
+            limit = int(parts[1])
+        except ValueError:
+            return True, "Usage: /jobs [limit]"
+
+    jobs = _collect_job_summaries(limit=limit)
+    if not jobs:
+        return True, "Jobs: none"
+    return True, "Jobs:\n" + format_job_summary_list(jobs)
+
+
+def handle_job_command(agent, text: str) -> tuple[bool, str]:
+    """Handle `/job <id>` command (show one normalized job summary)."""
+    _ = agent
+    raw = (text or "").strip()
+    parts = raw.split(maxsplit=1)
+    if not parts or parts[0].lower() != "/job":
+        return False, ""
+    if len(parts) < 2 or not parts[1].strip():
+        return True, "Usage: /job <id>"
+
+    job = _load_job_summary(parts[1].strip())
+    if job is None:
+        return True, f"Job not found: {parts[1].strip()}"
+    return True, format_job_summary(job)
+
+
 def handle_repl_command(
     agent,
     text: str,
@@ -284,15 +346,23 @@ def handle_repl_command(
         lines = ["Available commands:"]
         for name, desc in slash_commands:
             lines.append(f"  {name:<10} {desc}")
+        lines.append("  /jobs      List recent cross-surface jobs")
+        lines.append("  /job       Show one job summary by ID")
         return "help", "\n".join(lines)
     if raw.lower() == "/reset":
         return "reset", ""
     if raw.lower() in {"/help", "/?"}:
         return (
             "help",
-            "Commands: /help, /reset, /model, /model-list, /model-set <provider>-<model>, /calls [status|on|off], /profile [show|set <name>], /paste\n"
+            "Commands: /help, /reset, /model, /model-list, /model-set <provider>-<model>, /calls [status|on|off], /profile [show|set <name>], /jobs [limit], /job <id>, /paste\n"
             "Multiline paste: paste normally (bracketed paste) or use /paste fallback, end with /end.",
         )
+    handled, msg = handle_jobs_command(agent, raw)
+    if handled:
+        return "jobs", msg
+    handled, msg = handle_job_command(agent, raw)
+    if handled:
+        return "job", msg
     handled, msg = handle_calls_command_fn(agent, raw)
     if handled:
         return "calls", msg

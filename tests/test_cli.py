@@ -302,6 +302,60 @@ class TestCliCommands:
         assert "Unknown profile 'safe'" in msg
         assert agent.policy_profile == "default"
 
+    def test_handle_repl_command_jobs_lists_recent_jobs(self, monkeypatch):
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+        )
+        jobs = [
+            SimpleNamespace(
+                job_id="worker:sess-1",
+                kind="worker_session",
+                status="ok",
+                summary="Looks good",
+                last_update_at="2026-02-24T00:00:10Z",
+            ),
+            SimpleNamespace(
+                job_id="call:call-1",
+                kind="call_mission",
+                status="queued",
+                summary="Call me",
+                last_update_at="2026-02-24T00:00:09Z",
+            ),
+        ]
+        monkeypatch.setattr("archon.cli_repl_commands._collect_job_summaries", lambda limit=10: jobs)
+
+        action, msg = _handle_repl_command(agent, "/jobs")
+
+        assert action == "jobs"
+        assert "worker:sess-1" in msg
+        assert "call:call-1" in msg
+
+    def test_handle_repl_command_job_shows_summary(self, monkeypatch):
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+        )
+        job = SimpleNamespace(
+            job_id="worker:sess-1",
+            kind="worker_session",
+            status="ok",
+            summary="Looks good",
+            last_update_at="2026-02-24T00:00:10Z",
+        )
+        monkeypatch.setattr(
+            "archon.cli_repl_commands._load_job_summary",
+            lambda job_ref: job if job_ref == "worker:sess-1" else None,
+        )
+
+        action, msg = _handle_repl_command(agent, "/job worker:sess-1")
+
+        assert action == "job"
+        assert "job_id: worker:sess-1" in msg
+        assert "job_kind: worker_session" in msg
+        assert "job_status: ok" in msg
+        assert "job_summary: Looks good" in msg
+
 
 class TestSlashCompleter:
     def test_matches_prefix(self):

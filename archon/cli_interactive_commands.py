@@ -137,7 +137,7 @@ def chat_cmd(
                     turn_count = 0
                     click_echo_fn(f"History cleared. New session: {session_id}")
                     continue
-                if action in {"help", "model", "calls", "profile"}:
+                if action in {"help", "model", "calls", "profile", "jobs", "job"}:
                     click_echo_fn(msg)
                     continue
 

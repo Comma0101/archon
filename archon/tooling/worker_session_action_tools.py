@@ -163,6 +163,7 @@ def register_worker_session_action_tools(registry, ns):
             )
             return (
                 f"archon_session_id: {active.session_id}\n"
+                f"job_id: worker:{active.session_id}\n"
                 f"selected_worker: {record.selected_worker}\n"
                 f"mode: {mode_value}\n"
                 f"background: started\n"
@@ -175,6 +176,7 @@ def register_worker_session_action_tools(registry, ns):
         if updated is None:
             return (
                 f"archon_session_id: {session_id}\n"
+                f"job_id: worker:{session_id}\n"
                 "worker_session_recording: error (failed to append follow-up turn)"
             )
         registry._set_worker_session_affinity(
@@ -186,6 +188,7 @@ def register_worker_session_action_tools(registry, ns):
         )
         return (
             f"archon_session_id: {session_id}\n"
+            f"job_id: worker:{session_id}\n"
             f"selected_worker: {record.selected_worker}\n"
             f"recorded_at: {updated.updated_at}\n"
             f"turn_count: {updated.turn_count}\n\n"
@@ -404,4 +407,3 @@ def register_worker_session_action_tools(registry, ns):
     )
 
     return {"worker_send": worker_send}
-

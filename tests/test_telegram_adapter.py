@@ -306,6 +306,44 @@ class TestTelegramAdapterCommands:
         assert "today_cache: hit" in sent[0][1]
         assert "cache_meta: items=2" in sent[0][1]
 
+    def test_job_command_renders_job_summary(self, monkeypatch):
+        adapter = _adapter()
+        sent = []
+        saved = []
+
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260225-090000")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: saved.append((session_id, user_msg, assistant_msg)),
+        )
+        monkeypatch.setattr(
+            "archon.adapters.telegram.handle_job_command",
+            lambda agent, text: (
+                True,
+                "job_id: worker:sess-1\n"
+                "job_kind: worker_session\n"
+                "job_status: ok\n"
+                "job_summary: Looks good\n"
+                "job_last_update_at: 2026-02-24T00:00:10Z",
+            ),
+        )
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+        adapter._handle_message(
+            {
+                "text": "/job worker:sess-1",
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        assert sent
+        assert "job_id: worker:sess-1" in sent[0][1]
+        assert "job_kind: worker_session" in sent[0][1]
+        assert saved
+        assert saved[0][0] == "tg-99-20260225-090000"
+        assert saved[0][1] == "/job worker:sess-1"
+
     def test_approve_next_allows_one_dangerous_action(self, monkeypatch):
         adapter = _adapter()
         sent = []
