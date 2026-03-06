@@ -1438,18 +1438,63 @@ class TestCliPendingApprovalInteractiveChat:
         assert outputs.count("Approvals: dangerous_mode=off | pending=none | approve_next_tokens=1") == 2
         assert agent.run_calls == []
 
-    def test_chat_pending_approval_acknowledges_without_replay_and_deny_clears_state(self):
+    def test_chat_approve_replays_pending_request_and_clears_state(self):
+        agent = _DangerousActionAgent({"danger": "rm important.txt"})
+
+        outputs = self._plain_outputs(_run_local_command_session(agent, ["danger", "/approve", "/approvals", "quit"]))
+
+        assert "Pending dangerous request approved. Replaying request..." in outputs
+        assert "ran:rm important.txt" in outputs
+        assert "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0" in outputs
+        assert agent.run_calls == ["danger", "danger"]
+
+    def test_chat_deny_clears_pending_state(self):
         agent = _DangerousActionAgent({"danger": "rm important.txt"})
 
         outputs = self._plain_outputs(
-            _run_local_command_session(agent, ["danger", "/approve", "/approvals", "/deny", "/approvals", "quit"])
+            _run_local_command_session(agent, ["danger", "/deny", "/approvals", "quit"])
         )
 
-        assert "Pending dangerous request approved. Replay not implemented yet." in outputs
-        assert "Approvals: dangerous_mode=off | pending=rm important.txt | approve_next_tokens=0" in outputs
         assert "Denied pending dangerous request." in outputs
         assert "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0" in outputs
         assert agent.run_calls == ["danger"]
+
+    def test_chat_approve_next_allows_exactly_one_dangerous_action(self):
+        agent = _DangerousActionAgent(
+            {
+                "first": "rm first.txt",
+                "second": "rm second.txt",
+            }
+        )
+
+        outputs = self._plain_outputs(
+            _run_local_command_session(agent, ["/approve_next", "first", "second", "/approvals", "quit"])
+        )
+
+        assert "ran:rm first.txt" in outputs
+        assert any("approval required: dangerous action blocked" in text.lower() for text in outputs)
+        assert "Approvals: dangerous_mode=off | pending=rm second.txt | approve_next_tokens=0" in outputs
+        assert agent.run_calls == ["first", "second"]
+
+    def test_chat_approvals_on_allows_dangerous_actions_until_turned_off(self):
+        agent = _DangerousActionAgent(
+            {
+                "first": "rm first.txt",
+                "second": "rm second.txt",
+            }
+        )
+
+        outputs = self._plain_outputs(
+            _run_local_command_session(
+                agent,
+                ["/approvals on", "first", "/approvals off", "second", "/approvals", "quit"],
+            )
+        )
+
+        assert "ran:rm first.txt" in outputs
+        assert any("approval required: dangerous action blocked" in text.lower() for text in outputs)
+        assert "Approvals: dangerous_mode=off | pending=rm second.txt | approve_next_tokens=0" in outputs
+        assert agent.run_calls == ["first", "second"]
 
     def test_local_control_commands_do_not_mutate_agent_history(self):
         agent = _LocalCommandAgent()

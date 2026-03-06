@@ -85,6 +85,7 @@ def chat_cmd(
         "next_approval_id": 1,
         "current_user_input": "",
         "blocked_pending_id": "",
+        "pending_replay_input": "",
     }
 
     def pending_is_expired(pending: dict | None) -> bool:
@@ -151,10 +152,18 @@ def chat_cmd(
             return "No pending dangerous request to approve."
         status = str(pending.get("status") or "").strip().lower()
         if status == "approved":
-            return "Pending dangerous request already approved. Replay not implemented yet."
+            return "Pending dangerous request already approved. Replaying request..."
+        blocked_user_input = str(pending.get("blocked_user_input") or "").strip()
+        if not blocked_user_input:
+            return "Pending dangerous request approved. Replay unavailable."
         pending["status"] = "approved"
-        approval_state["pending_request"] = pending
-        return "Pending dangerous request approved. Replay not implemented yet."
+        approval_state["approve_next_tokens"] = max(
+            0,
+            int(approval_state.get("approve_next_tokens", 0) or 0),
+        ) + 1
+        approval_state["pending_replay_input"] = blocked_user_input
+        approval_state["pending_request"] = None
+        return "Pending dangerous request approved. Replaying request..."
 
     def deny_pending_request() -> str:
         pending = clear_expired_pending()
@@ -170,6 +179,11 @@ def chat_cmd(
             int(approval_state.get("approve_next_tokens", 0) or 0),
         ) + 1
         return format_terminal_approval_status()
+
+    def consume_terminal_pending_replay() -> str:
+        replay_input = str(approval_state.get("pending_replay_input") or "").strip()
+        approval_state["pending_replay_input"] = ""
+        return replay_input
 
     def confirm_for_terminal_session(command: str, level: Level) -> bool:
         approval_state["blocked_pending_id"] = ""
@@ -195,6 +209,7 @@ def chat_cmd(
     agent.approve_pending_request = approve_pending_request
     agent.deny_pending_request = deny_pending_request
     agent.approve_next_dangerous_action = approve_next_dangerous_action
+    agent.consume_terminal_pending_replay = consume_terminal_pending_replay
     agent._terminal_approval_state = approval_state
 
     def on_thinking():
@@ -309,8 +324,17 @@ def chat_cmd(
                     approval_state["next_approval_id"] = 1
                     approval_state["current_user_input"] = ""
                     approval_state["blocked_pending_id"] = ""
+                    approval_state["pending_replay_input"] = ""
                     click_echo_fn(f"History cleared. New session: {session_id}")
                     continue
+                if action == "approve":
+                    click_echo_fn(msg)
+                    consume_replay = getattr(agent, "consume_terminal_pending_replay", None)
+                    replay_input = consume_replay() if callable(consume_replay) else ""
+                    if replay_input:
+                        user_input = replay_input
+                    else:
+                        continue
                 if action in {
                     "help",
                     "status",
@@ -320,7 +344,6 @@ def chat_cmd(
                     "doctor",
                     "permissions",
                     "approvals",
-                    "approve",
                     "deny",
                     "approve_next",
                     "skills",
