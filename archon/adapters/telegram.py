@@ -351,6 +351,7 @@ class TelegramAdapter:
             agent = self.agent_factory()
             agent.log_label = f"telegram chat={chat_id}"
             self._wire_chat_confirmer(agent, chat_id)
+            self._wire_chat_route_progress(agent, chat_id)
             self._agents[chat_id] = agent
         else:
             agent.log_label = f"telegram chat={chat_id}"
@@ -366,6 +367,7 @@ class TelegramAdapter:
                 "chat_id": chat_id,
                 "user_text": body,
                 "blocked_approval_id": None,
+                "route_progress_turn_id": None,
             }
             response = agent.run(body)
         except Exception as e:
@@ -480,6 +482,40 @@ class TelegramAdapter:
         tools.confirmer = lambda command, level, _chat_id=chat_id: self._confirm_for_chat(
             _chat_id, command, level
         )
+
+    def _wire_chat_route_progress(self, agent: "Agent", chat_id: int) -> None:
+        """Register one route-progress hook per Telegram chat agent."""
+        if getattr(agent, "_telegram_route_progress_wired", False):
+            return
+        hooks = getattr(agent, "hooks", None)
+        if hooks is None or not hasattr(hooks, "register"):
+            return
+        hooks.register(
+            "orchestrator.route",
+            lambda event, _chat_id=chat_id: self._handle_route_progress_event(_chat_id, event.payload or {}),
+        )
+        setattr(agent, "_telegram_route_progress_wired", True)
+
+    def _handle_route_progress_event(self, chat_id: int, payload: dict) -> None:
+        lane = str(payload.get("lane", "")).strip().lower()
+        if lane != "job":
+            return
+        ctx = self._current_request_ctx.get(chat_id)
+        if not isinstance(ctx, dict):
+            return
+        turn_id = str(payload.get("turn_id", "")).strip()
+        if turn_id and ctx.get("route_progress_turn_id") == turn_id:
+            return
+        ctx["route_progress_turn_id"] = turn_id
+        self._send_text(chat_id, self._format_route_progress_text(payload))
+
+    def _format_route_progress_text(self, payload: dict) -> str:
+        lane = str(payload.get("lane", "")).strip().lower() or "operator"
+        reason = str(payload.get("reason", "")).strip().replace("_", " ")
+        text = f"Working... route: {lane}"
+        if reason:
+            text += f" | {reason}"
+        return text
 
     def _confirm_for_chat(self, chat_id: int, command: str, level: Level) -> bool:
         """Per-chat Telegram confirmer with one-shot and sticky approval modes."""

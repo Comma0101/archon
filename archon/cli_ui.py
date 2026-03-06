@@ -78,19 +78,56 @@ def _format_chat_response(text: str) -> str:
     return "\n".join(rendered)
 
 
-def _format_turn_stats(elapsed: float, turn_in: int, turn_out: int, total_in: int, total_out: int) -> str:
+def _format_turn_stats(
+    elapsed: float,
+    turn_in: int,
+    turn_out: int,
+    total_in: int,
+    total_out: int,
+    *,
+    route_lane: str = "",
+    route_reason: str = "",
+) -> str:
     """Format a dim per-turn stats line."""
     total = total_in + total_out
+    lane = (route_lane or "").strip().lower()
+    reason = str(route_reason or "").strip().replace("_", " ")
+    route_suffix = ""
+    if lane:
+        route_suffix = f" | route: {lane}"
+        if reason:
+            route_suffix += f" ({reason})"
     return (
         f"{ANSI_DIM}  {elapsed:.1f}s | {turn_in:,} in | {turn_out:,} out | "
-        f"session: {total:,} tokens{ANSI_RESET}"
+        f"session: {total:,} tokens{route_suffix}{ANSI_RESET}"
     )
 
 
-def _format_session_summary(turn_count: int, total_in: int, total_out: int) -> str:
+def _format_session_summary(
+    turn_count: int,
+    total_in: int,
+    total_out: int,
+    *,
+    route_counts: dict[str, int] | None = None,
+) -> str:
     """Format the session exit summary line."""
     total = total_in + total_out
+    route_summary = ""
+    if route_counts:
+        ordered = []
+        for lane in ("fast", "operator", "job"):
+            count = int(route_counts.get(lane, 0) or 0)
+            if count > 0:
+                ordered.append(f"{lane}={count}")
+        for lane, count in sorted(route_counts.items()):
+            if lane in {"fast", "operator", "job"}:
+                continue
+            value = int(count or 0)
+            if value > 0:
+                ordered.append(f"{lane}={value}")
+        if ordered:
+            route_summary = f" | routes: {', '.join(ordered)}"
     return (
         f"{ANSI_DIM}Session: {turn_count} turns | {total_in:,} in | {total_out:,} out | "
-        f"{total:,} total tokens{ANSI_RESET}"
+        f"{total:,} total tokens{route_summary}{ANSI_RESET}"
     )

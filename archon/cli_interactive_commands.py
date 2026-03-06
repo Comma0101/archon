@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from archon.control.contracts import HookEvent
+
 
 def chat_cmd(
     *,
@@ -48,6 +50,8 @@ def chat_cmd(
             click_echo_fn(f"[telegram] disabled: {e}", err=True)
 
     spinner = spinner_cls()
+    route_state = {"lane": "", "reason": ""}
+    route_counts: dict[str, int] = {}
 
     def on_thinking():
         spinner.start("thinking")
@@ -55,8 +59,20 @@ def chat_cmd(
     def on_tool_call(_name, _args):
         spinner.start(_tool_spinner_label(_name, _args))
 
+    def on_route(event: HookEvent):
+        payload = event.payload or {}
+        lane = str(payload.get("lane", "")).strip().lower()
+        reason = str(payload.get("reason", "")).strip()
+        route_state["lane"] = lane
+        route_state["reason"] = reason
+        if lane:
+            route_counts[lane] = route_counts.get(lane, 0) + 1
+        if lane and lane != "fast":
+            spinner.start(f"route {lane}")
+
     agent.on_thinking = on_thinking
     agent.on_tool_call = on_tool_call
+    agent.hooks.register("orchestrator.route", on_route)
 
     readline_module.set_completer(slash_completer_fn)
     readline_module.set_completer_delims(" \t")
@@ -80,6 +96,7 @@ def chat_cmd(
                             turn_count,
                             agent.total_input_tokens,
                             agent.total_output_tokens,
+                            route_counts=route_counts,
                         )
                     )
                 click_echo_fn("\nBye!")
@@ -125,6 +142,7 @@ def chat_cmd(
                             turn_count,
                             agent.total_input_tokens,
                             agent.total_output_tokens,
+                            route_counts=route_counts,
                         )
                     )
                 click_echo_fn("Bye!")
@@ -143,6 +161,8 @@ def chat_cmd(
 
             try:
                 agent.log_label = f"terminal session={session_id}"
+                route_state["lane"] = ""
+                route_state["reason"] = ""
                 pre_in = agent.total_input_tokens
                 pre_out = agent.total_output_tokens
                 t0 = time_time_fn()
@@ -161,6 +181,8 @@ def chat_cmd(
                         turn_out,
                         agent.total_input_tokens,
                         agent.total_output_tokens,
+                        route_lane=route_state.get("lane", ""),
+                        route_reason=route_state.get("reason", ""),
                     )
                 )
             except KeyboardInterrupt:

@@ -58,12 +58,40 @@ class TestCliFormatting:
         assert "56 out" in out
         assert "session: 1,290 tokens" in out
 
+    def test_format_turn_stats_includes_route_state_when_present(self):
+        out = self._plain(
+            _format_turn_stats(
+                1.23,
+                1234,
+                56,
+                1234,
+                56,
+                route_lane="job",
+                route_reason="broad_scope_request",
+            )
+        )
+        assert "route: job" in out
+        assert "broad scope request" in out
+
     def test_format_session_summary(self):
         out = self._plain(_format_session_summary(3, 1200, 345))
         assert "Session: 3 turns" in out
         assert "1,200 in" in out
         assert "345 out" in out
         assert "1,545 total tokens" in out
+
+    def test_format_session_summary_includes_route_progress_when_available(self):
+        out = self._plain(
+            _format_session_summary(
+                3,
+                1200,
+                345,
+                route_counts={"fast": 1, "job": 2},
+            )
+        )
+        assert "routes:" in out
+        assert "fast=1" in out
+        assert "job=2" in out
 
 
 class TestCliPasteMode:

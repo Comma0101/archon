@@ -2,6 +2,7 @@
 
 from archon.adapters.telegram import TelegramAdapter
 from archon.config import Config
+from archon.control.hooks import HookBus
 from archon.news.models import NewsDigest, NewsRunResult
 from archon.safety import Level
 
@@ -38,6 +39,32 @@ class _DangerousAgent:
         if not self.tools.confirmer("pacman -Q | head", Level.DANGEROUS):
             return "Command rejected by safety gate."
         return "dangerous command output"
+
+    def reset(self):
+        self.messages.clear()
+
+
+class _JobRouteAgent:
+    def __init__(self):
+        self.messages = []
+        self.hooks = HookBus()
+        self.log_label = ""
+        self.last_turn_id = ""
+
+    def run(self, text: str) -> str:
+        self.messages.append(text)
+        self.last_turn_id = "t001"
+        self.hooks.emit_kind(
+            "orchestrator.route",
+            task_id=self.last_turn_id,
+            payload={
+                "turn_id": self.last_turn_id,
+                "lane": "job",
+                "reason": "broad_scope_request",
+                "surface": "telegram",
+            },
+        )
+        return "ok"
 
     def reset(self):
         self.messages.clear()
@@ -379,6 +406,41 @@ class TestTelegramAdapterCommands:
         assert saved
         assert saved[0][0] == "tg-99-20260225-090001"
         assert saved[0][1] == "/jobs"
+
+    def test_job_lane_route_progress_is_sent_before_final_reply(self, monkeypatch):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: _JobRouteAgent(),
+            poll_timeout_sec=1,
+        )
+        sent = []
+        saved = []
+
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260225-090002")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: saved.append((session_id, user_msg, assistant_msg)),
+        )
+        monkeypatch.setattr(adapter, "_send_typing", lambda chat_id: None)
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+        adapter._handle_message(
+            {
+                "text": "research this deeply",
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        assert len(sent) == 2
+        assert "route: job" in sent[0][1].lower()
+        assert "broad scope request" in sent[0][1].lower()
+        assert sent[1][1] == "ok"
+        assert saved
+        assert saved[0][0] == "tg-99-20260225-090002"
+        assert saved[0][1] == "research this deeply"
+        assert saved[0][2] == "ok"
 
     def test_approve_next_allows_one_dangerous_action(self, monkeypatch):
         adapter = _adapter()
