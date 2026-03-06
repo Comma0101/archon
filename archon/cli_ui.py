@@ -85,13 +85,16 @@ def _format_turn_stats(
     total_in: int,
     total_out: int,
     *,
+    phase_label: str = "",
     route_lane: str = "",
     route_reason: str = "",
 ) -> str:
     """Format a dim per-turn stats line."""
     total = total_in + total_out
+    phase = str(phase_label or "").strip()
     lane = (route_lane or "").strip().lower()
     reason = str(route_reason or "").strip().replace("_", " ")
+    phase_suffix = f" | phase: {phase}" if phase else ""
     route_suffix = ""
     if lane:
         route_suffix = f" | route: {lane}"
@@ -99,7 +102,7 @@ def _format_turn_stats(
             route_suffix += f" ({reason})"
     return (
         f"{ANSI_DIM}  {elapsed:.1f}s | {turn_in:,} in | {turn_out:,} out | "
-        f"session: {total:,} tokens{route_suffix}{ANSI_RESET}"
+        f"session: {total:,} tokens{phase_suffix}{route_suffix}{ANSI_RESET}"
     )
 
 

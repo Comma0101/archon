@@ -27,6 +27,7 @@ from archon.cli import (
     _SLASH_COMMANDS,
 )
 from archon.cli_interactive_commands import chat_cmd as _chat_cmd
+from archon.cli_interactive_commands import _tool_spinner_label
 from archon.control.hooks import HookBus
 from archon.prompt import build_skill_guidance as _build_skill_guidance
 
@@ -78,6 +79,19 @@ class TestCliFormatting:
         )
         assert "route: job" in out
         assert "broad scope request" in out
+
+    def test_format_turn_stats_includes_phase_when_present(self):
+        out = self._plain(
+            _format_turn_stats(
+                1.23,
+                1234,
+                56,
+                1234,
+                56,
+                phase_label="mcp exa",
+            )
+        )
+        assert "phase: mcp exa" in out
 
     def test_format_session_summary(self):
         out = self._plain(_format_session_summary(3, 1200, 345))
@@ -874,6 +888,7 @@ class _LocalCommandAgent:
         self.policy_profile = "safe"
         self.total_input_tokens = 120
         self.total_output_tokens = 30
+        self.history = []
         self.log_label = ""
         self.run_calls = []
         self.on_thinking = None
@@ -1064,6 +1079,13 @@ class TestCliLocalInteractiveCommands:
         assert "Plugin mcp:docs: type=mcp | enabled=on | mode=read_only | transport=stdio" in outputs
         assert agent.run_calls == []
 
+    def test_local_control_commands_do_not_mutate_agent_history(self):
+        agent = _LocalCommandAgent()
+
+        _run_local_command_session(agent, ["/skills", "/plugins", "quit"])
+
+        assert agent.history == []
+
 
 class TestSlashCompleter:
     def test_matches_prefix(self):
@@ -1138,6 +1160,12 @@ class TestSlashCompleter:
         assert _slash_completer("", 0) == "list"
         assert _slash_completer("", 1) == "show"
         assert _slash_completer("", 2) is None
+
+
+class TestCliPhaseLabels:
+    def test_tool_spinner_label_distinguishes_mcp_and_worker_tools(self):
+        assert _tool_spinner_label("mcp_call", {"server": "exa", "tool": "web_search"}) == "mcp exa"
+        assert _tool_spinner_label("worker_send", {"session_id": "sess-12345678"}) == "worker send sess-123"
 
 
 class TestPickSlashCommand:

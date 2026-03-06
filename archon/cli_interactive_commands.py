@@ -51,6 +51,7 @@ def chat_cmd(
 
     spinner = spinner_cls()
     route_state = {"lane": "", "reason": ""}
+    phase_state = {"label": ""}
     route_counts: dict[str, int] = {}
     counted_route_turn_ids: set[str] = set()
 
@@ -58,7 +59,9 @@ def chat_cmd(
         spinner.start("thinking")
 
     def on_tool_call(_name, _args):
-        spinner.start(_tool_spinner_label(_name, _args))
+        label = _tool_spinner_label(_name, _args)
+        phase_state["label"] = label
+        spinner.start(label)
 
     def on_route(event: HookEvent):
         payload = event.payload or {}
@@ -182,6 +185,7 @@ def chat_cmd(
                 agent.log_label = f"terminal session={session_id}"
                 route_state["lane"] = ""
                 route_state["reason"] = ""
+                phase_state["label"] = ""
                 pre_in = agent.total_input_tokens
                 pre_out = agent.total_output_tokens
                 t0 = time_time_fn()
@@ -200,6 +204,7 @@ def chat_cmd(
                         turn_out,
                         agent.total_input_tokens,
                         agent.total_output_tokens,
+                        phase_label=phase_state.get("label", ""),
                         route_lane=route_state.get("lane", ""),
                         route_reason=route_state.get("reason", ""),
                     )
@@ -231,6 +236,9 @@ def _tool_spinner_label(name: str, args: dict | None) -> str:
     """Compact label for long-running tool phases in terminal UX."""
     tool = (name or "").strip().lower()
     data = args or {}
+    if tool == "mcp_call":
+        server = str(data.get("server", "") or "").strip().lower()
+        return f"mcp {server}" if server else "mcp"
     if tool == "delegate_code_task":
         worker = str(data.get("worker", "auto") or "auto").strip().lower()
         return f"delegate {worker}"
