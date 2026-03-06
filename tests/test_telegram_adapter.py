@@ -344,6 +344,42 @@ class TestTelegramAdapterCommands:
         assert saved[0][0] == "tg-99-20260225-090000"
         assert saved[0][1] == "/job worker:sess-1"
 
+    def test_jobs_command_renders_job_list(self, monkeypatch):
+        adapter = _adapter()
+        sent = []
+        saved = []
+
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260225-090001")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: saved.append((session_id, user_msg, assistant_msg)),
+        )
+        monkeypatch.setattr(
+            "archon.adapters.telegram.handle_jobs_command",
+            lambda agent, text: (
+                True,
+                "Jobs:\n"
+                "- worker:sess-1 [worker_session] ok | 2026-02-24T00:00:10Z | Looks good\n"
+                "- call:call-1 [call_mission] queued | 2026-02-24T00:00:09Z | Call me",
+            ),
+        )
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+        adapter._handle_message(
+            {
+                "text": "/jobs",
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        assert sent
+        assert "worker:sess-1" in sent[0][1]
+        assert "call:call-1" in sent[0][1]
+        assert saved
+        assert saved[0][0] == "tg-99-20260225-090001"
+        assert saved[0][1] == "/jobs"
+
     def test_approve_next_allows_one_dangerous_action(self, monkeypatch):
         adapter = _adapter()
         sent = []

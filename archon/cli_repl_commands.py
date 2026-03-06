@@ -346,8 +346,6 @@ def handle_repl_command(
         lines = ["Available commands:"]
         for name, desc in slash_commands:
             lines.append(f"  {name:<10} {desc}")
-        lines.append("  /jobs      List recent cross-surface jobs")
-        lines.append("  /job       Show one job summary by ID")
         return "help", "\n".join(lines)
     if raw.lower() == "/reset":
         return "reset", ""

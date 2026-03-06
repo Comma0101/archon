@@ -364,6 +364,11 @@ class TestSlashCompleter:
         assert _slash_completer("/mo", 2) == "/model-set"
         assert _slash_completer("/mo", 3) is None
 
+    def test_job_prefix_matches_job_commands(self):
+        assert _slash_completer("/jo", 0) == "/jobs"
+        assert _slash_completer("/jo", 1) == "/job"
+        assert _slash_completer("/jo", 2) is None
+
     def test_empty_returns_all(self):
         results = []
         for i in range(10):
