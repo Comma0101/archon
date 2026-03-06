@@ -492,6 +492,7 @@ def prefetch_for_query(
             {
                 "path": path,
                 "kind": hit.get("kind", ""),
+                "layer": hit.get("layer", ""),
                 "scope": hit.get("scope", ""),
                 "stability": hit.get("stability", ""),
                 "last_modified": hit.get("last_modified", ""),
@@ -508,7 +509,7 @@ def _build_index_entry(path: Path) -> dict:
     text = path.read_text(errors="replace")
     title = _extract_title(text) or path.stem.replace("-", " ").replace("_", " ").title()
     summary_text = _extract_summary(text)
-    kind, scope, stability = _classify(rel)
+    kind, scope, stability, layer = _classify(rel)
     aliases = _aliases_from_path(rel, title)
     tags = _tags_for_entry(rel, kind, scope)
     return {
@@ -516,6 +517,7 @@ def _build_index_entry(path: Path) -> dict:
         "title": title,
         "summary": summary_text,
         "kind": kind,
+        "layer": layer,
         "scope": scope,
         "stability": stability,
         "aliases": aliases,
@@ -563,25 +565,29 @@ def _extract_summary(text: str, max_lines: int = 2, max_chars: int = 220) -> str
     return summary_text
 
 
-def _classify(rel_path: str) -> tuple[str, str, str]:
+def _classify(rel_path: str) -> tuple[str, str, str, str]:
     rel = rel_path.replace("\\", "/")
     if rel == "MEMORY.md":
-        return "memory_index_human", "global", "semi_stable"
+        return "memory_index_human", "global", "semi_stable", "user"
     if rel == "projects.md":
-        return "project_registry", "global", "semi_stable"
+        return "project_registry", "global", "semi_stable", "project"
     if rel.startswith("projects/"):
         slug = Path(rel).stem
-        return "project", f"project:{slug}", "semi_stable"
+        return "project", f"project:{slug}", "semi_stable", "project"
     if rel.startswith("profiles/"):
         slug = Path(rel).stem
         if slug in {"system", "system-profile"}:
-            return "system_profile", "global", "semi_stable"
-        return "profile", "global", "semi_stable"
+            return "system_profile", "global", "semi_stable", "machine"
+        return "profile", "global", "semi_stable", "user"
+    if rel.startswith("compactions/sessions/"):
+        return "compaction_summary", "session", "volatile", "session"
+    if rel.startswith("compactions/tasks/"):
+        return "compaction_summary", "task", "volatile", "task"
     if rel.startswith("decisions/"):
-        return "decision", "global", "stable"
+        return "decision", "global", "stable", "user"
     if rel.startswith("archive/"):
-        return "archive", "archive", "volatile"
-    return "note", "global", "semi_stable"
+        return "archive", "archive", "volatile", "task"
+    return "note", "global", "semi_stable", "user"
 
 
 def _aliases_from_path(rel_path: str, title: str) -> list[str]:
@@ -660,7 +666,74 @@ def _score_entry(entry: dict, raw_query: str, q_tokens: set[str]) -> float:
 
     if kind == "archive":
         score -= 3.0
+    if kind == "compaction_summary":
+        score += 1.0
     return score
+
+
+def compact_history(
+    messages: list[dict],
+    *,
+    layer: str = "session",
+    summary_id: str = "latest",
+    max_entries: int = 8,
+) -> dict:
+    """Persist a compact markdown summary of prior conversation state."""
+    layer_value = (layer or "session").strip().lower()
+    if layer_value == "task":
+        rel_path = f"compactions/tasks/{summary_id}.md"
+        title = "# Task Compaction Summary"
+    else:
+        layer_value = "session"
+        rel_path = f"compactions/sessions/{summary_id}.md"
+        title = "# Session Compaction Summary"
+
+    selected = list(messages or [])[-max(1, int(max_entries)) :]
+    bullets: list[str] = []
+    for message in selected:
+        role = str(message.get("role", "unknown") or "unknown").strip()
+        text = _flatten_message_content(message.get("content"))
+        if not text:
+            continue
+        bullets.append(f"- {role}: {text}")
+
+    if not bullets:
+        bullets.append("- assistant: No compactable history content.")
+
+    content = title + "\n\n" + "\n".join(bullets) + "\n"
+    path = write(rel_path, content)
+    summary = bullets[0][2:] if bullets else ""
+    return {
+        "path": path,
+        "layer": layer_value,
+        "summary": summary,
+    }
+
+
+def _flatten_message_content(content: object, max_chars: int = 240) -> str:
+    if isinstance(content, str):
+        text = content.strip()
+    elif isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type", "")).strip()
+            if item_type == "text":
+                piece = str(item.get("text", "")).strip()
+            elif item_type == "tool_result":
+                piece = str(item.get("content", "")).strip()
+            else:
+                piece = ""
+            if piece:
+                parts.append(piece)
+        text = " ".join(parts).strip()
+    else:
+        text = str(content or "").strip()
+
+    if len(text) > max_chars:
+        text = text[: max_chars - 3].rstrip() + "..."
+    return text
 
 
 def capture_preference_to_inbox(text: str, source: str = "user_message") -> dict | None:

@@ -68,6 +68,7 @@ class Agent:
         self.log_label: str = ""
         self._turn_counter = 0
         self.last_turn_id: str = ""
+        self._pending_compactions: list[dict] = []
         self.tools.set_execute_event_handler(self._on_tool_execute_event)
 
     @property
@@ -89,10 +90,12 @@ class Agent:
         self.history.append({"role": "user", "content": user_message})
         _maybe_capture_preference_memory(user_message)
         skill_guidance = build_skill_guidance(self.config, profile_name=active_profile)
+        pending_compactions = self._consume_pending_compactions()
         turn_system_prompt = _build_turn_system_prompt(
             self.system_prompt,
             user_message,
             skill_guidance=skill_guidance,
+            compactions=pending_compactions,
         )
 
         for iteration in range(self.max_iterations):
@@ -223,10 +226,12 @@ class Agent:
         self.history.append({"role": "user", "content": user_message})
         _maybe_capture_preference_memory(user_message)
         skill_guidance = build_skill_guidance(self.config, profile_name=active_profile)
+        pending_compactions = self._consume_pending_compactions()
         turn_system_prompt = _build_turn_system_prompt(
             self.system_prompt,
             user_message,
             skill_guidance=skill_guidance,
+            compactions=pending_compactions,
         )
 
         for iteration in range(self.max_iterations):
@@ -491,19 +496,64 @@ class Agent:
             trim_to_chars = max(1, max_chars - 1)
 
         history_chars = _estimate_history_chars(self.history)
+        pending_compactions: list[dict] = []
         if len(self.history) <= max_msgs and (max_chars <= 0 or history_chars <= max_chars):
+            self._pending_compactions = []
             return
 
         # First apply the message-count trim if needed.
         if len(self.history) > max_msgs:
+            dropped_for_compaction = list(self.history[:-trim_to])
             self.history = self.history[-trim_to:]
             history_chars = _estimate_history_chars(self.history)
+            artifact = self._compact_history_segment(
+                dropped_for_compaction,
+                layer="session",
+            )
+            if artifact is not None:
+                pending_compactions.append(artifact)
 
         # Then enforce a lightweight char budget so giant messages/tool outputs trim earlier.
+        dropped_for_task_compaction: list[dict] = []
         if max_chars > 0 and trim_to_chars > 0 and history_chars > max_chars:
             while len(self.history) > 1 and history_chars > trim_to_chars:
                 dropped = self.history.pop(0)
                 history_chars -= _estimate_message_chars(dropped)
+                dropped_for_task_compaction.append(dropped)
+
+        artifact = self._compact_history_segment(
+            dropped_for_task_compaction,
+            layer="task",
+        )
+        if artifact is not None:
+            pending_compactions.append(artifact)
+        self._pending_compactions = pending_compactions
+
+    def _compact_history_segment(self, messages: list[dict], *, layer: str) -> dict | None:
+        if not messages:
+            return None
+        try:
+            artifact = memory_store.compact_history(
+                messages,
+                layer=layer,
+                summary_id=f"history-{self.last_turn_id or 'latest'}",
+            )
+        except Exception:
+            return None
+        if not isinstance(artifact, dict):
+            return None
+        path = str(artifact.get("path", "")).strip()
+        if not path:
+            return None
+        artifact["path"] = path
+        artifact["layer"] = str(artifact.get("layer", layer)).strip() or layer
+        artifact["summary"] = str(artifact.get("summary", "")).strip()
+        return artifact
+
+    def _consume_pending_compactions(self) -> list[dict]:
+        artifacts = list(self._pending_compactions)
+        self._pending_compactions = []
+        return artifacts
 
 
 def _print_tool_call(name: str, args: dict, prefix: str = ""):
@@ -769,11 +819,25 @@ def _build_turn_system_prompt(
     base_prompt: str,
     user_message: str,
     skill_guidance: str = "",
+    compactions: list[dict] | None = None,
 ) -> str:
     """Augment the system prompt with best-effort indexed memory snippets for this turn."""
     lines = [base_prompt]
     if skill_guidance:
         lines.extend(["", skill_guidance])
+
+    for artifact in compactions or []:
+        path = str(artifact.get("path", "")).strip()
+        if not path:
+            continue
+        lines.extend(["", "[Compacted Context]"])
+        lines.append(f"path: {path}")
+        layer = str(artifact.get("layer", "")).strip()
+        if layer:
+            lines.append(f"layer: {layer}")
+        summary = str(artifact.get("summary", "")).strip()
+        if summary:
+            lines.append(f"summary: {summary}")
 
     try:
         prefetched = memory_store.prefetch_for_query(user_message, limit=2)

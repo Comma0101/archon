@@ -66,6 +66,90 @@ class TestMemoryIndex:
         assert prefetched[0]["confidence"] == "high"
         assert prefetched[0]["last_modified"]
 
+    def test_rebuild_index_tracks_layer_metadata_for_layered_paths(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("archon.memory.MEMORY_DIR", tmp_path)
+
+        memory.write("profiles/system.md", "# System Hardware Profile\n\nGPU RAM storage mounts.\n")
+        memory.write("projects/korami-site.md", "# Korami Site\n\nFrontend app.\n")
+        memory.write("compactions/sessions/test-session.md", "# Session Compaction Summary\n\n- user: We were fixing token bloat.\n")
+        memory.write("compactions/tasks/task-123.md", "# Task Compaction Summary\n\n- assistant: Added routing.\n")
+
+        payload = memory.rebuild_index()
+        by_path = {entry["path"]: entry for entry in payload["entries"]}
+
+        assert by_path["profiles/system.md"]["layer"] == "machine"
+        assert by_path["projects/korami-site.md"]["layer"] == "project"
+        assert by_path["compactions/sessions/test-session.md"]["layer"] == "session"
+        assert by_path["compactions/tasks/task-123.md"]["layer"] == "task"
+
+    def test_compact_history_writes_session_summary_artifact(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("archon.memory.MEMORY_DIR", tmp_path)
+
+        artifact = memory.compact_history(
+            [
+                {"role": "user", "content": "We need to reduce token bloat in long chats."},
+                {"role": "assistant", "content": [{"type": "text", "text": "We should compact old context into memory."}]},
+            ],
+            layer="session",
+            summary_id="sess-1",
+        )
+
+        assert artifact["path"] == "compactions/sessions/sess-1.md"
+        text = memory.read("compactions/sessions/sess-1.md")
+        assert "Session Compaction Summary" in text
+        assert "token bloat" in text
+
+        payload = memory.load_index()
+        by_path = {entry["path"]: entry for entry in payload["entries"]}
+        assert by_path["compactions/sessions/sess-1.md"]["kind"] == "compaction_summary"
+        assert by_path["compactions/sessions/sess-1.md"]["layer"] == "session"
+
+    def test_compact_history_writes_task_summary_artifact(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("archon.memory.MEMORY_DIR", tmp_path)
+
+        artifact = memory.compact_history(
+            [
+                {"role": "user", "content": "We narrowed the task to trimming long chat history."},
+                {"role": "assistant", "content": [{"type": "text", "text": "Next we should keep only the current task context."}]},
+            ],
+            layer="task",
+            summary_id="task-1",
+        )
+
+        assert artifact["path"] == "compactions/tasks/task-1.md"
+        text = memory.read("compactions/tasks/task-1.md")
+        assert "Task Compaction Summary" in text
+        assert "current task context" in text
+
+        payload = memory.load_index()
+        by_path = {entry["path"]: entry for entry in payload["entries"]}
+        assert by_path["compactions/tasks/task-1.md"]["kind"] == "compaction_summary"
+        assert by_path["compactions/tasks/task-1.md"]["layer"] == "task"
+
+    def test_prefetch_for_query_prefers_compaction_summary_when_relevant(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("archon.memory.MEMORY_DIR", tmp_path)
+
+        memory.write("projects/korami-site.md", "# Korami Site\n\nFrontend app.\n")
+        memory.compact_history(
+            [
+                {"role": "user", "content": "We need to reduce token bloat in long chats."},
+                {"role": "assistant", "content": [{"type": "text", "text": "We should compact old context into memory."}]},
+            ],
+            layer="session",
+            summary_id="sess-2",
+        )
+
+        prefetched = memory.prefetch_for_query(
+            "what were we doing about token bloat",
+            limit=2,
+            min_score=0,
+        )
+
+        assert prefetched
+        assert prefetched[0]["kind"] == "compaction_summary"
+        assert prefetched[0]["layer"] == "session"
+        assert "token bloat" in prefetched[0]["excerpt"]
+
     def test_write_canonicalizes_system_profile_and_updates_memory_md_pointer(self, monkeypatch, tmp_path):
         monkeypatch.setattr("archon.memory.MEMORY_DIR", tmp_path)
 

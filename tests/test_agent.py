@@ -1417,6 +1417,170 @@ class TestAgentLoop:
         assert agent.history[1]["content"] == "hi"
         assert len(agent.history) == 3  # remaining prior + new user + assistant
 
+    def test_run_injects_compaction_summary_into_system_prompt_when_history_trimmed(self, monkeypatch):
+        response = LLMResponse(
+            text="ok",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "ok"}],
+            input_tokens=1,
+            output_tokens=1,
+        )
+        llm = MagicMock()
+        llm.chat = MagicMock(return_value=response)
+        agent = Agent(llm, ToolRegistry(archon_source_dir=None), Config())
+        agent._system_prompt = "test prompt"
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+
+        compacted = {}
+
+        def fake_compact_history(messages, layer="session", summary_id="latest", max_entries=8):
+            compacted["messages"] = list(messages)
+            compacted["layer"] = layer
+            compacted["summary_id"] = summary_id
+            return {
+                "path": "compactions/sessions/history-t001.md",
+                "layer": "session",
+                "summary": "We were fixing token bloat in long chats.",
+            }
+
+        monkeypatch.setattr("archon.agent.memory_store.compact_history", fake_compact_history)
+        agent.history_max_messages = 4
+        agent.history_trim_to = 3
+        agent.history_max_chars = 0
+        agent.history_trim_to_chars = 0
+        agent.history = [
+            {"role": "user", "content": "old question about token bloat"},
+            {"role": "assistant", "content": [{"type": "text", "text": "old answer"}]},
+            {"role": "user", "content": "recent question"},
+            {"role": "assistant", "content": [{"type": "text", "text": "recent answer"}]},
+            {"role": "user", "content": "latest prior question"},
+        ]
+
+        out = agent.run("hello")
+
+        assert out == "ok"
+        assert compacted["layer"] == "session"
+        assert compacted["summary_id"] == "history-t001"
+        system_prompt = llm.chat.call_args[0][0]
+        sent_history = llm.chat.call_args[0][1]
+        assert "[Compacted Context]" in system_prompt
+        assert "compactions/sessions/history-t001.md" in system_prompt
+        assert "token bloat" in system_prompt
+        assert sent_history[0]["content"] == "recent question"
+        assert sent_history[1]["role"] == "assistant"
+        assert sent_history[2]["content"] == "latest prior question"
+        assert sent_history[3]["content"] == "hello"
+        assert len(sent_history) == 5
+        assert all(msg.get("role") != "assistant" or msg.get("content") != [{"type": "text", "text": "[Compacted Context]"}] for msg in sent_history)
+        assert all(msg.get("content") != "old question about token bloat" for msg in sent_history)
+
+    def test_run_injects_task_compaction_when_char_budget_trim_drops_raw_turns(self, monkeypatch):
+        response = LLMResponse(
+            text="ok",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "ok"}],
+            input_tokens=1,
+            output_tokens=1,
+        )
+        llm = MagicMock()
+        llm.chat = MagicMock(return_value=response)
+        agent = Agent(llm, ToolRegistry(archon_source_dir=None), Config())
+        agent._system_prompt = "test prompt"
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+
+        compaction_calls = []
+
+        def fake_compact_history(messages, layer="session", summary_id="latest", max_entries=8):
+            compaction_calls.append((layer, list(messages)))
+            return {
+                "path": f"compactions/{layer}s/history-t001.md",
+                "layer": layer,
+                "summary": f"{layer} compaction summary",
+            }
+
+        monkeypatch.setattr("archon.agent.memory_store.compact_history", fake_compact_history)
+        agent.history_max_messages = 99
+        agent.history_trim_to = 50
+        agent.history_max_chars = 250
+        agent.history_trim_to_chars = 150
+        agent.history = [
+            {"role": "user", "content": "a" * 100},
+            {"role": "assistant", "content": [{"type": "text", "text": "b" * 100}]},
+            {"role": "user", "content": "c" * 100},
+        ]
+
+        result = agent.run("hi")
+
+        assert result == "ok"
+        assert compaction_calls
+        assert compaction_calls[0][0] == "task"
+        system_prompt = llm.chat.call_args[0][0]
+        sent_history = llm.chat.call_args[0][1]
+        assert "[Compacted Context]" in system_prompt
+        assert "compactions/tasks/history-t001.md" in system_prompt
+        assert "task compaction summary" in system_prompt
+        assert sent_history[0]["content"] == "c" * 100
+        assert sent_history[1]["content"] == "hi"
+        assert len(sent_history) == 3
+
+    def test_run_keeps_session_and_task_compactions_when_message_and_char_trim_both_apply(self, monkeypatch):
+        response = LLMResponse(
+            text="ok",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "ok"}],
+            input_tokens=1,
+            output_tokens=1,
+        )
+        llm = MagicMock()
+        llm.chat = MagicMock(return_value=response)
+        agent = Agent(llm, ToolRegistry(archon_source_dir=None), Config())
+        agent._system_prompt = "test prompt"
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+
+        compaction_calls = []
+
+        def fake_compact_history(messages, layer="session", summary_id="latest", max_entries=8):
+            compaction_calls.append((layer, list(messages)))
+            return {
+                "path": f"compactions/{layer}s/history-t001.md",
+                "layer": layer,
+                "summary": f"{layer} compaction summary",
+            }
+
+        monkeypatch.setattr("archon.agent.memory_store.compact_history", fake_compact_history)
+        agent.history_max_messages = 4
+        agent.history_trim_to = 3
+        agent.history_max_chars = 180
+        agent.history_trim_to_chars = 120
+        agent.history = [
+            {"role": "user", "content": "old question about token bloat"},
+            {"role": "assistant", "content": [{"type": "text", "text": "old answer"}]},
+            {"role": "user", "content": "recent question " + ("x" * 80)},
+            {"role": "assistant", "content": [{"type": "text", "text": "recent answer"}]},
+            {"role": "user", "content": "latest prior question"},
+        ]
+
+        out = agent.run("hello")
+
+        assert out == "ok"
+        system_prompt = llm.chat.call_args[0][0]
+        sent_history = llm.chat.call_args[0][1]
+        assert [layer for layer, _messages in compaction_calls] == ["session", "task"]
+        assert system_prompt.count("[Compacted Context]") == 2
+        assert "compactions/sessions/history-t001.md" in system_prompt
+        assert "compactions/tasks/history-t001.md" in system_prompt
+        assert "session compaction summary" in system_prompt
+        assert "task compaction summary" in system_prompt
+        assert all(msg.get("content") != "old question about token bloat" for msg in sent_history)
+        assert all(
+            not isinstance(msg.get("content"), list)
+            or "[Compacted Context]" not in str(msg.get("content"))
+            for msg in sent_history
+        )
+
     def test_run_repairs_tool_sequence_after_message_count_trim(self, monkeypatch):
         response = LLMResponse(
             text="ok",

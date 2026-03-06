@@ -57,6 +57,7 @@ def register_memory_tools(registry) -> None:
             lines.extend([
                 f"{idx}. path: {hit.get('path', '')}",
                 f"   kind: {hit.get('kind', '')}",
+                f"   layer: {hit.get('layer', '')}",
                 f"   scope: {hit.get('scope', '')}",
                 f"   score: {hit.get('score', 0)}",
             ])
