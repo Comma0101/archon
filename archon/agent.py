@@ -11,7 +11,7 @@ from typing import Callable, Generator, TypeVar, cast
 from archon import memory as memory_store
 from archon.control.hooks import HookBus
 from archon.control.orchestrator import orchestrate_response, orchestrate_stream_response
-from archon.control.policy import evaluate_tool_policy
+from archon.control.policy import evaluate_mcp_policy, evaluate_tool_policy
 from archon.llm import LLMClient, LLMResponse
 from archon.tools import ToolRegistry
 from archon.prompt import build_skill_guidance, build_system_prompt
@@ -167,6 +167,46 @@ class Agent:
                             "content": denied_result,
                         })
                         continue
+                    if call.name == "mcp_call":
+                        server_name = str(call.arguments.get("server", "") or "").strip()
+                        mcp_policy_decision = evaluate_mcp_policy(
+                            config=self.config,
+                            server_name=server_name,
+                            profile_name=active_profile,
+                        )
+                        self._emit_hook(
+                            "policy.decision",
+                            {
+                                "turn_id": turn_id,
+                                "name": f"mcp:{server_name}" if server_name else "mcp",
+                                "decision": mcp_policy_decision.decision,
+                                "reason": mcp_policy_decision.reason,
+                                "profile": mcp_policy_decision.profile,
+                                "mode": mcp_policy_decision.mode,
+                            },
+                        )
+                        if mcp_policy_decision.decision == "deny":
+                            denied_result = (
+                                f"Error: Policy denied MCP server '{server_name or 'unknown'}' "
+                                f"({mcp_policy_decision.reason})"
+                            )
+                            self._emit_hook(
+                                "post_tool",
+                                {
+                                    "turn_id": turn_id,
+                                    "name": call.name,
+                                    "result_is_error": True,
+                                    "result_length": len(denied_result),
+                                    "policy_decision": mcp_policy_decision.decision,
+                                },
+                            )
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": call.id,
+                                "tool_name": call.name,
+                                "content": denied_result,
+                            })
+                            continue
                     self._emit_hook(
                         "pre_tool",
                         {
@@ -314,6 +354,46 @@ class Agent:
                             "content": denied_result,
                         })
                         continue
+                    if call.name == "mcp_call":
+                        server_name = str(call.arguments.get("server", "") or "").strip()
+                        mcp_policy_decision = evaluate_mcp_policy(
+                            config=self.config,
+                            server_name=server_name,
+                            profile_name=active_profile,
+                        )
+                        self._emit_hook(
+                            "policy.decision",
+                            {
+                                "turn_id": turn_id,
+                                "name": f"mcp:{server_name}" if server_name else "mcp",
+                                "decision": mcp_policy_decision.decision,
+                                "reason": mcp_policy_decision.reason,
+                                "profile": mcp_policy_decision.profile,
+                                "mode": mcp_policy_decision.mode,
+                            },
+                        )
+                        if mcp_policy_decision.decision == "deny":
+                            denied_result = (
+                                f"Error: Policy denied MCP server '{server_name or 'unknown'}' "
+                                f"({mcp_policy_decision.reason})"
+                            )
+                            self._emit_hook(
+                                "post_tool",
+                                {
+                                    "turn_id": turn_id,
+                                    "name": call.name,
+                                    "result_is_error": True,
+                                    "result_length": len(denied_result),
+                                    "policy_decision": mcp_policy_decision.decision,
+                                },
+                            )
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": call.id,
+                                "tool_name": call.name,
+                                "content": denied_result,
+                            })
+                            continue
                     self._emit_hook(
                         "pre_tool",
                         {

@@ -10,7 +10,7 @@ import archon.control.orchestrator as orchestrator_module
 from archon.agent import Agent, _chat_with_retry, _print_tool_call, _print_tool_result
 from archon.llm import LLMResponse, ToolCall
 from archon.tools import ToolRegistry
-from archon.config import Config, ProfileConfig
+from archon.config import Config, MCPServerConfig, ProfileConfig
 
 
 def make_agent(responses: list[LLMResponse], stream_chunks: list | None = None) -> Agent:
@@ -85,6 +85,167 @@ def assert_tool_sequence_well_formed(messages: list[dict]) -> None:
 
 
 class TestAgentLoop:
+    def test_tool_registry_registers_mcp_call(self):
+        tools = ToolRegistry(archon_source_dir=None)
+
+        assert "mcp_call" in {schema["name"] for schema in tools.get_schemas()}
+
+    def test_policy_enforced_deny_blocks_mcp_server_execution(self, monkeypatch):
+        responses = [
+            LLMResponse(
+                text=None,
+                tool_calls=[
+                    ToolCall(
+                        id="tc_mcp_deny",
+                        name="mcp_call",
+                        arguments={
+                            "server": "docs",
+                            "tool": "search_docs",
+                            "arguments": {"query": "archon"},
+                        },
+                    )
+                ],
+                raw_content=[
+                    {
+                        "type": "tool_use",
+                        "id": "tc_mcp_deny",
+                        "name": "mcp_call",
+                        "input": {
+                            "server": "docs",
+                            "tool": "search_docs",
+                            "arguments": {"query": "archon"},
+                        },
+                    }
+                ],
+                input_tokens=8,
+                output_tokens=3,
+            ),
+            LLMResponse(
+                text="done",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "done"}],
+                input_tokens=10,
+                output_tokens=2,
+            ),
+        ]
+        agent = make_agent(responses)
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        agent.tools.config = agent.config
+        agent.config.orchestrator.enabled = True
+        agent.config.orchestrator.mode = "hybrid"
+        agent.config.orchestrator.shadow_eval = False
+        agent.config.profiles["default"] = ProfileConfig(allowed_tools=["mcp_call"])
+        agent.config.mcp.servers["docs"] = MCPServerConfig(
+            enabled=True,
+            mode="read_only",
+            transport="stdio",
+            command=["python", "server.py"],
+        )
+        executed = {"count": 0}
+
+        class _FakeMCPClient:
+            def __init__(self, _config):
+                return None
+
+            def call_tool(self, server_name, tool_name, arguments, transport_fn=None):
+                _ = arguments
+                executed["count"] += 1
+                return {
+                    "server": server_name,
+                    "tool": tool_name,
+                    "mode": "read_only",
+                    "content": "ok",
+                    "truncated": False,
+                    "is_error": False,
+                }
+
+        agent.tools.mcp_client_cls = _FakeMCPClient
+        decisions = []
+        agent.hooks.register("policy.decision", decisions.append)
+
+        result = agent.run("try mcp")
+
+        assert result == "done"
+        assert executed["count"] == 0
+        assert any(event.payload["decision"] == "deny" for event in decisions)
+        assert any(event.payload["reason"] == "mcp_not_allowed" for event in decisions)
+
+    def test_run_stream_policy_enforced_deny_blocks_mcp_server_execution(self, monkeypatch):
+        tool_resp = LLMResponse(
+            text=None,
+            tool_calls=[
+                ToolCall(
+                    id="tc_mcp_stream_deny",
+                    name="mcp_call",
+                    arguments={
+                        "server": "docs",
+                        "tool": "search_docs",
+                        "arguments": {"query": "archon"},
+                    },
+                )
+            ],
+            raw_content=[
+                {
+                    "type": "tool_use",
+                    "id": "tc_mcp_stream_deny",
+                    "name": "mcp_call",
+                    "input": {
+                        "server": "docs",
+                        "tool": "search_docs",
+                        "arguments": {"query": "archon"},
+                    },
+                }
+            ],
+            input_tokens=8,
+            output_tokens=3,
+        )
+        final_resp = LLMResponse(
+            text="done",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "done"}],
+            input_tokens=10,
+            output_tokens=2,
+        )
+        agent = make_agent([], stream_chunks=[[tool_resp], ["done", final_resp]])
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        agent.tools.config = agent.config
+        agent.config.orchestrator.enabled = True
+        agent.config.orchestrator.mode = "hybrid"
+        agent.config.orchestrator.shadow_eval = False
+        agent.config.profiles["default"] = ProfileConfig(allowed_tools=["mcp_call"])
+        agent.config.mcp.servers["docs"] = MCPServerConfig(
+            enabled=True,
+            mode="read_only",
+            transport="stdio",
+            command=["python", "server.py"],
+        )
+        executed = {"count": 0}
+
+        class _FakeMCPClient:
+            def __init__(self, _config):
+                return None
+
+            def call_tool(self, server_name, tool_name, arguments, transport_fn=None):
+                _ = (server_name, tool_name, arguments, transport_fn)
+                executed["count"] += 1
+                return {
+                    "server": "docs",
+                    "tool": "search_docs",
+                    "mode": "read_only",
+                    "content": "ok",
+                    "truncated": False,
+                    "is_error": False,
+                }
+
+        agent.tools.mcp_client_cls = _FakeMCPClient
+
+        chunks = list(agent.run_stream("try mcp stream"))
+
+        assert chunks == ["done"]
+        assert executed["count"] == 0
+
     def test_simple_text_response(self):
         responses = [
             LLMResponse(text="Hello!", tool_calls=[], raw_content=[{"type": "text", "text": "Hello!"}],

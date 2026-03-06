@@ -17,6 +17,7 @@ SLASH_COMMANDS = [
     ("/model-set", "Set model via <provider>-<model>"),
     ("/calls", "Call tool controls (status/on/off)"),
     ("/profile", "Policy profile controls (show/set)"),
+    ("/mcp", "Inspect configured MCP servers and tools"),
     ("/jobs", "List recent cross-surface jobs"),
     ("/job", "Show one job summary by ID"),
     ("/paste", "Multiline paste mode"),
@@ -67,6 +68,10 @@ def build_slash_subvalues(model_catalog: dict[str, tuple[str, ...]]) -> dict[str
         "/profile": [
             ("show", "Show active policy profile"),
             ("set default", "Set session policy profile to default"),
+        ],
+        "/mcp": [
+            ("servers", "List configured MCP servers"),
+            ("tools", "List advertised tools for one server"),
         ],
     }
 

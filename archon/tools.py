@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Callable
 
+from archon.config import Config
 from archon.safety import Level, confirm
 from archon.tooling import (
     register_call_mission_tools,
@@ -10,6 +11,7 @@ from archon.tooling import (
     register_content_tools,
     register_filesystem_tools,
     register_memory_tools,
+    register_mcp_tools,
     register_worker_tools,
 )
 
@@ -19,11 +21,14 @@ class ToolRegistry:
         self,
         archon_source_dir: str | None = None,
         confirmer: Callable[[str, Level], bool] | None = None,
+        config: Config | None = None,
     ):
         self.tools: dict[str, dict] = {}
         self.handlers: dict[str, Callable] = {}
         self.archon_source_dir = archon_source_dir
         self.confirmer = confirmer or confirm
+        self.config = config or Config()
+        self.mcp_client_cls = None
         self._execute_event_handler: Callable[[str, dict], None] | None = None
         self._worker_session_affinity: dict[tuple[str, str], str] = {}
         self._register_builtins()
@@ -131,6 +136,7 @@ class ToolRegistry:
         register_filesystem_tools(self)
         register_memory_tools(self)
         register_content_tools(self)
+        register_mcp_tools(self)
         register_call_service_tools(self)
         register_call_mission_tools(self)
 

@@ -1,3 +1,5 @@
+import sys
+
 from archon.config import Config, MCPConfig, MCPServerConfig, ProfileConfig
 from archon.control.policy import evaluate_mcp_policy
 from archon.mcp.client import MCPClient
@@ -98,3 +100,93 @@ def test_mcp_client_normalizes_server_name_lookup():
 
     assert result["server"] == "docs"
     assert result["content"] == "ok"
+
+
+def test_mcp_client_lists_tools_from_transport():
+    client = MCPClient(
+        MCPConfig(
+            servers={
+                "docs": MCPServerConfig(
+                    enabled=True,
+                    mode="read_only",
+                    transport="stdio",
+                    command=["python", "server.py"],
+                )
+            }
+        )
+    )
+
+    result = client.list_tools(
+        "docs",
+        transport_fn=lambda _server, payload: {
+            "tools": [
+                {
+                    "name": "search_docs",
+                    "description": f"for {payload['action']}",
+                }
+            ]
+        },
+    )
+
+    assert result["server"] == "docs"
+    assert len(result["tools"]) == 1
+    assert result["tools"][0]["name"] == "search_docs"
+    assert "tools/list" in result["tools"][0]["description"]
+
+
+def test_mcp_client_stdio_transport_initializes_before_listing_tools(tmp_path):
+    log_path = tmp_path / "mcp-log.txt"
+    server_path = tmp_path / "fake_mcp_server.py"
+    server_path.write_text(
+        "\n".join(
+            [
+                "import json",
+                "import pathlib",
+                "import sys",
+                "",
+                "log_path = pathlib.Path(sys.argv[1])",
+                "for line in sys.stdin:",
+                "    if not line.strip():",
+                "        continue",
+                "    request = json.loads(line)",
+                "    method = request.get('method', '')",
+                "    with log_path.open('a', encoding='utf-8') as handle:",
+                "        handle.write(method + '\\n')",
+                "    response = {'jsonrpc': '2.0', 'id': request.get('id')}",
+                "    if method == 'initialize':",
+                "        response['result'] = {",
+                "            'protocolVersion': '2025-06-18',",
+                "            'capabilities': {'tools': {}},",
+                "            'serverInfo': {'name': 'fake-docs', 'version': '0.1.0'},",
+                "        }",
+                "    elif method == 'tools/list':",
+                "        response['result'] = {",
+                "            'tools': [{'name': 'search_docs', 'description': 'Search docs'}],",
+                "        }",
+                "    else:",
+                "        response['error'] = {'code': -32601, 'message': method}",
+                "    sys.stdout.write(json.dumps(response) + '\\n')",
+                "    sys.stdout.flush()",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    client = MCPClient(
+        MCPConfig(
+            servers={
+                "docs": MCPServerConfig(
+                    enabled=True,
+                    mode="read_only",
+                    transport="stdio",
+                    command=[sys.executable, str(server_path), str(log_path)],
+                )
+            }
+        )
+    )
+
+    result = client.list_tools("docs")
+
+    assert result["server"] == "docs"
+    assert result["tools"][0]["name"] == "search_docs"
+    assert log_path.read_text(encoding="utf-8").splitlines() == ["initialize", "tools/list"]

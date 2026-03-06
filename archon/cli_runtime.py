@@ -60,7 +60,11 @@ def make_agent(
         ) from e
 
     source_dir = str(get_source_dir_fn())
-    tools = tool_registry_cls(archon_source_dir=source_dir, confirmer=confirmer)
+    tools = tool_registry_cls(
+        archon_source_dir=source_dir,
+        confirmer=confirmer,
+        config=config,
+    )
     return agent_cls(llm, tools, config)
 
 

@@ -5,6 +5,7 @@ from .call_service_tools import register_call_service_tools
 from .content_tools import register_content_tools
 from .filesystem_tools import register_filesystem_tools
 from .memory_tools import register_memory_tools
+from .mcp_tools import register_mcp_tools
 from .worker_tools import register_worker_tools
 
 __all__ = [
@@ -13,5 +14,6 @@ __all__ = [
     "register_content_tools",
     "register_filesystem_tools",
     "register_memory_tools",
+    "register_mcp_tools",
     "register_worker_tools",
 ]

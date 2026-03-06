@@ -3,6 +3,7 @@
 import re
 from types import SimpleNamespace
 
+from archon.config import Config, MCPServerConfig
 from archon.cli import _format_chat_response
 from archon.cli import _is_paste_command, _collect_paste_message
 from archon.cli import (
@@ -386,6 +387,65 @@ class TestCliCommands:
         assert "job_status: ok" in msg
         assert "job_summary: Looks good" in msg
 
+    def test_handle_repl_command_mcp_servers_lists_configured_servers(self):
+        cfg = Config()
+        cfg.mcp.servers = {
+            "docs": MCPServerConfig(
+                enabled=True,
+                mode="read_only",
+                transport="stdio",
+                command=["python", "server.py"],
+            )
+        }
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=cfg,
+        )
+
+        action, msg = _handle_repl_command(agent, "/mcp servers")
+
+        assert action == "mcp"
+        assert "docs" in msg
+        assert "read_only" in msg
+        assert "stdio" in msg
+
+    def test_handle_repl_command_mcp_tools_lists_server_tools(self, monkeypatch):
+        cfg = Config()
+        cfg.mcp.servers = {
+            "docs": MCPServerConfig(
+                enabled=True,
+                mode="read_only",
+                transport="stdio",
+                command=["python", "server.py"],
+            )
+        }
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=cfg,
+        )
+
+        class _FakeClient:
+            def __init__(self, config):
+                self.config = config
+
+            def list_tools(self, server_name, transport_fn=None):
+                assert transport_fn is None
+                assert server_name == "docs"
+                return {
+                    "server": "docs",
+                    "tools": [
+                        {"name": "search_docs", "description": "Search the docs"},
+                    ],
+                }
+
+        monkeypatch.setattr("archon.cli_repl_commands.MCPClient", _FakeClient)
+
+        action, msg = _handle_repl_command(agent, "/mcp tools docs")
+
+        assert action == "mcp"
+        assert "search_docs" in msg
+        assert "Search the docs" in msg
+
 
 class _FakeReadline:
     def set_completer(self, _fn):
@@ -547,9 +607,13 @@ class TestSlashCompleter:
         assert _slash_completer("/jo", 1) == "/job"
         assert _slash_completer("/jo", 2) is None
 
+    def test_mcp_prefix_matches_command(self):
+        assert _slash_completer("/mc", 0) == "/mcp"
+        assert _slash_completer("/mc", 1) is None
+
     def test_empty_returns_all(self):
         results = []
-        for i in range(10):
+        for i in range(len(_SLASH_COMMANDS) + 1):
             val = _slash_completer("", i)
             if val is None:
                 break
@@ -561,7 +625,7 @@ class TestSlashCompleter:
 
     def test_slash_alone_matches_all(self):
         results = []
-        for i in range(10):
+        for i in range(len(_SLASH_COMMANDS) + 1):
             val = _slash_completer("/", i)
             if val is None:
                 break

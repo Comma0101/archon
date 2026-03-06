@@ -8,6 +8,7 @@ from typing import Callable
 
 from archon.calls.store import list_call_job_summaries, load_call_job_summary
 from archon.control.jobs import format_job_summary, format_job_summary_list
+from archon.mcp import MCPClient
 from archon.workers.session_store import list_worker_job_summaries, load_worker_job_summary
 
 
@@ -269,6 +270,65 @@ def handle_profile_command(agent, text: str) -> tuple[bool, str]:
     return True, "Usage: /profile [show|set <name>]"
 
 
+def handle_mcp_command(agent, text: str) -> tuple[bool, str]:
+    """Handle `/mcp` command (summary/servers/tools)."""
+    raw = (text or "").strip()
+    parts = raw.split()
+    if not parts or parts[0].lower() != "/mcp":
+        return False, ""
+
+    cfg = getattr(agent, "config", None)
+    mcp_cfg = getattr(cfg, "mcp", None)
+    if mcp_cfg is None:
+        return True, "MCP unavailable: missing config.mcp"
+
+    sub = parts[1].strip().lower() if len(parts) > 1 else "help"
+    if sub in {"help", "status"}:
+        servers = getattr(mcp_cfg, "servers", {}) or {}
+        enabled_count = sum(
+            1 for server in servers.values() if bool(getattr(server, "enabled", False))
+        )
+        return True, (
+            f"MCP: {enabled_count} enabled server(s) | "
+            "commands: /mcp servers, /mcp tools <server>"
+        )
+
+    if sub == "servers":
+        servers = getattr(mcp_cfg, "servers", {}) or {}
+        if not servers:
+            return True, "MCP servers: none configured"
+        lines = ["MCP servers:"]
+        for name in sorted(servers):
+            server = servers[name]
+            enabled = "enabled" if bool(getattr(server, "enabled", False)) else "disabled"
+            mode = str(getattr(server, "mode", "") or "").strip() or "unknown"
+            transport = str(getattr(server, "transport", "") or "").strip() or "unknown"
+            lines.append(f"- {name}: {enabled} | mode={mode} | transport={transport}")
+        return True, "\n".join(lines)
+
+    if sub == "tools":
+        if len(parts) < 3 or not parts[2].strip():
+            return True, "Usage: /mcp tools <server>"
+        server_name = parts[2].strip()
+        result = MCPClient(mcp_cfg).list_tools(server_name)
+        if result.get("error"):
+            return True, str(result["error"])
+        tools = result.get("tools", [])
+        if not tools:
+            return True, f"MCP tools for {server_name}: none"
+        lines = [f"MCP tools for {result.get('server', server_name)}:"]
+        for item in tools:
+            name = str(item.get("name", "") or "").strip()
+            description = str(item.get("description", "") or "").strip()
+            if description:
+                lines.append(f"- {name}: {description}")
+            else:
+                lines.append(f"- {name}")
+        return True, "\n".join(lines)
+
+    return True, "Usage: /mcp [servers|tools <server>]"
+
+
 def _collect_job_summaries(limit: int = 10):
     max_items = max(1, int(limit))
     jobs = list_worker_job_summaries(limit=max_items) + list_call_job_summaries(limit=max_items)
@@ -352,9 +412,12 @@ def handle_repl_command(
     if raw.lower() in {"/help", "/?"}:
         return (
             "help",
-            "Commands: /help, /reset, /model, /model-list, /model-set <provider>-<model>, /calls [status|on|off], /profile [show|set <name>], /jobs [limit], /job <id>, /paste\n"
+            "Commands: /help, /reset, /model, /model-list, /model-set <provider>-<model>, /calls [status|on|off], /profile [show|set <name>], /mcp [servers|tools <server>], /jobs [limit], /job <id>, /paste\n"
             "Multiline paste: paste normally (bracketed paste) or use /paste fallback, end with /end.",
         )
+    handled, msg = handle_mcp_command(agent, raw)
+    if handled:
+        return "mcp", msg
     handled, msg = handle_jobs_command(agent, raw)
     if handled:
         return "jobs", msg
