@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from archon.config import Config, ProfileConfig
+from archon.control.skills import ResolvedSkillProfile, resolve_skill_profile
 
 
 @dataclass
@@ -24,11 +25,14 @@ _MODE_RANK = {
 }
 
 
-def resolve_profile(config: Config, profile_name: str = "default") -> tuple[str, ProfileConfig]:
+def resolve_profile(
+    config: Config,
+    profile_name: str = "default",
+) -> tuple[str, ResolvedSkillProfile]:
     name = (profile_name or "default").strip()
     if name in config.profiles:
-        return name, config.profiles[name]
-    return "default", config.profiles.get("default", ProfileConfig())
+        return name, resolve_skill_profile(config.profiles[name])
+    return "default", resolve_skill_profile(config.profiles.get("default", ProfileConfig()))
 
 
 def evaluate_tool_policy(
@@ -77,14 +81,14 @@ def evaluate_tool_policy(
     )
 
 
-def _tool_is_allowed(profile: ProfileConfig, tool_name: str) -> bool:
+def _tool_is_allowed(profile: ResolvedSkillProfile, tool_name: str) -> bool:
     allowed = [str(item).strip() for item in profile.allowed_tools if str(item).strip()]
     if not allowed:
-        allowed = ["*"]
+        return False
     return "*" in allowed or tool_name in allowed
 
 
-def _mode_is_allowed(profile: ProfileConfig, requested_mode: str) -> bool:
+def _mode_is_allowed(profile: ResolvedSkillProfile, requested_mode: str) -> bool:
     req_rank = _MODE_RANK.get(requested_mode, _MODE_RANK["implement"])
     max_rank = _MODE_RANK.get((profile.max_mode or "implement").strip().lower(), _MODE_RANK["implement"])
     return req_rank <= max_rank

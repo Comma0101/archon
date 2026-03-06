@@ -1,6 +1,7 @@
 """Tests for configuration loading."""
 
-from archon.config import load_config
+from archon.config import ProfileConfig, load_config
+from archon.control.skills import BUILTIN_SKILLS, DEFAULT_SKILL_NAME, resolve_skill_profile
 
 
 def test_load_config_calls_defaults(monkeypatch, tmp_path):
@@ -53,6 +54,9 @@ def test_load_config_profiles_defaults(monkeypatch, tmp_path):
     assert cfg.profiles["default"].allowed_tools == ["*"]
     assert cfg.profiles["default"].max_mode == "implement"
     assert cfg.profiles["default"].execution_backend == "host"
+    assert cfg.profiles["default"].skill == ""
+    assert cfg.profiles["default"].allowed_tools_explicit is False
+    assert cfg.profiles["default"].max_mode_explicit is False
 
 
 def test_load_config_profiles_section(monkeypatch, tmp_path):
@@ -65,11 +69,13 @@ def test_load_config_profiles_section(monkeypatch, tmp_path):
                 'allowed_tools = ["read_file", "list_dir"]',
                 'max_mode = "review"',
                 'execution_backend = "host"',
+                'skill = "general"',
                 "",
                 "[profiles.safe]",
                 'allowed_tools = ["memory_read"]',
                 'max_mode = "analyze"',
                 'execution_backend = "subprocess-restricted"',
+                'skill = "researcher"',
             ]
         )
     )
@@ -80,9 +86,15 @@ def test_load_config_profiles_section(monkeypatch, tmp_path):
     assert set(cfg.profiles.keys()) == {"default", "safe"}
     assert cfg.profiles["default"].allowed_tools == ["read_file", "list_dir"]
     assert cfg.profiles["default"].max_mode == "review"
+    assert cfg.profiles["default"].skill == "general"
+    assert cfg.profiles["default"].allowed_tools_explicit is True
+    assert cfg.profiles["default"].max_mode_explicit is True
     assert cfg.profiles["safe"].allowed_tools == ["memory_read"]
     assert cfg.profiles["safe"].max_mode == "analyze"
     assert cfg.profiles["safe"].execution_backend == "subprocess-restricted"
+    assert cfg.profiles["safe"].skill == "researcher"
+    assert cfg.profiles["safe"].allowed_tools_explicit is True
+    assert cfg.profiles["safe"].max_mode_explicit is True
 
 
 def test_load_config_agent_tool_result_caps(monkeypatch, tmp_path):
@@ -103,3 +115,78 @@ def test_load_config_agent_tool_result_caps(monkeypatch, tmp_path):
 
     assert cfg.agent.tool_result_max_chars == 7000
     assert cfg.agent.tool_result_worker_max_chars == 1800
+
+
+def test_builtin_skill_registry_contains_expected_skills():
+    assert DEFAULT_SKILL_NAME == "general"
+    assert set(BUILTIN_SKILLS.keys()) == {
+        "general",
+        "coder",
+        "researcher",
+        "operator",
+        "sales",
+        "memory_curator",
+    }
+
+
+def test_resolve_skill_profile_uses_skill_defaults_for_generic_profile():
+    resolved = resolve_skill_profile(ProfileConfig(skill="researcher"))
+
+    assert resolved.skill_name == "researcher"
+    assert "web_search" in resolved.allowed_tools
+    assert "web_read" in resolved.allowed_tools
+    assert "shell" not in resolved.allowed_tools
+    assert resolved.preferred_provider == "openai"
+    assert resolved.preferred_model == "gpt-4o"
+
+
+def test_resolve_skill_profile_keeps_explicit_profile_overrides():
+    resolved = resolve_skill_profile(
+        ProfileConfig(
+            skill="coder",
+            allowed_tools=["read_file"],
+            max_mode="review",
+            execution_backend="subprocess-restricted",
+        )
+    )
+
+    assert resolved.skill_name == "coder"
+    assert resolved.allowed_tools == ("read_file",)
+    assert resolved.max_mode == "review"
+    assert resolved.execution_backend == "subprocess-restricted"
+    assert resolved.preferred_provider == "anthropic"
+    assert resolved.preferred_model == "claude-sonnet-4-6"
+
+
+def test_resolve_skill_profile_unknown_skill_fails_closed():
+    resolved = resolve_skill_profile(ProfileConfig(skill="not_real"))
+
+    assert resolved.skill_name == ""
+    assert resolved.allowed_tools == ()
+    assert resolved.preferred_provider == ""
+    assert resolved.preferred_model == ""
+    assert resolved.prompt_guidance == ""
+
+
+def test_load_config_skill_profile_explicit_wildcard_override_stays_explicit(
+    monkeypatch, tmp_path
+):
+    config_dir = tmp_path / "config" / "archon"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        "\n".join(
+            [
+                "[profiles.research]",
+                'skill = "researcher"',
+                'allowed_tools = ["*"]',
+            ]
+        )
+    )
+    monkeypatch.setattr("archon.config.CONFIG_DIR", config_dir)
+
+    cfg = load_config()
+    resolved = resolve_skill_profile(cfg.profiles["research"])
+
+    assert cfg.profiles["research"].allowed_tools_explicit is True
+    assert resolved.skill_name == "researcher"
+    assert resolved.allowed_tools == ("*",)

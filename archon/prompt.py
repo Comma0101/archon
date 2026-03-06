@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from archon.config import Config, ProfileConfig
+from archon.control.skills import build_skill_guidance as build_profile_skill_guidance
 from archon.system import get_profile, format_profile
 from archon.introspect import format_self_awareness
 from archon.memory import summary as memory_summary
@@ -42,3 +44,12 @@ def build_system_prompt(tool_count: int = 7) -> str:
     )
 
     return prompt.strip()
+
+
+def build_skill_guidance(config: Config, profile_name: str = "default") -> str:
+    """Render minimal skill guidance for a selected non-default built-in skill."""
+    key = (profile_name or "default").strip() or "default"
+    profile = config.profiles.get(key)
+    if profile is None:
+        profile = config.profiles.get("default", ProfileConfig())
+    return build_profile_skill_guidance(profile)

@@ -987,6 +987,158 @@ class TestAgentLoop:
         assert "profiles/system.md" in system_prompt_arg
         assert "System Hardware Profile" in system_prompt_arg
 
+    def test_run_appends_skill_guidance_for_non_default_skill_profile(self, monkeypatch):
+        responses = [
+            LLMResponse(text="ok", tool_calls=[], raw_content=[{"type": "text", "text": "ok"}],
+                       input_tokens=10, output_tokens=5),
+        ]
+        agent = make_agent(responses)
+        agent.config.profiles["research"] = ProfileConfig(skill="researcher")
+        agent.set_policy_profile("research")
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+
+        result = agent.run("look up the latest model launches")
+
+        assert result == "ok"
+        system_prompt_arg = agent.llm.chat.call_args[0][0]
+        assert "[Skill Guidance]" in system_prompt_arg
+        assert "researcher" in system_prompt_arg
+        assert "openai" in system_prompt_arg
+        assert "gpt-4o" in system_prompt_arg
+
+    def test_run_stream_appends_skill_guidance_for_non_default_skill_profile(self, monkeypatch):
+        final_resp = LLMResponse(
+            text="ok",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "ok"}],
+            input_tokens=10,
+            output_tokens=5,
+        )
+        agent = make_agent([], stream_chunks=[["ok", final_resp]])
+        agent.config.profiles["research"] = ProfileConfig(skill="researcher")
+        agent.set_policy_profile("research")
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+
+        chunks = list(agent.run_stream("look up the latest model launches"))
+
+        assert chunks == ["ok"]
+        system_prompt_arg = agent.llm.chat_stream.call_args[0][0]
+        assert "[Skill Guidance]" in system_prompt_arg
+        assert "researcher" in system_prompt_arg
+        assert "openai" in system_prompt_arg
+        assert "gpt-4o" in system_prompt_arg
+
+    def test_run_does_not_append_skill_guidance_for_general_skill(self, monkeypatch):
+        responses = [
+            LLMResponse(text="ok", tool_calls=[], raw_content=[{"type": "text", "text": "ok"}],
+                       input_tokens=10, output_tokens=5),
+        ]
+        agent = make_agent(responses)
+        agent.config.profiles["generalist"] = ProfileConfig(skill="general")
+        agent.set_policy_profile("generalist")
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+
+        result = agent.run("just answer directly")
+
+        assert result == "ok"
+        system_prompt_arg = agent.llm.chat.call_args[0][0]
+        assert "[Skill Guidance]" not in system_prompt_arg
+
+    def test_policy_uses_skill_defaults_for_generic_profile(self, monkeypatch):
+        responses = [
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(id="tc_skill_policy", name="web_search", arguments={"query": "latest archon news"})],
+                raw_content=[{"type": "tool_use", "id": "tc_skill_policy", "name": "web_search", "input": {"query": "latest archon news"}}],
+                input_tokens=8,
+                output_tokens=3,
+            ),
+            LLMResponse(
+                text="done",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "done"}],
+                input_tokens=10,
+                output_tokens=2,
+            ),
+        ]
+        agent = make_agent(responses)
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        agent.config.profiles["research"] = ProfileConfig(skill="researcher")
+        agent.set_policy_profile("research")
+        executed = {"count": 0}
+
+        def _web_search(query: str) -> str:
+            executed["count"] += 1
+            return f"stub:{query}"
+
+        agent.tools.register(
+            "web_search",
+            "Stub search tool for skill policy tests",
+            {"properties": {"query": {"type": "string"}}, "required": ["query"]},
+            _web_search,
+        )
+        decisions = []
+        agent.hooks.register("policy.decision", decisions.append)
+
+        result = agent.run("research latest archon news")
+
+        assert result == "done"
+        assert executed["count"] == 1
+        assert decisions[0].payload["decision"] == "allow"
+        assert decisions[0].payload["profile"] == "research"
+
+    def test_policy_unknown_skill_fails_closed(self, monkeypatch):
+        responses = [
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(id="tc_unknown_skill", name="web_search", arguments={"query": "latest archon news"})],
+                raw_content=[{"type": "tool_use", "id": "tc_unknown_skill", "name": "web_search", "input": {"query": "latest archon news"}}],
+                input_tokens=8,
+                output_tokens=3,
+            ),
+            LLMResponse(
+                text="done",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "done"}],
+                input_tokens=10,
+                output_tokens=2,
+            ),
+        ]
+        agent = make_agent(responses)
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        agent.config.orchestrator.enabled = True
+        agent.config.orchestrator.mode = "hybrid"
+        agent.config.orchestrator.shadow_eval = False
+        agent.config.profiles["broken"] = ProfileConfig(skill="not_real")
+        agent.set_policy_profile("broken")
+        executed = {"count": 0}
+
+        def _web_search(query: str) -> str:
+            executed["count"] += 1
+            return f"stub:{query}"
+
+        agent.tools.register(
+            "web_search",
+            "Stub search tool for invalid-skill policy tests",
+            {"properties": {"query": {"type": "string"}}, "required": ["query"]},
+            _web_search,
+        )
+        decisions = []
+        agent.hooks.register("policy.decision", decisions.append)
+
+        result = agent.run("research latest archon news")
+
+        assert result == "done"
+        assert executed["count"] == 0
+        assert decisions[0].payload["decision"] == "deny"
+        assert decisions[0].payload["reason"] == "tool_not_allowed"
+        assert decisions[0].payload["profile"] == "broken"
+
     def test_tool_trace_includes_log_context_and_turn_id(self, monkeypatch, capsys):
         responses = [
             LLMResponse(

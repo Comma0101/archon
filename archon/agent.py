@@ -14,7 +14,7 @@ from archon.control.orchestrator import orchestrate_response, orchestrate_stream
 from archon.control.policy import evaluate_tool_policy
 from archon.llm import LLMClient, LLMResponse
 from archon.tools import ToolRegistry
-from archon.prompt import build_system_prompt
+from archon.prompt import build_skill_guidance, build_system_prompt
 from archon.config import Config
 
 
@@ -88,7 +88,12 @@ class Agent:
         self._repair_history_tool_sequence()
         self.history.append({"role": "user", "content": user_message})
         _maybe_capture_preference_memory(user_message)
-        turn_system_prompt = _build_turn_system_prompt(self.system_prompt, user_message)
+        skill_guidance = build_skill_guidance(self.config, profile_name=active_profile)
+        turn_system_prompt = _build_turn_system_prompt(
+            self.system_prompt,
+            user_message,
+            skill_guidance=skill_guidance,
+        )
 
         for iteration in range(self.max_iterations):
             if self.on_thinking:
@@ -217,7 +222,12 @@ class Agent:
         self._repair_history_tool_sequence()
         self.history.append({"role": "user", "content": user_message})
         _maybe_capture_preference_memory(user_message)
-        turn_system_prompt = _build_turn_system_prompt(self.system_prompt, user_message)
+        skill_guidance = build_skill_guidance(self.config, profile_name=active_profile)
+        turn_system_prompt = _build_turn_system_prompt(
+            self.system_prompt,
+            user_message,
+            skill_guidance=skill_guidance,
+        )
 
         for iteration in range(self.max_iterations):
             if self.on_thinking:
@@ -755,16 +765,24 @@ def _maybe_capture_preference_memory(user_message: str) -> None:
         return
 
 
-def _build_turn_system_prompt(base_prompt: str, user_message: str) -> str:
+def _build_turn_system_prompt(
+    base_prompt: str,
+    user_message: str,
+    skill_guidance: str = "",
+) -> str:
     """Augment the system prompt with best-effort indexed memory snippets for this turn."""
+    lines = [base_prompt]
+    if skill_guidance:
+        lines.extend(["", skill_guidance])
+
     try:
         prefetched = memory_store.prefetch_for_query(user_message, limit=2)
     except Exception:
         prefetched = []
     if not prefetched:
-        return base_prompt
+        return "\n".join(lines)
 
-    lines = [base_prompt, "", "[Retrieved Memory]"]
+    lines.extend(["", "[Retrieved Memory]"])
     for item in prefetched:
         last_modified = str(item.get("last_modified", "")).strip()
         if last_modified:

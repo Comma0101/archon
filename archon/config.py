@@ -68,6 +68,23 @@ class ProfileConfig:
     allowed_tools: list[str] = field(default_factory=lambda: ["*"])
     max_mode: str = "implement"
     execution_backend: str = "host"
+    skill: str = ""
+    allowed_tools_explicit: bool = field(default=False, repr=False)
+    max_mode_explicit: bool = field(default=False, repr=False)
+
+    def __post_init__(self) -> None:
+        cleaned_tools = [str(x).strip() for x in self.allowed_tools if str(x).strip()]
+        self.allowed_tools = cleaned_tools or ["*"]
+        self.max_mode = str(self.max_mode or "implement").strip().lower() or "implement"
+        self.execution_backend = (
+            str(self.execution_backend or "host").strip().lower() or "host"
+        )
+        self.skill = str(self.skill or "").strip().lower()
+
+        if self.allowed_tools != ["*"]:
+            self.allowed_tools_explicit = True
+        if self.max_mode != "implement":
+            self.max_mode_explicit = True
 
 
 @dataclass
@@ -233,10 +250,14 @@ def load_config() -> Config:
                 if isinstance(allowed_tools, list):
                     cleaned = [str(x).strip() for x in allowed_tools if str(x).strip()]
                     profile.allowed_tools = cleaned or ["*"]
+                    profile.allowed_tools_explicit = True
                 profile.max_mode = str(profile_value.get("max_mode", profile.max_mode)).strip().lower()
+                if "max_mode" in profile_value:
+                    profile.max_mode_explicit = True
                 profile.execution_backend = str(
                     profile_value.get("execution_backend", profile.execution_backend)
                 ).strip().lower()
+                profile.skill = str(profile_value.get("skill", profile.skill)).strip().lower()
                 parsed_profiles[profile_name.strip()] = profile
             if parsed_profiles:
                 if "default" not in parsed_profiles:
