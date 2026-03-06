@@ -532,6 +532,73 @@ class TestTelegramAdapterCommands:
         assert saved[0][0] == "tg-99-20260225-090001"
         assert saved[0][1] == "/jobs"
 
+    def test_jobs_command_does_not_require_agent_creation(self, monkeypatch):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: (_ for _ in ()).throw(RuntimeError("llm init failed")),
+            poll_timeout_sec=1,
+        )
+        sent = []
+
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260306-180000")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: None,
+        )
+        monkeypatch.setattr(
+            "archon.adapters.telegram.handle_jobs_command",
+            lambda agent, text: (
+                True,
+                "Jobs:\n- worker:sess-1 [worker_session] ok | 2026-02-24T00:00:10Z | Looks good",
+            ),
+        )
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+        adapter._handle_message(
+            {
+                "text": "/jobs",
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        assert sent
+        assert "worker:sess-1" in sent[0][1]
+
+    def test_doctor_command_degrades_gracefully_when_agent_creation_fails(self, monkeypatch):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: (_ for _ in ()).throw(RuntimeError("llm init failed")),
+            poll_timeout_sec=1,
+        )
+        sent = []
+        cfg = Config()
+        cfg.llm.provider = "openai"
+        cfg.llm.model = "gpt-5-mini"
+        cfg.llm.api_key = ""
+
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260306-180001")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: None,
+        )
+        monkeypatch.setattr("archon.adapters.telegram.load_config", lambda: cfg)
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+        adapter._handle_message(
+            {
+                "text": "/doctor",
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        assert sent
+        assert sent[0][1].startswith("Doctor:")
+        assert "llm=" in sent[0][1]
+
     def test_job_lane_route_progress_is_sent_before_final_reply(self, monkeypatch):
         adapter = TelegramAdapter(
             token="123:abc",

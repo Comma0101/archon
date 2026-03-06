@@ -7,6 +7,7 @@ import secrets
 import sys
 import threading
 import time
+from types import SimpleNamespace
 from typing import Callable, TYPE_CHECKING
 
 from archon.adapters.telegram_approvals import (
@@ -280,9 +281,6 @@ class TelegramAdapter:
             self._send_text_and_record(chat_id, body, self._build_news_reply(body))
             return
 
-        if self._handle_local_shell_command(chat_id, body):
-            return
-
         handled, msg = handle_jobs_command(None, body)
         if handled:
             self._send_text_and_record(chat_id, body, msg)
@@ -314,10 +312,19 @@ class TelegramAdapter:
             self._send_text_and_record(chat_id, body, self._deny_pending_request(chat_id))
             return
 
+        if self._handle_local_shell_command(chat_id, body):
+            return
+
         self._handle_chat_body(chat_id, user_id, body, history_user_text=body)
 
     def _handle_local_shell_command(self, chat_id: int, body: str) -> bool:
-        agent = self._get_or_create_chat_agent(chat_id)
+        try:
+            agent = self._get_or_create_chat_agent(chat_id)
+        except Exception as exc:
+            agent = self._build_local_shell_fallback_agent(body)
+            if agent is None:
+                self._send_text_and_record(chat_id, body, f"Local command unavailable: {exc}")
+                return True
         for handler in (
             handle_status_command,
             handle_cost_command,
@@ -333,6 +340,38 @@ class TelegramAdapter:
                 self._send_text_and_record(chat_id, body, msg)
                 return True
         return False
+
+    def _build_local_shell_fallback_agent(self, body: str):
+        raw = (body or "").strip()
+        parts = raw.split()
+        if not parts:
+            return None
+        cmd = parts[0].lower()
+        sub = parts[1].lower() if len(parts) > 1 else ""
+
+        # Only use fallback for read-only inspection commands.
+        if cmd == "/skills" and sub not in {"", "list", "show", "status"}:
+            return None
+        if cmd == "/profile" and sub not in {"", "show", "status", "list"}:
+            return None
+        if cmd in {"/status", "/cost", "/doctor", "/permissions", "/plugins", "/mcp"} or (
+            cmd == "/skills" and sub in {"", "list", "show", "status"}
+        ) or (cmd == "/profile" and sub in {"", "show", "status", "list"}):
+            cfg = load_config()
+            llm_cfg = getattr(cfg, "llm", None)
+            return SimpleNamespace(
+                config=cfg,
+                llm=SimpleNamespace(
+                    provider=str(getattr(llm_cfg, "provider", "") or ""),
+                    model=str(getattr(llm_cfg, "model", "") or ""),
+                    api_key=str(getattr(llm_cfg, "api_key", "") or ""),
+                ),
+                policy_profile="default",
+                total_input_tokens=0,
+                total_output_tokens=0,
+                history=[],
+            )
+        return None
 
     def _get_or_create_chat_agent(self, chat_id: int) -> "Agent":
         agent = self._agents.get(chat_id)
