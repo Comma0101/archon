@@ -166,6 +166,14 @@ class TestCliCommands:
         names = {name for name, _desc in _SLASH_COMMANDS}
         assert {"/status", "/cost", "/doctor", "/permissions"} <= names
 
+    def test_slash_command_descriptions_group_shell_controls(self):
+        descriptions = dict(_SLASH_COMMANDS)
+        assert descriptions["/status"] == "Shell: current status"
+        assert descriptions["/skills"] == "Shell: skills"
+        assert descriptions["/plugins"] == "Shell: plugins"
+        assert descriptions["/model"] == "Model: current provider/model"
+        assert descriptions["/mcp"] == "Integrations: MCP servers and tools"
+
     def test_handle_model_command_shows_current(self):
         agent = SimpleNamespace(
             llm=SimpleNamespace(provider="google", model="old-model"),
@@ -284,6 +292,10 @@ class TestCliCommands:
         action, msg = _handle_repl_command(agent, "/")
         assert action == "help"
         assert "Available commands:" in msg
+        assert "Shell: current status" in msg
+        assert "Shell: skills" in msg
+        assert "Shell: plugins" in msg
+        assert "Model: current provider/model" in msg
         for name, _desc in _SLASH_COMMANDS:
             assert name in msg
 

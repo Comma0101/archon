@@ -9,25 +9,61 @@ import termios
 import tty
 
 
-SLASH_COMMANDS = [
-    ("/help", "Show commands and usage"),
-    ("/reset", "Clear conversation history"),
-    ("/status", "Show current shell status"),
-    ("/cost", "Show session token usage"),
-    ("/doctor", "Run local shell health checks"),
-    ("/permissions", "Show current policy permissions"),
-    ("/skills", "Skill controls (list/show/use/clear)"),
-    ("/plugins", "Plugin controls (list/show)"),
-    ("/model", "Show current provider/model"),
-    ("/model-list", "List model presets by provider"),
-    ("/model-set", "Set model via <provider>-<model>"),
-    ("/calls", "Call tool controls (status/on/off)"),
-    ("/profile", "Policy profile controls (show/set)"),
-    ("/mcp", "Inspect configured MCP servers and tools"),
-    ("/jobs", "List recent cross-surface jobs"),
-    ("/job", "Show one job summary by ID"),
-    ("/paste", "Multiline paste mode"),
-]
+SLASH_COMMAND_GROUPS = (
+    (
+        "Shell",
+        (
+            ("/help", "commands and usage"),
+            ("/reset", "clear conversation"),
+            ("/status", "current status"),
+            ("/cost", "token usage"),
+            ("/doctor", "health checks"),
+            ("/permissions", "policy permissions"),
+            ("/skills", "skills"),
+            ("/plugins", "plugins"),
+        ),
+    ),
+    (
+        "Model",
+        (
+            ("/model", "current provider/model"),
+            ("/model-list", "list presets"),
+            ("/model-set", "set provider-model"),
+        ),
+    ),
+    (
+        "Control",
+        (
+            ("/calls", "call controls"),
+            ("/profile", "policy profiles"),
+            ("/jobs", "recent jobs"),
+            ("/job", "job summary"),
+        ),
+    ),
+    (
+        "Integrations",
+        (
+            ("/mcp", "MCP servers and tools"),
+        ),
+    ),
+    (
+        "Input",
+        (
+            ("/paste", "multiline paste"),
+        ),
+    ),
+)
+
+
+def build_slash_commands() -> list[tuple[str, str]]:
+    commands: list[tuple[str, str]] = []
+    for group, items in SLASH_COMMAND_GROUPS:
+        for name, description in items:
+            commands.append((name, f"{group}: {description}"))
+    return commands
+
+
+SLASH_COMMANDS = build_slash_commands()
 
 MODEL_CATALOG: dict[str, tuple[str, ...]] = {
     "google": (

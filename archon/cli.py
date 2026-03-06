@@ -50,7 +50,7 @@ from archon.cli_self_commands import (
 )
 from archon.cli_commands import (
     MODEL_CATALOG as _MODEL_CATALOG,
-    SLASH_COMMANDS as _SLASH_COMMANDS,
+    build_slash_commands as _build_slash_commands_impl,
     build_model_set_subvalues as _build_model_set_subvalues_impl,
     build_slash_subvalues as _build_slash_subvalues,
     pick_slash_command as _pick_slash_command_impl,
@@ -96,6 +96,7 @@ from archon.cli_ui import (
     _make_readline_prompt,
 )
 
+_SLASH_COMMANDS = _build_slash_commands_impl()
 _SLASH_NAMES = [name for name, _ in _SLASH_COMMANDS]
 
 
