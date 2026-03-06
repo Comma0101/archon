@@ -472,7 +472,13 @@ def handle_approvals_command(agent, text: str) -> tuple[bool, str]:
     if not parts or parts[0].lower() != "/approvals":
         return False, ""
 
-    sub = parts[1].strip().lower() if len(parts) > 1 else "status"
+    if len(parts) == 1:
+        sub = "status"
+    elif len(parts) == 2 and parts[1].strip().lower() in {"on", "off"}:
+        sub = parts[1].strip().lower()
+    else:
+        return True, "Usage: /approvals [on|off]"
+
     if sub in {"on", "off"}:
         setter = getattr(agent, "set_terminal_approval_mode", None)
         if callable(setter):

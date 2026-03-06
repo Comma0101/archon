@@ -326,6 +326,13 @@ class TestCliCommands:
         assert action == "approvals"
         assert msg == "Approvals: requested=off | state=unavailable"
 
+    @pytest.mark.parametrize("command", ["/approvals foo", "/approvals on extra"])
+    def test_handle_repl_command_approvals_rejects_invalid_forms(self, command):
+        action, msg = _handle_repl_command(SimpleNamespace(), command)
+
+        assert action == "approvals"
+        assert msg == "Usage: /approvals [on|off]"
+
     def test_handle_repl_command_deny_and_approve_report_without_pending_request(self):
         action, msg = _handle_repl_command(SimpleNamespace(), "/approve")
 
@@ -1238,6 +1245,10 @@ class TestCliLocalInteractiveCommands:
             ("/cost", "Cost: total_tokens=150 | input=120 | output=30"),
             ("/doctor", "Doctor: llm=ok | profile=ok | calls=on | mcp=1/2"),
             ("/permissions", "Permissions: profile=safe | mode=review | tools=2 [read_file,shell]"),
+            ("/approvals", "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0"),
+            ("/approve", "No pending dangerous request to approve."),
+            ("/deny", "No pending dangerous request to deny."),
+            ("/approve_next", "Approve-next unavailable: session approval state not wired."),
         ],
     )
     def test_local_shell_commands_do_not_call_agent_run(self, command, expected):
