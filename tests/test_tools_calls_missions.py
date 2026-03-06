@@ -132,6 +132,48 @@ class TestCallMissionTools:
         assert "job_summary: Call me" in out
         assert "job_last_update_at: 2026-02-24T00:00:10Z" in out
 
+    def test_call_mission_list_includes_job_summaries(self, monkeypatch):
+        monkeypatch.setattr(
+            "archon.tooling.call_mission_tools.call_runner.list_call_missions",
+            lambda limit=20: {
+                "ok": True,
+                "count": 1,
+                "missions": [
+                    {
+                        "call_session_id": "call_job_list_1",
+                        "status": "completed",
+                        "target_number": "+15551112222",
+                    }
+                ],
+            },
+        )
+        monkeypatch.setattr(
+            "archon.tooling.call_mission_tools.list_call_job_summaries",
+            lambda limit=20: [
+                type(
+                    "JobSummary",
+                    (),
+                    {
+                        "to_dict": lambda self: {
+                            "job_id": "call:call_job_list_1",
+                            "kind": "call_mission",
+                            "status": "completed",
+                            "summary": "Goal achieved clearly.",
+                            "last_update_at": "2026-02-24T00:00:10Z",
+                        }
+                    },
+                )()
+            ],
+        )
+
+        registry = make_registry()
+        out = registry.execute("call_mission_list", {"limit": 5})
+
+        assert "job_summaries:" in out
+        assert "call:call_job_list_1" in out
+        assert "call_mission" in out
+        assert "Goal achieved clearly." in out
+
     def test_call_mission_status_runner_surfaces_and_persists_realtime_fields(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
             "archon.calls.store.CALLS_MISSIONS_DIR",

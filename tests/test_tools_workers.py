@@ -713,6 +713,10 @@ class TestDelegateCodeTask:
         result = reg.execute("worker_list", {})
         assert "sess-2" in result
         assert "claude_code" in result
+        assert "job_summaries:" in result
+        assert "worker:sess-2" in result
+        assert "worker_session" in result
+        assert "Done" in result
 
     def test_worker_send_continues_claude_session(self, monkeypatch, tmp_path):
         reg = make_registry()
