@@ -118,6 +118,7 @@ class MCPServerConfig:
     mode: str = "read_only"  # read_only | read_write
     transport: str = "stdio"
     command: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -319,6 +320,7 @@ def load_config() -> Config:
                 if not isinstance(server_name, str) or not isinstance(server_value, dict):
                     continue
                 command = server_value.get("command", [])
+                env_map = server_value.get("env", {})
                 normalized_name = server_name.strip().lower()
                 if not normalized_name:
                     continue
@@ -329,6 +331,7 @@ def load_config() -> Config:
                     command=[str(item).strip() for item in command if str(item).strip()]
                     if isinstance(command, list)
                     else [],
+                    env=_resolve_mcp_env_map(env_map) if isinstance(env_map, dict) else {},
                 )
             cfg.mcp.servers = parsed_servers
 
@@ -453,6 +456,26 @@ def load_config() -> Config:
         cfg.web.brave_api_key = brave_key.strip()
 
     return cfg
+
+
+def _resolve_mcp_env_map(raw_env: dict) -> dict[str, str]:
+    resolved: dict[str, str] = {}
+    for key, value in raw_env.items():
+        env_key = str(key or "").strip()
+        if not env_key:
+            continue
+        resolved[env_key] = _resolve_mcp_env_value(value)
+    return resolved
+
+
+def _resolve_mcp_env_value(value: object) -> str:
+    text = str(value or "")
+    if text.startswith("${") and text.endswith("}") and len(text) > 3:
+        env_name = text[2:-1].strip()
+        if not env_name:
+            return ""
+        return str(os.environ.get(env_name, ""))
+    return text
 
 
 def ensure_dirs():

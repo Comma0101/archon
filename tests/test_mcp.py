@@ -190,3 +190,63 @@ def test_mcp_client_stdio_transport_initializes_before_listing_tools(tmp_path):
     assert result["server"] == "docs"
     assert result["tools"][0]["name"] == "search_docs"
     assert log_path.read_text(encoding="utf-8").splitlines() == ["initialize", "tools/list"]
+
+
+def test_mcp_client_stdio_transport_passes_server_env_to_child(tmp_path):
+    log_path = tmp_path / "mcp-env-log.txt"
+    server_path = tmp_path / "fake_env_mcp_server.py"
+    server_path.write_text(
+        "\n".join(
+            [
+                "import json",
+                "import os",
+                "import pathlib",
+                "import sys",
+                "",
+                "log_path = pathlib.Path(sys.argv[1])",
+                "for line in sys.stdin:",
+                "    if not line.strip():",
+                "        continue",
+                "    request = json.loads(line)",
+                "    method = request.get('method', '')",
+                "    response = {'jsonrpc': '2.0', 'id': request.get('id')}",
+                "    if method == 'initialize':",
+                "        with log_path.open('w', encoding='utf-8') as handle:",
+                "            handle.write(os.environ.get('EXA_API_KEY', ''))",
+                "        response['result'] = {",
+                "            'protocolVersion': '2025-06-18',",
+                "            'capabilities': {'tools': {}},",
+                "            'serverInfo': {'name': 'fake-exa', 'version': '0.1.0'},",
+                "        }",
+                "    elif method == 'tools/list':",
+                "        response['result'] = {",
+                "            'tools': [{'name': 'web_search', 'description': 'Search Exa'}],",
+                "        }",
+                "    else:",
+                "        response['error'] = {'code': -32601, 'message': method}",
+                "    sys.stdout.write(json.dumps(response) + '\\n')",
+                "    sys.stdout.flush()",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    client = MCPClient(
+        MCPConfig(
+            servers={
+                "exa": MCPServerConfig(
+                    enabled=True,
+                    mode="read_only",
+                    transport="stdio",
+                    command=[sys.executable, str(server_path), str(log_path)],
+                    env={"EXA_API_KEY": "test-exa-secret"},
+                )
+            }
+        )
+    )
+
+    result = client.list_tools("exa")
+
+    assert result["server"] == "exa"
+    assert result["tools"][0]["name"] == "web_search"
+    assert log_path.read_text(encoding="utf-8") == "test-exa-secret"

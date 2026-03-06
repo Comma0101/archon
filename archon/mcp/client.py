@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from typing import Callable
 
@@ -167,6 +168,14 @@ class MCPClient:
             return {"error": f"Error: MCP action '{action or 'unknown'}' is not supported"}
 
         try:
+            child_env = os.environ.copy()
+            child_env.update(
+                {
+                    str(key): str(value)
+                    for key, value in getattr(server, "env", {}).items()
+                    if str(key).strip()
+                }
+            )
             proc = subprocess.Popen(
                 command,
                 stdin=subprocess.PIPE,
@@ -174,6 +183,7 @@ class MCPClient:
                 stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
+                env=child_env,
             )
         except Exception as e:
             return {"error": f"Error: Failed to start MCP server ({type(e).__name__}: {e})"}

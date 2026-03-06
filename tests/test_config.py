@@ -147,6 +147,37 @@ def test_load_config_mcp_read_only_servers(monkeypatch, tmp_path):
     assert server.command == ["python", "server.py"]
 
 
+def test_load_config_mcp_server_env_interpolates_from_environment(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config" / "archon"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        "\n".join(
+            [
+                "[mcp.servers.exa]",
+                "enabled = true",
+                'mode = "read_only"',
+                'transport = "stdio"',
+                'command = ["node", "server.js"]',
+                "",
+                "[mcp.servers.exa.env]",
+                'EXA_API_KEY = "${EXA_API_KEY}"',
+                'LOG_LEVEL = "debug"',
+            ]
+        )
+    )
+    monkeypatch.setattr("archon.config.CONFIG_DIR", config_dir)
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-secret")
+
+    cfg = load_config()
+
+    assert "exa" in cfg.mcp.servers
+    server = cfg.mcp.servers["exa"]
+    assert server.env == {
+        "EXA_API_KEY": "test-exa-secret",
+        "LOG_LEVEL": "debug",
+    }
+
+
 def test_load_config_mcp_server_names_are_normalized_lowercase(monkeypatch, tmp_path):
     config_dir = tmp_path / "config" / "archon"
     config_dir.mkdir(parents=True, exist_ok=True)
