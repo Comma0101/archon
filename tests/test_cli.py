@@ -482,6 +482,34 @@ class TestCliCommands:
         assert "job_status: ok" in msg
         assert "job_summary: Looks good" in msg
 
+    def test_handle_repl_command_mcp_reports_enabled_counts_and_server_names(self):
+        cfg = Config()
+        cfg.mcp.servers = {
+            "docs": MCPServerConfig(
+                enabled=True,
+                mode="read_only",
+                transport="stdio",
+                command=["python", "server.py"],
+            ),
+            "local": MCPServerConfig(
+                enabled=False,
+                mode="read_only",
+                transport="stdio",
+                command=["uvx", "local-server"],
+            ),
+        }
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=cfg,
+        )
+
+        action, msg = _handle_repl_command(agent, "/mcp")
+
+        assert action == "mcp"
+        assert msg.startswith("MCP: enabled=1/2")
+        assert "servers=docs" in msg
+        assert "/mcp show <server>" in msg
+
     def test_handle_repl_command_mcp_servers_lists_configured_servers(self):
         cfg = Config()
         cfg.mcp.servers = {
@@ -503,6 +531,32 @@ class TestCliCommands:
         assert "docs" in msg
         assert "read_only" in msg
         assert "stdio" in msg
+
+    def test_handle_repl_command_mcp_show_reports_server_details(self):
+        cfg = Config()
+        cfg.mcp.servers = {
+            "docs": MCPServerConfig(
+                enabled=True,
+                mode="read_only",
+                transport="stdio",
+                command=["python", "server.py"],
+                env={"EXA_API_KEY": "${EXA_API_KEY}"},
+            )
+        }
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=cfg,
+        )
+
+        action, msg = _handle_repl_command(agent, "/mcp show docs")
+
+        assert action == "mcp"
+        assert "MCP server: docs" in msg
+        assert "enabled: on" in msg
+        assert "mode: read_only" in msg
+        assert "transport: stdio" in msg
+        assert "command: python server.py" in msg
+        assert "env_keys: EXA_API_KEY" in msg
 
     def test_handle_repl_command_mcp_tools_lists_server_tools(self, monkeypatch):
         cfg = Config()

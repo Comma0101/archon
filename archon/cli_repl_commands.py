@@ -523,19 +523,20 @@ def handle_mcp_command(agent, text: str) -> tuple[bool, str]:
     if mcp_cfg is None:
         return True, "MCP unavailable: missing config.mcp"
 
+    servers = getattr(mcp_cfg, "servers", {}) or {}
     sub = parts[1].strip().lower() if len(parts) > 1 else "help"
     if sub in {"help", "status"}:
-        servers = getattr(mcp_cfg, "servers", {}) or {}
-        enabled_count = sum(
-            1 for server in servers.values() if bool(getattr(server, "enabled", False))
+        enabled_names = sorted(
+            name for name, server in servers.items() if bool(getattr(server, "enabled", False))
         )
+        enabled_summary = ",".join(enabled_names) if enabled_names else "none"
         return True, (
-            f"MCP: {enabled_count} enabled server(s) | "
-            "commands: /mcp servers, /mcp tools <server>"
+            f"MCP: enabled={len(enabled_names)}/{len(servers)} | "
+            f"servers={enabled_summary} | "
+            "commands: /mcp servers, /mcp show <server>, /mcp tools <server>"
         )
 
     if sub == "servers":
-        servers = getattr(mcp_cfg, "servers", {}) or {}
         if not servers:
             return True, "MCP servers: none configured"
         lines = ["MCP servers:"]
@@ -544,8 +545,36 @@ def handle_mcp_command(agent, text: str) -> tuple[bool, str]:
             enabled = "enabled" if bool(getattr(server, "enabled", False)) else "disabled"
             mode = str(getattr(server, "mode", "") or "").strip() or "unknown"
             transport = str(getattr(server, "transport", "") or "").strip() or "unknown"
-            lines.append(f"- {name}: {enabled} | mode={mode} | transport={transport}")
+            command = list(getattr(server, "command", []) or [])
+            command_name = command[0] if command else "none"
+            lines.append(
+                f"- {name}: {enabled} | mode={mode} | transport={transport} | command={command_name}"
+            )
         return True, "\n".join(lines)
+
+    if sub == "show":
+        if len(parts) < 3 or not parts[2].strip():
+            return True, "Usage: /mcp show <server>"
+        server_name = parts[2].strip().lower()
+        server = servers.get(server_name)
+        if server is None:
+            return True, f"MCP server not found: {server_name}"
+        enabled = "on" if bool(getattr(server, "enabled", False)) else "off"
+        mode = str(getattr(server, "mode", "") or "").strip() or "unknown"
+        transport = str(getattr(server, "transport", "") or "").strip() or "unknown"
+        command = " ".join(str(part).strip() for part in (getattr(server, "command", []) or []) if str(part).strip()) or "(none)"
+        env_keys = sorted((getattr(server, "env", {}) or {}).keys())
+        env_summary = ", ".join(env_keys) if env_keys else "(none)"
+        return True, "\n".join(
+            [
+                f"MCP server: {server_name}",
+                f"enabled: {enabled}",
+                f"mode: {mode}",
+                f"transport: {transport}",
+                f"command: {command}",
+                f"env_keys: {env_summary}",
+            ]
+        )
 
     if sub == "tools":
         if len(parts) < 3 or not parts[2].strip():
@@ -567,7 +596,7 @@ def handle_mcp_command(agent, text: str) -> tuple[bool, str]:
                 lines.append(f"- {name}")
         return True, "\n".join(lines)
 
-    return True, "Usage: /mcp [servers|tools <server>]"
+    return True, "Usage: /mcp [servers|show <server>|tools <server>]"
 
 
 def _collect_job_summaries(limit: int = 10):
@@ -827,7 +856,7 @@ def handle_repl_command(
     if raw.lower() in {"/help", "/?"}:
         return (
             "help",
-            "Commands: /help, /reset, /status, /cost, /compact, /context, /doctor, /permissions, /skills [list|show <name>|use <name>|clear], /plugins [list|show <name>], /model, /model-list, /model-set <provider>-<model>, /calls [status|on|off], /profile [show|set <name>], /mcp [servers|tools <server>], /jobs [active|all] [limit], /job <id>, /paste\n"
+            "Commands: /help, /reset, /status, /cost, /compact, /context, /doctor, /permissions, /skills [list|show <name>|use <name>|clear], /plugins [list|show <name>], /model, /model-list, /model-set <provider>-<model>, /calls [status|on|off], /profile [show|set <name>], /mcp [servers|show <server>|tools <server>], /jobs [active|all] [limit], /job <id>, /paste\n"
             "Multiline paste: paste normally (bracketed paste) or use /paste fallback, end with /end.",
         )
     handled, msg = handle_status_command(agent, raw)
