@@ -86,6 +86,7 @@ def chat_cmd(
         "current_user_input": "",
         "blocked_pending_id": "",
         "pending_replay_input": "",
+        "replay_guard_active": False,
     }
 
     def pending_is_expired(pending: dict | None) -> bool:
@@ -157,10 +158,6 @@ def chat_cmd(
         if not blocked_user_input:
             return "Pending dangerous request approved. Replay unavailable."
         pending["status"] = "approved"
-        approval_state["approve_next_tokens"] = max(
-            0,
-            int(approval_state.get("approve_next_tokens", 0) or 0),
-        ) + 1
         approval_state["pending_replay_input"] = blocked_user_input
         approval_state["pending_request"] = None
         return "Pending dangerous request approved. Replaying request..."
@@ -191,6 +188,8 @@ def chat_cmd(
             return True
         if level == Level.FORBIDDEN:
             return False
+        if bool(approval_state.get("replay_guard_active", False)):
+            return True
         if bool(approval_state.get("dangerous_mode", False)):
             return True
         tokens = max(0, int(approval_state.get("approve_next_tokens", 0) or 0))
@@ -325,6 +324,7 @@ def chat_cmd(
                     approval_state["current_user_input"] = ""
                     approval_state["blocked_pending_id"] = ""
                     approval_state["pending_replay_input"] = ""
+                    approval_state["replay_guard_active"] = False
                     click_echo_fn(f"History cleared. New session: {session_id}")
                     continue
                 if action == "approve":
@@ -332,6 +332,7 @@ def chat_cmd(
                     consume_replay = getattr(agent, "consume_terminal_pending_replay", None)
                     replay_input = consume_replay() if callable(consume_replay) else ""
                     if replay_input:
+                        approval_state["replay_guard_active"] = True
                         user_input = replay_input
                     else:
                         continue
@@ -423,6 +424,8 @@ def chat_cmd(
                     )
                     continue
                 click_echo_fn(f"\n{ansi_error}Error: {e}{ansi_reset}\n", err=True)
+            finally:
+                approval_state["replay_guard_active"] = False
     finally:
         if telegram_adapter is not None:
             telegram_adapter.stop()

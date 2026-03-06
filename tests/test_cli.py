@@ -1172,6 +1172,62 @@ class _DangerousActionAgent:
         return None
 
 
+class _ReplayLeakAgent:
+    def __init__(self):
+        self.hooks = HookBus()
+        self.config = SimpleNamespace(
+            telegram=SimpleNamespace(
+                enabled=False,
+                connect_on_chat=False,
+                allowed_user_ids=[],
+                poll_timeout_sec=30,
+            ),
+            llm=SimpleNamespace(model="test-model"),
+        )
+        self.tools = SimpleNamespace(confirmer=lambda _command, _level: False)
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
+        self.log_label = ""
+        self.run_calls = []
+        self._danger_calls = 0
+        self.on_thinking = None
+        self.on_tool_call = None
+
+    def run(self, text):
+        self.run_calls.append(text)
+        if text == "danger":
+            self._danger_calls += 1
+            if self._danger_calls == 1:
+                if self.on_tool_call:
+                    self.on_tool_call("shell", {"command": "rm important.txt"})
+                allowed = self.tools.confirmer("rm important.txt", Level.DANGEROUS)
+                self.total_input_tokens += 10
+                self.total_output_tokens += 2
+                if not allowed:
+                    return "Command rejected by safety gate."
+                return "unexpected pass"
+            self.total_input_tokens += 10
+            self.total_output_tokens += 2
+            return "safe replay"
+
+        if text == "later":
+            if self.on_tool_call:
+                self.on_tool_call("shell", {"command": "rm later.txt"})
+            allowed = self.tools.confirmer("rm later.txt", Level.DANGEROUS)
+            self.total_input_tokens += 10
+            self.total_output_tokens += 2
+            if not allowed:
+                return "Command rejected by safety gate."
+            return "ran:rm later.txt"
+
+        self.total_input_tokens += 10
+        self.total_output_tokens += 2
+        return f"ok:{text}"
+
+    def reset(self):
+        return None
+
+
 def _run_chat_session(agent, inputs):
     outputs = []
     input_iter = iter(inputs)
@@ -1447,6 +1503,36 @@ class TestCliPendingApprovalInteractiveChat:
         assert "ran:rm important.txt" in outputs
         assert "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0" in outputs
         assert agent.run_calls == ["danger", "danger"]
+
+    def test_chat_approve_replay_does_not_leave_a_spare_dangerous_token(self):
+        agent = _DangerousActionAgent(
+            {
+                "danger": "rm important.txt",
+                "second": "rm second.txt",
+            }
+        )
+
+        outputs = self._plain_outputs(
+            _run_local_command_session(agent, ["danger", "/approve", "second", "/approvals", "quit"])
+        )
+
+        assert "ran:rm important.txt" in outputs
+        assert any("approval required: dangerous action blocked" in text.lower() for text in outputs)
+        assert "Approvals: dangerous_mode=off | pending=rm second.txt | approve_next_tokens=0" in outputs
+        assert agent.run_calls == ["danger", "danger", "second"]
+
+    def test_chat_approve_replay_does_not_leak_approval_when_replay_turn_is_safe(self):
+        agent = _ReplayLeakAgent()
+
+        outputs = self._plain_outputs(
+            _run_local_command_session(agent, ["danger", "/approve", "later", "/approvals", "quit"])
+        )
+
+        assert "Pending dangerous request approved. Replaying request..." in outputs
+        assert "safe replay" in outputs
+        assert any("approval required: dangerous action blocked" in text.lower() for text in outputs)
+        assert "Approvals: dangerous_mode=off | pending=rm later.txt | approve_next_tokens=0" in outputs
+        assert agent.run_calls == ["danger", "danger", "later"]
 
     def test_chat_deny_clears_pending_state(self):
         agent = _DangerousActionAgent({"danger": "rm important.txt"})
