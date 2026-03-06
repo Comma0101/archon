@@ -72,14 +72,12 @@ def handle_doctor_command(agent, text: str) -> tuple[bool, str]:
 
     cfg = getattr(agent, "config", None)
     llm_ready = _llm_runtime_ready(agent, cfg)
-    profile_name = str(getattr(agent, "policy_profile", "") or "").strip() or "default"
-    resolved_name, _profile = resolve_profile(cfg, profile_name=profile_name)
-    profile_ready = bool(resolved_name)
+    profile_display, _resolved_name, _profile, profile_missing = _resolve_profile_diagnostics(agent, cfg)
     calls_state = "on" if bool(getattr(getattr(cfg, "calls", None), "enabled", False)) else "off"
     return True, (
         "Doctor: "
         f"llm={'ok' if llm_ready else 'missing'} | "
-        f"profile={'ok' if profile_ready else 'missing'} | "
+        f"profile={'ok' if not profile_missing else profile_display} | "
         f"calls={calls_state} | "
         f"mcp={_format_mcp_counts(cfg)}"
     )
@@ -92,12 +90,11 @@ def handle_permissions_command(agent, text: str) -> tuple[bool, str]:
         return False, ""
 
     cfg = getattr(agent, "config", None)
-    profile_name = str(getattr(agent, "policy_profile", "") or "").strip() or "default"
-    resolved_name, profile = resolve_profile(cfg, profile_name=profile_name)
+    profile_display, resolved_name, profile, profile_missing = _resolve_profile_diagnostics(agent, cfg)
     allowed_tools = sorted(str(item).strip() for item in profile.allowed_tools if str(item).strip())
     return True, (
         "Permissions: "
-        f"profile={resolved_name} | "
+        f"profile={profile_display if profile_missing else resolved_name} | "
         f"mode={profile.max_mode} | "
         f"tools={len(allowed_tools)} [{','.join(allowed_tools)}]"
     )
@@ -492,21 +489,32 @@ def _format_mcp_counts(cfg) -> str:
 
 def _llm_runtime_ready(agent, cfg) -> bool:
     llm = getattr(agent, "llm", None)
-    provider = str(getattr(llm, "provider", "") or getattr(getattr(cfg, "llm", None), "provider", "") or "").strip()
-    model = str(getattr(llm, "model", "") or getattr(getattr(cfg, "llm", None), "model", "") or "").strip()
-    if provider and model:
+    if str(getattr(llm, "api_key", "") or "").strip():
         return True
-
     llm_cfg = getattr(cfg, "llm", None)
-    provider = str(getattr(llm_cfg, "provider", "") or "").strip().lower()
     if str(getattr(llm_cfg, "api_key", "") or "").strip():
         return True
+    provider = str(getattr(llm, "provider", "") or getattr(llm_cfg, "provider", "") or "").strip().lower()
     env_name = {
         "google": "GEMINI_API_KEY",
         "openai": "OPENAI_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
     }.get(provider)
     return bool(env_name and str(os.environ.get(env_name, "")).strip())
+
+
+def _resolve_profile_diagnostics(agent, cfg):
+    requested_name = str(getattr(agent, "policy_profile", "") or "").strip() or "default"
+    profiles = getattr(cfg, "profiles", {}) or {}
+    profile_exists = isinstance(profiles, dict) and requested_name in profiles
+    resolved_name, profile = resolve_profile(cfg, profile_name=requested_name)
+    if profile_exists or requested_name == resolved_name:
+        display_name = resolved_name
+        missing = False
+    else:
+        display_name = f"{requested_name}->{resolved_name}"
+        missing = True
+    return display_name, resolved_name, profile, missing
 
 
 def handle_repl_command(

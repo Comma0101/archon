@@ -143,6 +143,7 @@ class TestCliCommands:
         cfg = Config()
         cfg.llm.provider = "openai"
         cfg.llm.model = "gpt-5-mini"
+        cfg.llm.api_key = "test-key"
         cfg.calls.enabled = True
         cfg.mcp.servers = {
             "docs": MCPServerConfig(enabled=True, mode="read_only", transport="stdio"),
@@ -583,6 +584,22 @@ class TestCliCommands:
         assert "calls=off" in msg
         assert "mcp=1/1" in msg
 
+    def test_handle_repl_command_doctor_reports_missing_llm_credentials(self):
+        cfg = Config()
+        cfg.llm.provider = "google"
+        cfg.llm.model = "gemini-x"
+        cfg.llm.api_key = ""
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(provider="google", model="gemini-x"),
+            config=cfg,
+        )
+
+        action, msg = _handle_repl_command(agent, "/doctor")
+
+        assert action == "doctor"
+        assert "llm=missing" in msg
+        assert "profile=ok" in msg
+
     def test_handle_repl_command_permissions_reports_active_policy(self):
         cfg = Config()
         cfg.safety.default_action = "confirm"
@@ -610,6 +627,23 @@ class TestCliCommands:
         assert "profile=safe" in msg
         assert "mode=review" in msg
         assert "tools=1 [memory_read]" in msg
+
+    def test_handle_repl_command_invalid_profile_is_reported_consistently(self):
+        cfg = Config()
+        cfg.llm.api_key = "test-key"
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(provider="google", model="gemini-x"),
+            policy_profile="missing-profile",
+            config=cfg,
+        )
+
+        doctor_action, doctor_msg = _handle_repl_command(agent, "/doctor")
+        permissions_action, permissions_msg = _handle_repl_command(agent, "/permissions")
+
+        assert doctor_action == "doctor"
+        assert "profile=missing-profile->default" in doctor_msg
+        assert permissions_action == "permissions"
+        assert "profile=missing-profile->default" in permissions_msg
 
     def test_chat_cmd_handles_status_locally_without_model_turn(self):
         outputs = []
@@ -733,6 +767,7 @@ class _LocalCommandAgent:
         cfg = Config()
         cfg.llm.provider = "openai"
         cfg.llm.model = "gpt-5-mini"
+        cfg.llm.api_key = "test-key"
         cfg.calls.enabled = True
         cfg.mcp.servers = {
             "docs": MCPServerConfig(enabled=True, mode="read_only", transport="stdio"),
