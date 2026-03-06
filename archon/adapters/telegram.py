@@ -29,7 +29,18 @@ from archon.adapters.telegram_client import (
 )
 from archon.audio.stt import transcribe_audio_bytes
 from archon.audio.tts import convert_wav_to_ogg_opus, synthesize_speech_wav
-from archon.cli_repl_commands import handle_job_command, handle_jobs_command
+from archon.cli_repl_commands import (
+    handle_cost_command,
+    handle_doctor_command,
+    handle_job_command,
+    handle_jobs_command,
+    handle_mcp_command,
+    handle_permissions_command,
+    handle_plugins_command,
+    handle_profile_command,
+    handle_skills_command,
+    handle_status_command,
+)
 from archon.config import ensure_dirs, load_config
 from archon.history import new_session_id, save_exchange
 from archon.news.runner import get_or_build_news_digest
@@ -229,6 +240,14 @@ class TelegramAdapter:
                 body,
                 "Send a message to chat with Archon.\n"
                 "/reset - clear this chat's agent history\n"
+                "/status - show current model/profile/token summary\n"
+                "/cost - show session token totals\n"
+                "/doctor - show local runtime health checks\n"
+                "/permissions - show active policy permissions\n"
+                "/skills - inspect or select built-in skills\n"
+                "/plugins - inspect native and MCP plugins\n"
+                "/mcp - inspect MCP server status and config\n"
+                "/profile - inspect or change the active policy profile\n"
                 "/jobs - list recent jobs across workers and calls\n"
                 "/job <id> - show one normalized job summary\n"
                 "/news - fetch or reuse today's AI news digest\n"
@@ -259,6 +278,9 @@ class TelegramAdapter:
         if cmd == "/news":
             self._send_typing(chat_id)
             self._send_text_and_record(chat_id, body, self._build_news_reply(body))
+            return
+
+        if self._handle_local_shell_command(chat_id, body):
             return
 
         handled, msg = handle_jobs_command(None, body)
@@ -293,6 +315,36 @@ class TelegramAdapter:
             return
 
         self._handle_chat_body(chat_id, user_id, body, history_user_text=body)
+
+    def _handle_local_shell_command(self, chat_id: int, body: str) -> bool:
+        agent = self._get_or_create_chat_agent(chat_id)
+        for handler in (
+            handle_status_command,
+            handle_cost_command,
+            handle_doctor_command,
+            handle_permissions_command,
+            handle_skills_command,
+            handle_plugins_command,
+            handle_mcp_command,
+            handle_profile_command,
+        ):
+            handled, msg = handler(agent, body)
+            if handled:
+                self._send_text_and_record(chat_id, body, msg)
+                return True
+        return False
+
+    def _get_or_create_chat_agent(self, chat_id: int) -> "Agent":
+        agent = self._agents.get(chat_id)
+        if agent is None:
+            agent = self.agent_factory()
+            agent.log_label = f"telegram chat={chat_id}"
+            self._wire_chat_confirmer(agent, chat_id)
+            self._wire_chat_route_progress(agent, chat_id)
+            self._agents[chat_id] = agent
+        else:
+            agent.log_label = f"telegram chat={chat_id}"
+        return agent
 
     def _handle_voice_or_audio_message(
         self,
@@ -345,16 +397,7 @@ class TelegramAdapter:
         *,
         history_user_text: str,
     ) -> None:
-
-        agent = self._agents.get(chat_id)
-        if agent is None:
-            agent = self.agent_factory()
-            agent.log_label = f"telegram chat={chat_id}"
-            self._wire_chat_confirmer(agent, chat_id)
-            self._wire_chat_route_progress(agent, chat_id)
-            self._agents[chat_id] = agent
-        else:
-            agent.log_label = f"telegram chat={chat_id}"
+        agent = self._get_or_create_chat_agent(chat_id)
 
         # Wire typing indicator: fire on every LLM call and tool call
         agent.on_thinking = lambda: self._send_typing(chat_id)

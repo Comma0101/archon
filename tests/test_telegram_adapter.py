@@ -1,7 +1,9 @@
 """Tests for Telegram adapter command routing."""
 
+from types import SimpleNamespace
+
 from archon.adapters.telegram import TelegramAdapter
-from archon.config import Config
+from archon.config import Config, MCPServerConfig, ProfileConfig
 from archon.control.hooks import HookBus
 from archon.news.models import NewsDigest, NewsRunResult
 from archon.safety import Level
@@ -70,6 +72,41 @@ class _JobRouteAgent:
         self.messages.clear()
 
 
+class _TelegramLocalCommandAgent:
+    def __init__(self):
+        cfg = Config()
+        cfg.llm.provider = "openai"
+        cfg.llm.model = "gpt-5-mini"
+        cfg.llm.api_key = "test-key"
+        cfg.calls.enabled = True
+        cfg.mcp.servers = {
+            "docs": MCPServerConfig(enabled=True, mode="read_only", transport="stdio"),
+            "build": MCPServerConfig(enabled=False, mode="read_write", transport="stdio"),
+        }
+        cfg.profiles = {
+            "default": ProfileConfig(),
+            "safe": ProfileConfig(allowed_tools=["shell", "read_file"], max_mode="review"),
+        }
+        self.hooks = HookBus()
+        self.config = cfg
+        self.llm = SimpleNamespace(provider="openai", model="gpt-5-mini")
+        self.policy_profile = "safe"
+        self.total_input_tokens = 120
+        self.total_output_tokens = 30
+        self.history = []
+        self.log_label = ""
+        self.on_thinking = None
+        self.on_tool_call = None
+        self.run_calls = []
+
+    def run(self, text: str) -> str:
+        self.run_calls.append(text)
+        raise AssertionError(f"agent.run should not be called for local Telegram command: {text}")
+
+    def reset(self):
+        return None
+
+
 def _adapter():
     return TelegramAdapter(
         token="123:abc",
@@ -80,6 +117,76 @@ def _adapter():
 
 
 class TestTelegramAdapterCommands:
+    def test_local_shell_parity_commands_are_handled_without_model_turn(self, monkeypatch):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: _TelegramLocalCommandAgent(),
+            poll_timeout_sec=1,
+        )
+        sent = []
+        saved = []
+
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260306-170000")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: saved.append((session_id, user_msg, assistant_msg)),
+        )
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+        commands = {
+            "/status": "Status:",
+            "/cost": "Cost:",
+            "/doctor": "Doctor:",
+            "/permissions": "Permissions:",
+            "/skills": "Skills:",
+            "/plugins": "Plugins:",
+            "/mcp": "MCP:",
+            "/profile": "Policy profile:",
+        }
+
+        for command, expected_prefix in commands.items():
+            adapter._handle_message({"text": command, "chat": {"id": 99}, "from": {"id": 42}})
+            assert sent[-1][0] == 99
+            assert sent[-1][1].startswith(expected_prefix)
+            assert saved[-1][0] == "tg-99-20260306-170000"
+            assert saved[-1][1] == command
+            assert saved[-1][2].startswith(expected_prefix)
+
+        assert 99 in adapter._agents  # type: ignore[attr-defined]
+        agent = adapter._agents[99]  # type: ignore[attr-defined]
+        assert agent.run_calls == []
+
+    def test_local_shell_parity_subcommands_are_handled_without_model_turn(self, monkeypatch):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: _TelegramLocalCommandAgent(),
+            poll_timeout_sec=1,
+        )
+        sent = []
+
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260306-170001")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: None,
+        )
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+        commands = {
+            "/profile show": "Policy profile:",
+            "/skills show coder": "Skill coder:",
+            "/plugins show mcp:docs": "Plugin mcp:docs:",
+            "/mcp show docs": "MCP server: docs",
+        }
+
+        for command, expected_prefix in commands.items():
+            adapter._handle_message({"text": command, "chat": {"id": 99}, "from": {"id": 42}})
+            assert sent[-1][1].startswith(expected_prefix)
+
+        agent = adapter._agents[99]  # type: ignore[attr-defined]
+        assert agent.run_calls == []
+
     def test_regular_chat_messages_are_persisted_to_history(self, monkeypatch):
         adapter = _adapter()
         saved = []
@@ -230,6 +337,24 @@ class TestTelegramAdapterCommands:
         assert sent
         assert "missing file_id" in sent[0][1].lower()
         assert 99 not in adapter._agents  # type: ignore[attr-defined]
+
+    def test_help_mentions_local_shell_parity_commands(self):
+        adapter = _adapter()
+        sent = []
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+        adapter._handle_message(
+            {
+                "text": "/help",
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        assert sent
+        assert "/status - show current model/profile/token summary" in sent[0][1]
+        assert "/skills - inspect or select built-in skills" in sent[0][1]
+        assert "/mcp - inspect MCP server status and config" in sent[0][1]
 
     def test_startup_sync_skips_pending_updates_by_advancing_offset(self, monkeypatch):
         adapter = _adapter()
