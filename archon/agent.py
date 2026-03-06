@@ -1,0 +1,780 @@
+"""Core tool-use loop tying everything together."""
+
+from __future__ import annotations
+
+import sys
+import queue
+import threading
+import time
+from typing import Callable, Generator, TypeVar, cast
+
+from archon import memory as memory_store
+from archon.control.hooks import HookBus
+from archon.control.orchestrator import orchestrate_response, orchestrate_stream_response
+from archon.control.policy import evaluate_tool_policy
+from archon.llm import LLMClient, LLMResponse
+from archon.tools import ToolRegistry
+from archon.prompt import build_system_prompt
+from archon.config import Config
+
+
+ANSI_RESET = "\033[0m"
+ANSI_TOOL_CALL = "\033[96m"       # bright cyan
+ANSI_TOOL_RESULT = "\033[37m"     # readable light gray/white
+ANSI_TOOL_RESULT_META = "\033[90m"  # dim for truncation summaries
+
+_WORKER_TOOL_NAMES = {
+    "delegate_code_task",
+    "worker_start",
+    "worker_send",
+    "worker_status",
+    "worker_poll",
+    "worker_list",
+}
+
+
+class Agent:
+    def __init__(self, llm: LLMClient, tools: ToolRegistry, config: Config):
+        self.llm = llm
+        self.tools = tools
+        self.config = config
+        try:
+            self.max_iterations = max(1, int(getattr(config.agent, "max_iterations", 40)))
+        except Exception:
+            self.max_iterations = 40
+        self.history: list[dict] = []
+        # Lightweight context-window guard using message-count + approximate chars.
+        self.history_max_messages = int(getattr(config.agent, "history_max_messages", 80))
+        self.history_trim_to = int(getattr(config.agent, "history_trim_to_messages", 60))
+        self.history_max_chars = int(getattr(config.agent, "history_max_chars", 48000))
+        self.history_trim_to_chars = int(getattr(config.agent, "history_trim_to_chars", 36000))
+        self.llm_request_timeout_sec = float(getattr(config.agent, "llm_request_timeout_sec", 45))
+        self.llm_retry_attempts = max(1, int(getattr(config.agent, "llm_retry_attempts", 3)))
+        self.tool_result_max_chars = max(
+            200,
+            int(getattr(config.agent, "tool_result_max_chars", 6000)),
+        )
+        self.tool_result_worker_max_chars = max(
+            200,
+            int(getattr(config.agent, "tool_result_worker_max_chars", 2500)),
+        )
+        self._system_prompt: str | None = None
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
+        self.on_thinking: Callable[[], None] | None = None  # Called when LLM call starts
+        self.on_tool_call: Callable[[str, dict], None] | None = None  # Called on tool use
+        self.hooks = HookBus()
+        self.policy_profile = "default"
+        self.log_label: str = ""
+        self._turn_counter = 0
+        self.last_turn_id: str = ""
+        self.tools.set_execute_event_handler(self._on_tool_execute_event)
+
+    @property
+    def system_prompt(self) -> str:
+        if self._system_prompt is None:
+            self._system_prompt = build_system_prompt(
+                tool_count=len(self.tools.get_schemas())
+            )
+        return self._system_prompt
+
+    def run(self, user_message: str, policy_profile: str | None = None) -> str:
+        """Run a single user message through the agent loop."""
+        turn_id = self._next_turn_id()
+        self.last_turn_id = turn_id
+        active_profile = self._resolve_policy_profile(policy_profile)
+        log_prefix = _make_log_prefix(self.log_label, turn_id)
+        self._trim_history_if_needed()
+        self._repair_history_tool_sequence()
+        self.history.append({"role": "user", "content": user_message})
+        _maybe_capture_preference_memory(user_message)
+        turn_system_prompt = _build_turn_system_prompt(self.system_prompt, user_message)
+
+        for iteration in range(self.max_iterations):
+            if self.on_thinking:
+                self.on_thinking()
+            response = orchestrate_response(
+                mode=self._orchestrator_mode(),
+                turn_id=turn_id,
+                run_legacy=lambda: _chat_with_retry(
+                    self.llm,
+                    turn_system_prompt,
+                    self.history,
+                    self.tools.get_schemas(),
+                    max_attempts=self.llm_retry_attempts,
+                    request_timeout_sec=self.llm_request_timeout_sec,
+                ),
+                emit_hook=self._emit_hook,
+            )
+            self.total_input_tokens += response.input_tokens
+            self.total_output_tokens += response.output_tokens
+
+            if not response.tool_calls:
+                # Final text response
+                text = response.text or ""
+                self.history.append(self._make_assistant_msg(response))
+                return text
+
+            # Build assistant message with tool_use blocks
+            self.history.append(self._make_assistant_msg(response))
+
+            # Execute each tool and collect results
+            tool_results = []
+            try:
+                for call in response.tool_calls:
+                    policy_decision = evaluate_tool_policy(
+                        config=self.config,
+                        tool_name=call.name,
+                        mode="implement",
+                        profile_name=active_profile,
+                    )
+                    self._emit_hook(
+                        "policy.decision",
+                        {
+                            "turn_id": turn_id,
+                            "name": call.name,
+                            "decision": policy_decision.decision,
+                            "reason": policy_decision.reason,
+                            "profile": policy_decision.profile,
+                            "mode": policy_decision.mode,
+                        },
+                    )
+                    if policy_decision.decision == "deny":
+                        denied_result = f"Error: Policy denied tool '{call.name}' ({policy_decision.reason})"
+                        self._emit_hook(
+                            "post_tool",
+                            {
+                                "turn_id": turn_id,
+                                "name": call.name,
+                                "result_is_error": True,
+                                "result_length": len(denied_result),
+                                "policy_decision": policy_decision.decision,
+                            },
+                        )
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": call.id,
+                            "tool_name": call.name,
+                            "content": denied_result,
+                        })
+                        continue
+                    self._emit_hook(
+                        "pre_tool",
+                        {
+                            "turn_id": turn_id,
+                            "name": call.name,
+                            "arguments": call.arguments,
+                        },
+                    )
+                    _print_tool_call(call.name, call.arguments, prefix=log_prefix)
+                    if self.on_tool_call:
+                        self.on_tool_call(call.name, call.arguments)
+                    result = self.tools.execute(call.name, call.arguments)
+                    _print_tool_result(result, prefix=log_prefix)
+                    result_text = str(result)
+                    history_result = self._truncate_tool_result_for_history(call.name, result_text)
+                    self._emit_hook(
+                        "post_tool",
+                        {
+                            "turn_id": turn_id,
+                            "name": call.name,
+                            "result_is_error": result_text.startswith("Error:"),
+                            "result_length": len(result_text),
+                            "policy_decision": policy_decision.decision,
+                        },
+                    )
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": call.id,
+                        "tool_name": call.name,
+                        "content": history_result,
+                    })
+            except Exception:
+                if self.history and _is_assistant_tool_use_message(self.history[-1]):
+                    self.history.pop()
+                raise
+
+            # Append tool results as user message (Anthropic format)
+            self.history.append({
+                "role": "user",
+                "content": tool_results,
+            })
+
+        return "[Iteration limit reached]"
+
+    def run_stream(self, user_message: str, policy_profile: str | None = None) -> Generator[str, None, None]:
+        """Run a user message, streaming the final text response.
+
+        Yields text deltas as they arrive. Tool-call iterations use non-streaming
+        internally; only the final text response is streamed to the caller.
+        """
+        turn_id = self._next_turn_id()
+        self.last_turn_id = turn_id
+        active_profile = self._resolve_policy_profile(policy_profile)
+        log_prefix = _make_log_prefix(self.log_label, turn_id)
+        self._trim_history_if_needed()
+        self._repair_history_tool_sequence()
+        self.history.append({"role": "user", "content": user_message})
+        _maybe_capture_preference_memory(user_message)
+        turn_system_prompt = _build_turn_system_prompt(self.system_prompt, user_message)
+
+        for iteration in range(self.max_iterations):
+            if self.on_thinking:
+                self.on_thinking()
+
+            # Try streaming (with the same lightweight transient retry policy used by run()).
+            collected_text, response = orchestrate_stream_response(
+                mode=self._orchestrator_mode(),
+                turn_id=turn_id,
+                run_legacy_stream=lambda: _chat_stream_collect_with_retry(
+                    self.llm,
+                    turn_system_prompt,
+                    self.history,
+                    self.tools.get_schemas(),
+                    max_attempts=self.llm_retry_attempts,
+                    request_timeout_sec=self.llm_request_timeout_sec,
+                ),
+                emit_hook=self._emit_hook,
+            )
+
+            if response is None:
+                yield "[Stream ended without response]"
+                return
+
+            self.total_input_tokens += response.input_tokens
+            self.total_output_tokens += response.output_tokens
+
+            if not response.tool_calls:
+                # Final text response — yield collected text deltas
+                self.history.append(self._make_assistant_msg(response))
+                if collected_text:
+                    yield from collected_text
+                elif response.text is not None:
+                    yield response.text
+                else:
+                    yield "(empty response)"
+                return
+
+            # Tool calls — don't yield text, process tools
+            self.history.append(self._make_assistant_msg(response))
+
+            tool_results = []
+            try:
+                for call in response.tool_calls:
+                    policy_decision = evaluate_tool_policy(
+                        config=self.config,
+                        tool_name=call.name,
+                        mode="implement",
+                        profile_name=active_profile,
+                    )
+                    self._emit_hook(
+                        "policy.decision",
+                        {
+                            "turn_id": turn_id,
+                            "name": call.name,
+                            "decision": policy_decision.decision,
+                            "reason": policy_decision.reason,
+                            "profile": policy_decision.profile,
+                            "mode": policy_decision.mode,
+                        },
+                    )
+                    if policy_decision.decision == "deny":
+                        denied_result = f"Error: Policy denied tool '{call.name}' ({policy_decision.reason})"
+                        self._emit_hook(
+                            "post_tool",
+                            {
+                                "turn_id": turn_id,
+                                "name": call.name,
+                                "result_is_error": True,
+                                "result_length": len(denied_result),
+                                "policy_decision": policy_decision.decision,
+                            },
+                        )
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": call.id,
+                            "tool_name": call.name,
+                            "content": denied_result,
+                        })
+                        continue
+                    self._emit_hook(
+                        "pre_tool",
+                        {
+                            "turn_id": turn_id,
+                            "name": call.name,
+                            "arguments": call.arguments,
+                        },
+                    )
+                    _print_tool_call(call.name, call.arguments, prefix=log_prefix)
+                    if self.on_tool_call:
+                        self.on_tool_call(call.name, call.arguments)
+                    result = self.tools.execute(call.name, call.arguments)
+                    _print_tool_result(result, prefix=log_prefix)
+                    result_text = str(result)
+                    history_result = self._truncate_tool_result_for_history(call.name, result_text)
+                    self._emit_hook(
+                        "post_tool",
+                        {
+                            "turn_id": turn_id,
+                            "name": call.name,
+                            "result_is_error": result_text.startswith("Error:"),
+                            "result_length": len(result_text),
+                            "policy_decision": policy_decision.decision,
+                        },
+                    )
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": call.id,
+                        "tool_name": call.name,
+                        "content": history_result,
+                    })
+            except Exception:
+                if self.history and _is_assistant_tool_use_message(self.history[-1]):
+                    self.history.pop()
+                raise
+
+            self.history.append({
+                "role": "user",
+                "content": tool_results,
+            })
+
+        yield "[Iteration limit reached]"
+
+    @staticmethod
+    def _make_assistant_msg(response) -> dict:
+        """Build assistant history entry, preserving provider metadata."""
+        msg = {"role": "assistant", "content": response.raw_content}
+        if response.provider_message is not None:
+            msg["_provider_message"] = response.provider_message
+        return msg
+
+    def reset(self):
+        """Clear conversation history."""
+        self.history.clear()
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
+
+    def set_policy_profile(self, profile_name: str) -> None:
+        value = (profile_name or "").strip()
+        if value:
+            self.policy_profile = value
+
+    def _emit_hook(self, kind: str, payload: dict | None = None) -> None:
+        try:
+            self.hooks.emit_kind(
+                kind,
+                task_id=self.last_turn_id,
+                payload=payload or {},
+            )
+        except Exception:
+            # Hook infrastructure must never affect chat behavior.
+            return
+
+    def _on_tool_execute_event(self, kind: str, payload: dict) -> None:
+        hook_payload = dict(payload or {})
+        hook_payload.setdefault("turn_id", self.last_turn_id)
+        self._emit_hook(f"tool_registry.{kind}", hook_payload)
+
+    def _orchestrator_mode(self) -> str:
+        orchestrator_cfg = getattr(self.config, "orchestrator", None)
+        if not orchestrator_cfg:
+            return "legacy"
+        if bool(getattr(orchestrator_cfg, "enabled", False)):
+            mode = str(getattr(orchestrator_cfg, "mode", "legacy") or "legacy").strip().lower()
+            if mode == "hybrid":
+                return "hybrid"
+        return "legacy"
+
+    def _resolve_policy_profile(self, turn_override: str | None) -> str:
+        override = (turn_override or "").strip()
+        if override:
+            return override
+        session_profile = (self.policy_profile or "").strip()
+        if session_profile:
+            return session_profile
+        orchestrator_cfg = getattr(self.config, "orchestrator", None)
+        if orchestrator_cfg is not None:
+            cfg_profile = str(
+                getattr(orchestrator_cfg, "default_profile", "default") or "default"
+            ).strip()
+            if cfg_profile:
+                return cfg_profile
+        return "default"
+
+    def _next_turn_id(self) -> str:
+        self._turn_counter += 1
+        return f"t{self._turn_counter:03d}"
+
+    def _truncate_tool_result_for_history(self, tool_name: str, result_text: str) -> str:
+        limit = self.tool_result_max_chars
+        name = (tool_name or "").strip().lower()
+        if name in _WORKER_TOOL_NAMES:
+            limit = min(limit, self.tool_result_worker_max_chars)
+        if limit <= 0 or len(result_text) <= limit:
+            return result_text
+        omitted = len(result_text) - limit
+        suffix = f"\n... [archon truncated tool result: {omitted} chars omitted]"
+        keep = limit - len(suffix)
+        if keep < 32:
+            return result_text[:limit]
+        return result_text[:keep] + suffix
+
+    def _repair_history_tool_sequence(self) -> None:
+        """Drop malformed tool-turn fragments before provider calls.
+
+        Google strict function-calling rejects history when assistant tool calls are not
+        immediately followed by a user tool_result turn.
+        """
+        if not self.history:
+            return
+        repaired: list[dict] = []
+        i = 0
+        changed = False
+        while i < len(self.history):
+            msg = self.history[i]
+            if _is_assistant_tool_use_message(msg):
+                prev_is_user_turn = bool(repaired) and repaired[-1].get("role") == "user"
+                has_next_tool_result = (
+                    i + 1 < len(self.history)
+                    and _is_user_tool_result_message(self.history[i + 1])
+                )
+                if prev_is_user_turn and has_next_tool_result:
+                    repaired.append(msg)
+                    repaired.append(self.history[i + 1])
+                    i += 2
+                    continue
+                changed = True
+                if has_next_tool_result:
+                    i += 2
+                    continue
+                i += 1
+                continue
+            if _is_user_tool_result_message(msg):
+                changed = True
+                i += 1
+                continue
+            repaired.append(msg)
+            i += 1
+        if changed:
+            self.history = repaired
+
+    def _trim_history_if_needed(self) -> None:
+        """Trim old history with a lightweight dual budget to avoid unbounded growth.
+
+        This runs at turn start only, so it trims complete prior conversation state
+        and avoids interfering with in-flight tool-call loops.
+        """
+        try:
+            max_msgs = int(self.history_max_messages)
+            trim_to = int(self.history_trim_to)
+            max_chars = int(self.history_max_chars)
+            trim_to_chars = int(self.history_trim_to_chars)
+        except Exception:
+            return
+        if max_msgs <= 0 or trim_to <= 0:
+            return
+        if trim_to >= max_msgs:
+            trim_to = max(1, max_msgs - 1)
+        if max_chars > 0 and trim_to_chars >= max_chars:
+            trim_to_chars = max(1, max_chars - 1)
+
+        history_chars = _estimate_history_chars(self.history)
+        if len(self.history) <= max_msgs and (max_chars <= 0 or history_chars <= max_chars):
+            return
+
+        # First apply the message-count trim if needed.
+        if len(self.history) > max_msgs:
+            self.history = self.history[-trim_to:]
+            history_chars = _estimate_history_chars(self.history)
+
+        # Then enforce a lightweight char budget so giant messages/tool outputs trim earlier.
+        if max_chars > 0 and trim_to_chars > 0 and history_chars > max_chars:
+            while len(self.history) > 1 and history_chars > trim_to_chars:
+                dropped = self.history.pop(0)
+                history_chars -= _estimate_message_chars(dropped)
+
+
+def _print_tool_call(name: str, args: dict, prefix: str = ""):
+    """Print tool call info to stderr."""
+    pfx = f"{prefix} " if prefix else ""
+    if name == "shell":
+        print(f"{ANSI_TOOL_CALL}{pfx}> {args.get('command', '')}{ANSI_RESET}", file=sys.stderr)
+    elif name == "read_file":
+        print(
+            f"{ANSI_TOOL_CALL}{pfx}> read_file: {args.get('path', '')} "
+            f"(offset={args.get('offset', 0)} limit={args.get('limit', 2000)}){ANSI_RESET}",
+            file=sys.stderr,
+        )
+    elif name == "list_dir":
+        print(f"{ANSI_TOOL_CALL}{pfx}> {name}: {args.get('path', '')}{ANSI_RESET}", file=sys.stderr)
+    elif name == "write_file":
+        print(
+            f"{ANSI_TOOL_CALL}{pfx}> write_file: {args.get('path', '')} "
+            f"({len(args.get('content', ''))} chars){ANSI_RESET}",
+            file=sys.stderr,
+        )
+    elif name == "edit_file":
+        print(f"{ANSI_TOOL_CALL}{pfx}> edit_file: {args.get('path', '')}{ANSI_RESET}", file=sys.stderr)
+    elif name == "delegate_code_task":
+        worker = str(args.get("worker", "auto") or "auto")
+        mode = str(args.get("mode", "implement") or "implement")
+        execution_mode = str(args.get("execution_mode", "auto") or "auto")
+        print(
+            f"{ANSI_TOOL_CALL}{pfx}> delegate_code_task: worker={worker} mode={mode} execution={execution_mode}{ANSI_RESET}",
+            file=sys.stderr,
+        )
+    elif name == "worker_start":
+        worker = str(args.get("worker", "auto") or "auto")
+        mode = str(args.get("mode", "review") or "review")
+        print(
+            f"{ANSI_TOOL_CALL}{pfx}> worker_start: worker={worker} mode={mode}{ANSI_RESET}",
+            file=sys.stderr,
+        )
+    elif name == "worker_send":
+        session_id = str(args.get("session_id", "") or "")
+        background = bool(args.get("background", False))
+        print(
+            f"{ANSI_TOOL_CALL}{pfx}> worker_send: session={session_id} background={background}{ANSI_RESET}",
+            file=sys.stderr,
+        )
+    elif name.startswith("memory_"):
+        print(f"{ANSI_TOOL_CALL}{pfx}> {name}: {args.get('path', '')}{ANSI_RESET}", file=sys.stderr)
+    else:
+        print(f"{ANSI_TOOL_CALL}{pfx}> {name}{ANSI_RESET}", file=sys.stderr)
+
+
+def _print_tool_result(result: str, prefix: str = ""):
+    """Print truncated tool result to stderr."""
+    lines = result.splitlines()
+    pfx = f"{prefix} " if prefix else ""
+    if len(lines) <= 5:
+        for line in lines:
+            print(f"{ANSI_TOOL_RESULT}{pfx}  {line}{ANSI_RESET}", file=sys.stderr)
+    else:
+        for line in lines[:3]:
+            print(f"{ANSI_TOOL_RESULT}{pfx}  {line}{ANSI_RESET}", file=sys.stderr)
+        print(
+            f"{ANSI_TOOL_RESULT_META}{pfx}  ... ({len(lines) - 3} more lines){ANSI_RESET}",
+            file=sys.stderr,
+        )
+
+
+def _is_assistant_tool_use_message(message: object) -> bool:
+    if not isinstance(message, dict):
+        return False
+    if message.get("role") != "assistant":
+        return False
+    content = message.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(block, dict) and block.get("type") == "tool_use"
+        for block in content
+    )
+
+
+def _is_user_tool_result_message(message: object) -> bool:
+    if not isinstance(message, dict):
+        return False
+    if message.get("role") != "user":
+        return False
+    content = message.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(block, dict) and block.get("type") == "tool_result"
+        for block in content
+    )
+
+
+def _make_log_prefix(log_label: str, turn_id: str) -> str:
+    label = (log_label or "").strip()
+    if label:
+        return f"[{label} turn={turn_id}]"
+    return f"[turn={turn_id}]"
+
+
+def _estimate_history_chars(history: list[dict]) -> int:
+    return sum(_estimate_message_chars(msg) for msg in history)
+
+
+def _estimate_message_chars(message: object) -> int:
+    """Approximate serialized payload size of a history message using JSON-like recursion.
+
+    This is intentionally lightweight (no tokenizer dependency) and only used as a
+    coarse trimming heuristic.
+    """
+    if message is None:
+        return 0
+    if isinstance(message, str):
+        return len(message)
+    if isinstance(message, (int, float, bool)):
+        return 8
+    if isinstance(message, list):
+        return sum(_estimate_message_chars(item) for item in message)
+    if isinstance(message, dict):
+        total = 0
+        for key, value in message.items():
+            # `_provider_message` often duplicates content in another shape; counting it
+            # lightly avoids over-penalizing Google-provider preserved payloads.
+            if key == "_provider_message":
+                total += 16
+                continue
+            total += len(str(key))
+            total += _estimate_message_chars(value)
+        return total
+    return len(str(message))
+
+
+def _chat_with_retry(
+    llm,
+    system_prompt: str,
+    history: list[dict],
+    tools: list[dict],
+    max_attempts: int = 3,
+    request_timeout_sec: float | None = None,
+) -> LLMResponse:
+    """Best-effort retry for transient provider errors (kept intentionally simple)."""
+    delays = (0.35, 1.0)
+
+    def _attempt_chat(active_llm) -> LLMResponse:
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return _call_with_timeout(
+                    lambda: active_llm.chat(system_prompt, history, tools=tools),
+                    request_timeout_sec,
+                )
+            except Exception as e:
+                if attempt >= max_attempts or not _is_transient_llm_error(e):
+                    raise
+                time.sleep(delays[min(attempt - 1, len(delays) - 1)])
+
+    return _attempt_chat(llm)
+
+
+def _chat_stream_collect_with_retry(
+    llm,
+    system_prompt: str,
+    history: list[dict],
+    tools: list[dict],
+    max_attempts: int = 3,
+    request_timeout_sec: float | None = None,
+) -> tuple[list[str], LLMResponse | None]:
+    """Collect a streaming response with best-effort transient retry.
+
+    This retries only around internal stream collection before any chunks are yielded
+    to the caller, so retries do not duplicate user-visible output.
+    """
+    delays = (0.35, 1.0)
+    def _attempt_stream(active_llm) -> tuple[list[str], LLMResponse | None]:
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return _call_with_timeout(
+                    lambda: _collect_stream_response(active_llm, system_prompt, history, tools),
+                    request_timeout_sec,
+                )
+            except Exception as e:
+                if attempt >= max_attempts or not _is_transient_llm_error(e):
+                    raise
+                time.sleep(delays[min(attempt - 1, len(delays) - 1)])
+
+    return _attempt_stream(llm)
+
+
+def _collect_stream_response(
+    llm,
+    system_prompt: str,
+    history: list[dict],
+    tools: list[dict],
+) -> tuple[list[str], LLMResponse | None]:
+    collected_text: list[str] = []
+    response: LLMResponse | None = None
+    for chunk in llm.chat_stream(system_prompt, history, tools=tools):
+        if isinstance(chunk, str):
+            collected_text.append(chunk)
+        elif isinstance(chunk, LLMResponse):
+            response = chunk
+    return collected_text, response
+
+
+T = TypeVar("T")
+
+
+def _call_with_timeout(fn: Callable[[], T], timeout_sec: float | None) -> T:
+    if timeout_sec is None or float(timeout_sec) <= 0:
+        return fn()
+
+    mailbox: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
+
+    def _runner() -> None:
+        try:
+            mailbox.put((True, fn()))
+        except Exception as e:
+            mailbox.put((False, e))
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    try:
+        ok, payload = mailbox.get(timeout=float(timeout_sec))
+    except queue.Empty as e:
+        raise TimeoutError(f"LLM request TIMEOUT after {timeout_sec}s") from e
+    if ok:
+        return cast(T, payload)
+    raise cast(Exception, payload)
+
+
+def _is_transient_llm_error(exc: Exception) -> bool:
+    text = str(exc).upper()
+    transient_markers = (
+        "503",
+        "500",
+        "502",
+        "504",
+        "429",
+        "UNAVAILABLE",
+        "RATE LIMIT",
+        "TIMEOUT",
+        "TEMPORAR",
+        "TRY AGAIN",
+    )
+    return any(marker in text for marker in transient_markers)
+
+
+def _maybe_capture_preference_memory(user_message: str) -> None:
+    """Best-effort capture of explicit user preference statements into the memory inbox."""
+    try:
+        memory_store.capture_preference_to_inbox(user_message, source="user_message")
+    except Exception:
+        # Never let memory capture interfere with the main chat loop.
+        return
+
+
+def _build_turn_system_prompt(base_prompt: str, user_message: str) -> str:
+    """Augment the system prompt with best-effort indexed memory snippets for this turn."""
+    try:
+        prefetched = memory_store.prefetch_for_query(user_message, limit=2)
+    except Exception:
+        prefetched = []
+    if not prefetched:
+        return base_prompt
+
+    lines = [base_prompt, "", "[Retrieved Memory]"]
+    for item in prefetched:
+        last_modified = str(item.get("last_modified", "")).strip()
+        if last_modified:
+            last_modified = last_modified.replace("+00:00", "Z")
+        lines.append(
+            f"- path={item.get('path','')} kind={item.get('kind','')} "
+            f"scope={item.get('scope','')} stability={item.get('stability','')} "
+            f"confidence={item.get('confidence','')} "
+            f"last_modified={last_modified or 'unknown'} "
+            f"score={item.get('score', 0)}"
+        )
+        excerpt = str(item.get("excerpt", "")).strip()
+        if excerpt:
+            lines.append(excerpt)
+    return "\n".join(lines)

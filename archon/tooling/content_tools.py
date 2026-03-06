@@ -1,0 +1,168 @@
+"""News and web retrieval tool registrations."""
+
+from archon.config import ensure_dirs, load_config
+from archon.news.runner import get_or_build_news_digest, send_digest_to_telegram
+from archon.web.read import read_web_url
+from archon.web.search import search_web
+
+from .common import truncate_text
+
+
+def register_content_tools(registry) -> None:
+    # 12. news_brief
+    def news_brief(force_refresh: bool = False, send_to_telegram: bool = False) -> str:
+        ensure_dirs()
+        cfg = load_config()
+        result = get_or_build_news_digest(cfg, force_refresh=bool(force_refresh))
+        if result.digest is None:
+            lines = [
+                f"news status: {result.status}",
+                f"reason: {result.reason or '(none)'}",
+            ]
+            return "\n".join(lines)
+
+        lines = [
+            f"news status: {result.status}",
+            f"reason: {result.reason or '(none)'}",
+            f"date: {result.digest.date_iso}",
+            f"items: {result.digest.item_count}",
+            f"fallback: {result.digest.used_fallback}",
+        ]
+
+        if send_to_telegram:
+            if not cfg.news.telegram.send_enabled:
+                lines.append("telegram_delivery: skipped (news.telegram.send_enabled=false)")
+            else:
+                try:
+                    send_digest_to_telegram(cfg, result.digest.markdown)
+                    lines.append("telegram_delivery: sent")
+                except Exception as e:
+                    lines.append(f"telegram_delivery: error ({type(e).__name__}: {e})")
+
+        lines.extend(["", result.digest.markdown])
+        return "\n".join(lines)
+
+    registry.register(
+        "news_brief",
+        "Build or retrieve today's AI news digest (uses cached digest by default). "
+        "Use this when the user asks for today's AI news, briefing, or digest.",
+        {
+            "properties": {
+                "force_refresh": {
+                    "type": "boolean",
+                    "description": "Rebuild today's digest instead of using cached result",
+                    "default": False,
+                },
+                "send_to_telegram": {
+                    "type": "boolean",
+                    "description": "Also send digest to configured news.telegram.chat_ids",
+                    "default": False,
+                },
+            },
+            "required": [],
+        },
+        news_brief,
+    )
+
+    # 13. web_search
+    def web_search_tool(
+        query: str,
+        limit: int = 5,
+        domains: list[str] | None = None,
+        recency_days: int | None = None,
+    ) -> str:
+        ensure_dirs()
+        cfg = load_config()
+        if not cfg.web.enabled:
+            return "Web tools are disabled (set [web].enabled = true)."
+
+        results, meta = search_web(
+            query=query,
+            config=cfg,
+            limit=limit,
+            domains=domains,
+            recency_days=recency_days,
+        )
+        provider = meta.get("provider", "unknown")
+        notes = meta.get("notes") or []
+        lines = [
+            f"web_search provider: {provider}",
+            f"query: {query}",
+            f"results: {len(results)}",
+        ]
+        if notes:
+            lines.append("notes: " + ", ".join(str(n) for n in notes))
+        if not results:
+            lines.append("No results found.")
+            return "\n".join(lines)
+
+        for i, result in enumerate(results, start=1):
+            lines.append("")
+            lines.append(f"{i}. {result.title}")
+            lines.append(f"URL: {result.url}")
+            if result.source:
+                lines.append(f"Source: {result.source}")
+            if result.snippet:
+                lines.append(f"Snippet: {truncate_text(result.snippet, 500)}")
+        return "\n".join(lines)
+
+    registry.register(
+        "web_search",
+        "Search the public web for current information. Use this for latest/current/today questions before answering.",
+        {
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results to return (1-10, default 5)",
+                    "default": 5,
+                },
+                "domains": {
+                    "type": "array",
+                    "description": "Optional domain allowlist (e.g. ['anthropic.com','openai.com'])",
+                    "items": {"type": "string"},
+                },
+                "recency_days": {
+                    "type": "integer",
+                    "description": "Optional recency preference in days (provider-dependent)",
+                },
+            },
+            "required": ["query"],
+        },
+        web_search_tool,
+    )
+
+    # 14. web_read
+    def web_read_tool(url: str, max_chars: int = 6000) -> str:
+        ensure_dirs()
+        cfg = load_config()
+        if not cfg.web.enabled:
+            return "Web tools are disabled (set [web].enabled = true)."
+
+        page = read_web_url(url, config=cfg, max_chars=max_chars)
+        lines = [
+            f"URL: {page.url}",
+            f"Final URL: {page.final_url}",
+            f"Content-Type: {page.content_type}",
+        ]
+        if page.title:
+            lines.append(f"Title: {page.title}")
+        lines.extend(["", page.text])
+        return "\n".join(lines)
+
+    registry.register(
+        "web_read",
+        "Fetch and read a public web page URL (HTTP/HTTPS only). Use after web_search to inspect sources before answering.",
+        {
+            "properties": {
+                "url": {"type": "string", "description": "HTTP or HTTPS URL to fetch"},
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Maximum characters of extracted text to return",
+                    "default": 6000,
+                },
+            },
+            "required": ["url"],
+        },
+        web_read_tool,
+    )

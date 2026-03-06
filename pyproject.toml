@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "archon"
+version = "0.1.0"
+description = "Lightweight self-aware AI agent for Arch Linux"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.42.0",
+    "openai>=1.50.0",
+    "google-genai>=1.0.0",
+    "click>=8.0",
+]
+
+[project.scripts]
+archon = "archon.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["archon*"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]

@@ -1,0 +1,16 @@
+[Unit]
+Description=Archon Voice Service (FastAPI/Uvicorn)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Documents/archon
+EnvironmentFile=%h/.config/archon/voice-service.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/Documents/archon/services/archon_voice/.venv/bin/uvicorn --app-dir %h/Documents/archon services.archon_voice.app:app --host 127.0.0.1 --port 8788
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=Cloudflare Tunnel (Archon Voice)
+After=network-online.target archon-voice.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Option A: named tunnel (replace archon-voice with your tunnel name)
+ExecStart=/usr/bin/cloudflared tunnel run archon-voice
+# Option B: explicit config file
+# ExecStart=/usr/bin/cloudflared tunnel --config %h/.cloudflared/config.yml run archon-voice
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

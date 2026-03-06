@@ -1,0 +1,7 @@
+.claude/
+.pytest_cache/
+.worktrees/
+worktrees/
+*.pyc
+__pycache__/
+*.egg-info/
