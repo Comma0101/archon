@@ -18,6 +18,12 @@ from archon.control.skills import (
 from archon.mcp import MCPClient
 from archon.workers.session_store import list_worker_job_summaries, load_worker_job_summary
 
+_NATIVE_PLUGIN_SPECS = (
+    ("calls", "config.calls", lambda cfg: bool(getattr(getattr(cfg, "calls", None), "enabled", False))),
+    ("telegram", "config.telegram", lambda cfg: bool(getattr(getattr(cfg, "telegram", None), "enabled", False))),
+    ("web", "config.web", lambda cfg: bool(getattr(getattr(cfg, "web", None), "enabled", False))),
+)
+
 
 def handle_model_command(agent, text: str) -> tuple[bool, str]:
     """Handle `/model` command (show current provider/model)."""
@@ -168,6 +174,44 @@ def handle_skills_command(agent, text: str) -> tuple[bool, str]:
         return True, "Skill cleared"
 
     return True, "Usage: /skills [list|show <name>|use <name>|clear]"
+
+
+def handle_plugins_command(agent, text: str) -> tuple[bool, str]:
+    """Handle `/plugins` command (list/show)."""
+    raw = (text or "").strip()
+    parts = raw.split()
+    if not parts or parts[0].lower() != "/plugins":
+        return False, ""
+
+    cfg = getattr(agent, "config", None)
+    sub = parts[1].strip().lower() if len(parts) > 1 else "list"
+    plugins = _plugin_rows(cfg)
+    names = [row["name"] for row in plugins]
+    enabled = [row["name"] for row in plugins if row["enabled"]]
+
+    if sub in {"list", "status"}:
+        enabled_label = ", ".join(enabled) if enabled else "none"
+        available_label = ", ".join(names) if names else "none"
+        return True, f"Plugins: enabled={enabled_label} | available={available_label}"
+
+    if sub == "show":
+        if len(parts) < 3 or not parts[2].strip():
+            return True, "Usage: /plugins [list|show <name>]"
+        plugin_name = parts[2].strip()
+        row = next((item for item in plugins if item["name"] == plugin_name), None)
+        if row is None:
+            return True, f"Unknown plugin '{plugin_name}'. Available: {', '.join(names)}"
+        if row["type"] == "mcp":
+            return True, (
+                f"Plugin {row['name']}: type=mcp | enabled={_on_off(row['enabled'])} | "
+                f"mode={row['mode']} | transport={row['transport']}"
+            )
+        return True, (
+            f"Plugin {row['name']}: type=native | enabled={_on_off(row['enabled'])} | "
+            f"source={row['source']}"
+        )
+
+    return True, "Usage: /plugins [list|show <name>]"
 
 
 def handle_model_list_command(text: str, model_catalog: dict[str, tuple[str, ...]]) -> tuple[bool, str]:
@@ -570,6 +614,35 @@ def _format_mcp_counts(cfg) -> str:
     return f"{enabled}/{len(servers)}"
 
 
+def _plugin_rows(cfg) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for name, source, enabled_fn in _NATIVE_PLUGIN_SPECS:
+        rows.append(
+            {
+                "name": name,
+                "type": "native",
+                "enabled": bool(enabled_fn(cfg)),
+                "source": source,
+            }
+        )
+    servers = getattr(getattr(cfg, "mcp", None), "servers", {}) or {}
+    for server_name, server in servers.items():
+        rows.append(
+            {
+                "name": f"mcp:{server_name}",
+                "type": "mcp",
+                "enabled": bool(getattr(server, "enabled", False)),
+                "mode": str(getattr(server, "mode", "") or "unknown").strip() or "unknown",
+                "transport": str(getattr(server, "transport", "") or "unknown").strip() or "unknown",
+            }
+        )
+    return rows
+
+
+def _on_off(enabled: object) -> str:
+    return "on" if bool(enabled) else "off"
+
+
 def _active_skill_name(agent) -> str:
     cfg = getattr(agent, "config", None)
     _display_name, _resolved_name, profile, _missing = _resolve_profile_diagnostics(agent, cfg)
@@ -670,7 +743,7 @@ def handle_repl_command(
     if raw.lower() in {"/help", "/?"}:
         return (
             "help",
-            "Commands: /help, /reset, /status, /cost, /doctor, /permissions, /skills [list|show <name>|use <name>|clear], /model, /model-list, /model-set <provider>-<model>, /calls [status|on|off], /profile [show|set <name>], /mcp [servers|tools <server>], /jobs [limit], /job <id>, /paste\n"
+            "Commands: /help, /reset, /status, /cost, /doctor, /permissions, /skills [list|show <name>|use <name>|clear], /plugins [list|show <name>], /model, /model-list, /model-set <provider>-<model>, /calls [status|on|off], /profile [show|set <name>], /mcp [servers|tools <server>], /jobs [limit], /job <id>, /paste\n"
             "Multiline paste: paste normally (bracketed paste) or use /paste fallback, end with /end.",
         )
     handled, msg = handle_status_command(agent, raw)
@@ -688,6 +761,9 @@ def handle_repl_command(
     handled, msg = handle_skills_command(agent, raw)
     if handled:
         return "skills", msg
+    handled, msg = handle_plugins_command(agent, raw)
+    if handled:
+        return "plugins", msg
     handled, msg = handle_mcp_command(agent, raw)
     if handled:
         return "mcp", msg

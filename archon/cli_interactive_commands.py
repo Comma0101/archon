@@ -167,6 +167,7 @@ def chat_cmd(
                     "doctor",
                     "permissions",
                     "skills",
+                    "plugins",
                     "model",
                     "calls",
                     "profile",

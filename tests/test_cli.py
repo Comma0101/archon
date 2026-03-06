@@ -706,6 +706,24 @@ class TestCliCommands:
         assert msg == "Skill cleared"
         assert agent.policy_profile == "safe"
 
+    def test_handle_repl_command_plugins_lists_native_and_mcp_plugins(self):
+        agent = self._make_local_command_agent()
+
+        action, msg = _handle_repl_command(agent, "/plugins")
+
+        assert action == "plugins"
+        assert msg == (
+            "Plugins: enabled=calls, web, mcp:docs | available=calls, telegram, web, mcp:docs, mcp:build"
+        )
+
+    def test_handle_repl_command_plugins_show_reports_plugin_details(self):
+        agent = self._make_local_command_agent()
+
+        action, msg = _handle_repl_command(agent, "/plugins show mcp:docs")
+
+        assert action == "plugins"
+        assert msg == "Plugin mcp:docs: type=mcp | enabled=on | mode=read_only | transport=stdio"
+
     def test_chat_cmd_handles_status_locally_without_model_turn(self):
         outputs = []
 
@@ -1019,6 +1037,21 @@ class TestCliLocalInteractiveCommands:
         assert "Skill cleared" in outputs
         assert agent.run_calls == []
 
+    def test_local_plugins_commands_do_not_call_agent_run(self):
+        agent = _LocalCommandAgent()
+
+        outputs = [
+            re.sub(r"\x1b\[[0-9;]*m", "", text)
+            for text, _err in _run_local_command_session(
+                agent,
+                ["/plugins", "/plugins show mcp:docs", "quit"],
+            )
+        ]
+
+        assert "Plugins: enabled=calls, web, mcp:docs | available=calls, telegram, web, mcp:docs, mcp:build" in outputs
+        assert "Plugin mcp:docs: type=mcp | enabled=on | mode=read_only | transport=stdio" in outputs
+        assert agent.run_calls == []
+
 
 class TestSlashCompleter:
     def test_matches_prefix(self):
@@ -1039,6 +1072,10 @@ class TestSlashCompleter:
     def test_skills_prefix_matches_command(self):
         assert _slash_completer("/sk", 0) == "/skills"
         assert _slash_completer("/sk", 1) is None
+
+    def test_plugins_prefix_matches_command(self):
+        assert _slash_completer("/pl", 0) == "/plugins"
+        assert _slash_completer("/pl", 1) is None
 
     def test_empty_returns_all(self):
         results = []
@@ -1084,6 +1121,12 @@ class TestSlashCompleter:
         assert _slash_completer("", 3) == "clear"
         assert _slash_completer("", 4) is None
 
+    def test_plugins_subcommand_completion_from_line_buffer(self, monkeypatch):
+        monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/plugins ")
+        assert _slash_completer("", 0) == "list"
+        assert _slash_completer("", 1) == "show"
+        assert _slash_completer("", 2) is None
+
 
 class TestPickSlashCommand:
     def test_run_picker_returns_none_for_empty_items(self):
@@ -1111,12 +1154,15 @@ class TestPickSlashCommand:
         assert "/calls" in _SLASH_SUBVALUES
         assert "/profile" in _SLASH_SUBVALUES
         assert "/skills" in _SLASH_SUBVALUES
+        assert "/plugins" in _SLASH_SUBVALUES
         call_values = [value for value, _desc in _SLASH_SUBVALUES["/calls"]]
         assert call_values == ["status", "on", "off"]
         profile_values = [value for value, _desc in _SLASH_SUBVALUES["/profile"]]
         assert profile_values == ["show", "set default"]
         skill_values = [value for value, _desc in _SLASH_SUBVALUES["/skills"]]
         assert skill_values == ["list", "show coder", "use coder", "clear"]
+        plugin_values = [value for value, _desc in _SLASH_SUBVALUES["/plugins"]]
+        assert plugin_values == ["list", "show calls", "show mcp:docs"]
 
     def test_pick_slash_command_two_level(self, monkeypatch):
         picks = iter(["/calls", "on"])

@@ -17,6 +17,7 @@ SLASH_COMMANDS = [
     ("/doctor", "Run local shell health checks"),
     ("/permissions", "Show current policy permissions"),
     ("/skills", "Skill controls (list/show/use/clear)"),
+    ("/plugins", "Plugin controls (list/show)"),
     ("/model", "Show current provider/model"),
     ("/model-list", "List model presets by provider"),
     ("/model-set", "Set model via <provider>-<model>"),
@@ -79,6 +80,11 @@ def build_slash_subvalues(model_catalog: dict[str, tuple[str, ...]]) -> dict[str
             ("show coder", "Show one skill profile"),
             ("use coder", "Set session skill"),
             ("clear", "Clear active session skill"),
+        ],
+        "/plugins": [
+            ("list", "List native and MCP plugins"),
+            ("show calls", "Show one native plugin"),
+            ("show mcp:docs", "Show one MCP plugin"),
         ],
         "/mcp": [
             ("servers", "List configured MCP servers"),
