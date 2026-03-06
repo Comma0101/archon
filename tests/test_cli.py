@@ -321,6 +321,12 @@ class TestCliCommands:
         assert action == "approvals"
         assert msg == "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0"
 
+    def test_handle_repl_command_help_lists_approvals_status_alias(self):
+        action, msg = _handle_repl_command(SimpleNamespace(), "/help")
+
+        assert action == "help"
+        assert "/approvals [status|on|off]" in msg
+
     def test_handle_repl_command_approvals_toggle_reports_requested_mode_without_state(self):
         action, msg = _handle_repl_command(SimpleNamespace(), "/approvals on")
 
@@ -337,7 +343,7 @@ class TestCliCommands:
         action, msg = _handle_repl_command(SimpleNamespace(), command)
 
         assert action == "approvals"
-        assert msg == "Usage: /approvals [on|off]"
+        assert msg == "Usage: /approvals [status|on|off]"
 
     def test_handle_repl_command_deny_and_approve_report_without_pending_request(self):
         action, msg = _handle_repl_command(SimpleNamespace(), "/approve")
@@ -1471,7 +1477,7 @@ class TestPickSlashCommand:
         assert "/skills" in _SLASH_SUBVALUES
         assert "/plugins" in _SLASH_SUBVALUES
         approval_values = [value for value, _desc in _SLASH_SUBVALUES["/approvals"]]
-        assert approval_values == ["on", "off"]
+        assert approval_values == ["status", "on", "off"]
         call_values = [value for value, _desc in _SLASH_SUBVALUES["/calls"]]
         assert call_values == ["status", "on", "off"]
         profile_values = [value for value, _desc in _SLASH_SUBVALUES["/profile"]]

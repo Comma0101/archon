@@ -477,7 +477,7 @@ def handle_approvals_command(agent, text: str) -> tuple[bool, str]:
     elif len(parts) == 2 and parts[1].strip().lower() in {"status", "on", "off"}:
         sub = parts[1].strip().lower()
     else:
-        return True, "Usage: /approvals [on|off]"
+        return True, "Usage: /approvals [status|on|off]"
 
     if sub in {"on", "off"}:
         setter = getattr(agent, "set_terminal_approval_mode", None)
@@ -939,7 +939,7 @@ def handle_repl_command(
     if raw.lower() in {"/help", "/?"}:
         return (
             "help",
-            "Commands: /help, /reset, /status, /cost, /compact, /context, /doctor, /permissions, /approvals [on|off], /approve, /deny, /approve_next, /skills [list|show <name>|use <name>|clear], /plugins [list|show <name>], /model, /model-list, /model-set <provider>-<model>, /calls [status|on|off], /profile [show|set <name>], /mcp [servers|show <server>|tools <server>], /jobs [active|all] [limit], /job <id>, /paste\n"
+            "Commands: /help, /reset, /status, /cost, /compact, /context, /doctor, /permissions, /approvals [status|on|off], /approve, /deny, /approve_next, /skills [list|show <name>|use <name>|clear], /plugins [list|show <name>], /model, /model-list, /model-set <provider>-<model>, /calls [status|on|off], /profile [show|set <name>], /mcp [servers|show <server>|tools <server>], /jobs [active|all] [limit], /job <id>, /paste\n"
             "Multiline paste: paste normally (bracketed paste) or use /paste fallback, end with /end.",
         )
     handled, msg = handle_status_command(agent, raw)

@@ -109,6 +109,7 @@ def build_slash_subvalues(model_catalog: dict[str, tuple[str, ...]]) -> dict[str
     return {
         "/model-set": build_model_set_subvalues(model_catalog),
         "/approvals": [
+            ("status", "Show current terminal approval status"),
             ("on", "Enable sticky dangerous-action approvals"),
             ("off", "Disable sticky dangerous-action approvals"),
         ],
