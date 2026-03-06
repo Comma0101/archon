@@ -191,6 +191,9 @@ def register_delegate_tool(registry, ns, worker_send):
         if planned_mode == "invalid":
             return f"Error: {planned_reason}"
         explicit_new_session = _detect_delegate_force_new_session(task)
+        if explicit_new_session and planned_mode == "oneshot":
+            planned_mode = "background"
+            planned_reason = "explicit_new_session"
         if planned_mode != "oneshot" and not explicit_new_session:
             sticky_target_worker = _worker_supporting_resume_key(worker)
             if sticky_target_worker:

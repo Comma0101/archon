@@ -1,5 +1,25 @@
 # Archon Super Assistant Design
 
+## Implementation Status
+
+As of `2026-03-06`, the current worktree has implemented the first eight plan tasks:
+
+- lane-aware route metadata and a deterministic three-lane classifier
+- built-in skill-backed profiles
+- shared worker/call job summaries plus `/jobs` and `/job` UX
+- layered memory metadata with session/task compaction
+- route-aware terminal and Telegram progress UX
+- scoped read-only MCP config, policy, and client foundations
+
+Current verification on this worktree:
+
+- targeted regression suite: `175 passed`
+- full test suite: `354 passed`
+
+Notable follow-up fix completed during the final regression pass:
+
+- explicit `new session` delegate requests now force the background-session path instead of falling back to `oneshot`, which resolved the old worker regression around sticky-session bypass
+
 ## Decision
 
 Evolve Archon into a `two-surface`, `local-first`, `lightweight assistant kernel` where terminal and Telegram are equal first-class interfaces over one shared controller.
