@@ -180,6 +180,10 @@ class TestCliCommands:
         names = {name for name, _desc in _SLASH_COMMANDS}
         assert {"/status", "/cost", "/doctor", "/permissions"} <= names
 
+    def test_slash_commands_include_terminal_approval_commands(self):
+        names = {name for name, _desc in _SLASH_COMMANDS}
+        assert {"/approvals", "/approve", "/deny", "/approve_next"} <= names
+
     def test_slash_command_descriptions_group_shell_controls(self):
         descriptions = dict(_SLASH_COMMANDS)
         assert descriptions["/status"] == "Shell: current status"
@@ -187,6 +191,13 @@ class TestCliCommands:
         assert descriptions["/plugins"] == "Shell: plugins"
         assert descriptions["/model"] == "Model: current provider/model"
         assert descriptions["/mcp"] == "Integrations: MCP servers and tools"
+
+    def test_slash_command_descriptions_include_terminal_approval_controls(self):
+        descriptions = dict(_SLASH_COMMANDS)
+        assert descriptions["/approvals"] == "Shell: approval status"
+        assert descriptions["/approve"] == "Shell: approve pending request"
+        assert descriptions["/deny"] == "Shell: deny pending request"
+        assert descriptions["/approve_next"] == "Shell: approve next dangerous action"
 
     def test_handle_model_command_shows_current(self):
         agent = SimpleNamespace(
@@ -297,6 +308,40 @@ class TestCliCommands:
         assert "enabled" in msg.lower()
         assert seen["enabled"] is True
         assert agent.config.calls.enabled is True
+
+    def test_handle_repl_command_approvals_reports_default_state(self):
+        action, msg = _handle_repl_command(SimpleNamespace(), "/approvals")
+
+        assert action == "approvals"
+        assert msg == "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0"
+
+    def test_handle_repl_command_approvals_toggle_reports_requested_mode_without_state(self):
+        action, msg = _handle_repl_command(SimpleNamespace(), "/approvals on")
+
+        assert action == "approvals"
+        assert msg == "Approvals: requested=on | state=unavailable"
+
+        action, msg = _handle_repl_command(SimpleNamespace(), "/approvals off")
+
+        assert action == "approvals"
+        assert msg == "Approvals: requested=off | state=unavailable"
+
+    def test_handle_repl_command_deny_and_approve_report_without_pending_request(self):
+        action, msg = _handle_repl_command(SimpleNamespace(), "/approve")
+
+        assert action == "approve"
+        assert msg == "No pending dangerous request to approve."
+
+        action, msg = _handle_repl_command(SimpleNamespace(), "/deny")
+
+        assert action == "deny"
+        assert msg == "No pending dangerous request to deny."
+
+    def test_handle_repl_command_approve_next_reports_missing_session_state(self):
+        action, msg = _handle_repl_command(SimpleNamespace(), "/approve_next")
+
+        assert action == "approve_next"
+        assert msg == "Approve-next unavailable: session approval state not wired."
 
     def test_bare_slash_shows_command_list(self):
         agent = SimpleNamespace(
@@ -1402,10 +1447,13 @@ class TestPickSlashCommand:
 
     def test_slash_subvalues_map(self):
         assert "/model-set" in _SLASH_SUBVALUES
+        assert "/approvals" in _SLASH_SUBVALUES
         assert "/calls" in _SLASH_SUBVALUES
         assert "/profile" in _SLASH_SUBVALUES
         assert "/skills" in _SLASH_SUBVALUES
         assert "/plugins" in _SLASH_SUBVALUES
+        approval_values = [value for value, _desc in _SLASH_SUBVALUES["/approvals"]]
+        assert approval_values == ["on", "off"]
         call_values = [value for value, _desc in _SLASH_SUBVALUES["/calls"]]
         assert call_values == ["status", "on", "off"]
         profile_values = [value for value, _desc in _SLASH_SUBVALUES["/profile"]]

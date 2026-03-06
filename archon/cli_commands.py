@@ -21,6 +21,10 @@ SLASH_COMMAND_GROUPS = (
             ("/context", "context state"),
             ("/doctor", "health checks"),
             ("/permissions", "policy permissions"),
+            ("/approvals", "approval status"),
+            ("/approve", "approve pending request"),
+            ("/deny", "deny pending request"),
+            ("/approve_next", "approve next dangerous action"),
             ("/skills", "skills"),
             ("/plugins", "plugins"),
         ),
@@ -104,6 +108,10 @@ def build_slash_subvalues(model_catalog: dict[str, tuple[str, ...]]) -> dict[str
     """Build slash command subvalue map."""
     return {
         "/model-set": build_model_set_subvalues(model_catalog),
+        "/approvals": [
+            ("on", "Enable sticky dangerous-action approvals"),
+            ("off", "Disable sticky dangerous-action approvals"),
+        ],
         "/calls": [
             ("status", "Show current calls config"),
             ("on", "Enable calls feature"),

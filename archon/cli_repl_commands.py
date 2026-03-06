@@ -465,6 +465,83 @@ def handle_calls_command(
     return True, "Usage: /calls [status|on|off] (alias: /call)"
 
 
+def handle_approvals_command(agent, text: str) -> tuple[bool, str]:
+    """Handle `/approvals` command (status/on/off)."""
+    raw = (text or "").strip()
+    parts = raw.split()
+    if not parts or parts[0].lower() != "/approvals":
+        return False, ""
+
+    sub = parts[1].strip().lower() if len(parts) > 1 else "status"
+    if sub in {"on", "off"}:
+        setter = getattr(agent, "set_terminal_approval_mode", None)
+        if callable(setter):
+            result = setter(sub == "on")
+            if isinstance(result, str) and result.strip():
+                return True, result
+        return True, f"Approvals: requested={sub} | state=unavailable"
+
+    getter = getattr(agent, "get_terminal_approval_status", None)
+    if callable(getter):
+        status = getter() or {}
+        mode = "on" if bool(status.get("dangerous_mode", False)) else "off"
+        pending = str(status.get("pending") or status.get("pending_command_preview") or "none").strip() or "none"
+        approve_next_tokens = max(0, int(status.get("approve_next_tokens", 0) or 0))
+        return True, (
+            f"Approvals: dangerous_mode={mode} | "
+            f"pending={pending} | "
+            f"approve_next_tokens={approve_next_tokens}"
+        )
+
+    return True, "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0"
+
+
+def handle_approve_command(agent, text: str) -> tuple[bool, str]:
+    """Handle `/approve` command."""
+    raw = (text or "").strip().lower()
+    if raw != "/approve":
+        return False, ""
+
+    approver = getattr(agent, "approve_pending_request", None)
+    if callable(approver):
+        result = approver()
+        if isinstance(result, str) and result.strip():
+            return True, result
+
+    return True, "No pending dangerous request to approve."
+
+
+def handle_deny_command(agent, text: str) -> tuple[bool, str]:
+    """Handle `/deny` command."""
+    raw = (text or "").strip().lower()
+    if raw != "/deny":
+        return False, ""
+
+    denier = getattr(agent, "deny_pending_request", None)
+    if callable(denier):
+        result = denier()
+        if isinstance(result, str) and result.strip():
+            return True, result
+
+    return True, "No pending dangerous request to deny."
+
+
+def handle_approve_next_command(agent, text: str) -> tuple[bool, str]:
+    """Handle `/approve_next` command."""
+    raw = (text or "").strip().lower()
+    if raw != "/approve_next":
+        return False, ""
+
+    approver = getattr(agent, "approve_next_dangerous_action", None)
+    if callable(approver):
+        result = approver()
+        if isinstance(result, str) and result.strip():
+            return True, result
+        return True, "Approved next dangerous action."
+
+    return True, "Approve-next unavailable: session approval state not wired."
+
+
 def handle_profile_command(agent, text: str) -> tuple[bool, str]:
     """Handle `/profile` command (show/set policy profile)."""
     raw = (text or "").strip()
@@ -856,7 +933,7 @@ def handle_repl_command(
     if raw.lower() in {"/help", "/?"}:
         return (
             "help",
-            "Commands: /help, /reset, /status, /cost, /compact, /context, /doctor, /permissions, /skills [list|show <name>|use <name>|clear], /plugins [list|show <name>], /model, /model-list, /model-set <provider>-<model>, /calls [status|on|off], /profile [show|set <name>], /mcp [servers|show <server>|tools <server>], /jobs [active|all] [limit], /job <id>, /paste\n"
+            "Commands: /help, /reset, /status, /cost, /compact, /context, /doctor, /permissions, /approvals [on|off], /approve, /deny, /approve_next, /skills [list|show <name>|use <name>|clear], /plugins [list|show <name>], /model, /model-list, /model-set <provider>-<model>, /calls [status|on|off], /profile [show|set <name>], /mcp [servers|show <server>|tools <server>], /jobs [active|all] [limit], /job <id>, /paste\n"
             "Multiline paste: paste normally (bracketed paste) or use /paste fallback, end with /end.",
         )
     handled, msg = handle_status_command(agent, raw)
@@ -877,6 +954,18 @@ def handle_repl_command(
     handled, msg = handle_permissions_command(agent, raw)
     if handled:
         return "permissions", msg
+    handled, msg = handle_approvals_command(agent, raw)
+    if handled:
+        return "approvals", msg
+    handled, msg = handle_approve_command(agent, raw)
+    if handled:
+        return "approve", msg
+    handled, msg = handle_deny_command(agent, raw)
+    if handled:
+        return "deny", msg
+    handled, msg = handle_approve_next_command(agent, raw)
+    if handled:
+        return "approve_next", msg
     handled, msg = handle_skills_command(agent, raw)
     if handled:
         return "skills", msg
