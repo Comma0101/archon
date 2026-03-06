@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Callable, TypeVar
 
+from archon.control.contracts import RouteDecision
+
 
 T = TypeVar("T")
 
@@ -21,7 +23,7 @@ def orchestrate_response(
         _emit(
             emit_hook,
             "orchestrator.route",
-            {"turn_id": turn_id, "mode": "legacy", "path": "legacy_direct"},
+            _route_payload(turn_id=turn_id, mode="legacy", path="legacy_direct"),
         )
         return run_legacy()
 
@@ -59,7 +61,7 @@ def orchestrate_stream_response(
         _emit(
             emit_hook,
             "orchestrator.route",
-            {"turn_id": turn_id, "mode": "legacy", "path": "legacy_stream_direct"},
+            _route_payload(turn_id=turn_id, mode="legacy", path="legacy_stream_direct"),
         )
         return run_legacy_stream()
 
@@ -93,7 +95,7 @@ def _run_hybrid_response(
     _emit(
         emit_hook,
         "orchestrator.route",
-        {"turn_id": turn_id, "mode": "hybrid", "path": "hybrid_planner_v0"},
+        _route_payload(turn_id=turn_id, mode="hybrid", path="hybrid_planner_v0"),
     )
     # Phase 3 keeps behavior parity by using legacy execution after routing.
     return run_legacy()
@@ -108,7 +110,7 @@ def _run_hybrid_stream_response(
     _emit(
         emit_hook,
         "orchestrator.route",
-        {"turn_id": turn_id, "mode": "hybrid", "path": "hybrid_stream_planner_v0"},
+        _route_payload(turn_id=turn_id, mode="hybrid", path="hybrid_stream_planner_v0"),
     )
     # Phase 3 keeps behavior parity by using legacy streaming execution after routing.
     return run_legacy_stream()
@@ -119,6 +121,19 @@ def _normalize_mode(mode: str) -> str:
     if value == "hybrid":
         return "hybrid"
     return "legacy"
+
+
+def _route_payload(*, turn_id: str, mode: str, path: str) -> dict:
+    decision = RouteDecision(turn_id=turn_id, mode=mode, path=path)
+    return {
+        "turn_id": decision.turn_id,
+        "mode": decision.mode,
+        "path": decision.path,
+        "lane": decision.lane,
+        "reason": decision.reason,
+        "surface": decision.surface,
+        "skill": decision.skill,
+    }
 
 
 def _emit(emit_hook: Callable[[str, dict], None] | None, kind: str, payload: dict) -> None:

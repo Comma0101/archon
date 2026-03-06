@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass
@@ -36,6 +36,22 @@ class HookEvent:
     kind: str
     task_id: str = ""
     payload: dict[str, Any] = field(default_factory=dict)
+
+
+RouteLane = Literal["fast", "operator", "job"]
+
+
+@dataclass
+class RouteDecision:
+    """Normalized route metadata emitted for orchestrator decision hooks."""
+
+    turn_id: str
+    mode: str
+    path: str
+    lane: RouteLane = "operator"
+    reason: str = "static_default_until_classifier"
+    surface: str = "terminal"
+    skill: str = "default"
 
 
 @dataclass

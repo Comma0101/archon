@@ -1,10 +1,12 @@
 """Tests for the agent core loop."""
 
 import threading
+from dataclasses import dataclass
 from unittest.mock import MagicMock
 
 import pytest
 
+import archon.control.orchestrator as orchestrator_module
 from archon.agent import Agent, _chat_with_retry, _print_tool_call, _print_tool_result
 from archon.llm import LLMResponse, ToolCall
 from archon.tools import ToolRegistry
@@ -31,6 +33,18 @@ def make_agent(responses: list[LLMResponse], stream_chunks: list | None = None) 
     agent = Agent(llm, tools, config)
     agent._system_prompt = "test prompt"  # Skip building real prompt
     return agent
+
+
+def expected_route_payload(*, turn_id: str, mode: str, path: str) -> dict:
+    return {
+        "turn_id": turn_id,
+        "mode": mode,
+        "path": path,
+        "lane": "operator",
+        "reason": "static_default_until_classifier",
+        "surface": "terminal",
+        "skill": "default",
+    }
 
 
 def assert_tool_sequence_well_formed(messages: list[dict]) -> None:
@@ -606,6 +620,113 @@ class TestAgentLoop:
         assert len(fallback_events) == 1
         assert fallback_events[0].payload["fallback"] == "legacy"
         assert fallback_events[0].payload["error_type"] == "RuntimeError"
+
+    def test_orchestrator_hybrid_route_hook_includes_lane_metadata(self, monkeypatch):
+        responses = [
+            LLMResponse(
+                text="ok",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "ok"}],
+                input_tokens=1,
+                output_tokens=1,
+            )
+        ]
+        agent = make_agent(responses)
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        agent.config.orchestrator.enabled = True
+        agent.config.orchestrator.mode = "hybrid"
+        route_events = []
+        agent.hooks.register("orchestrator.route", route_events.append)
+
+        result = agent.run("hybrid route metadata")
+
+        assert result == "ok"
+        assert len(route_events) == 1
+        assert route_events[0].payload == expected_route_payload(
+            turn_id="t001",
+            mode="hybrid",
+            path="hybrid_planner_v0",
+        )
+
+    def test_orchestrator_hybrid_stream_route_hook_includes_lane_metadata(self, monkeypatch):
+        final_resp = LLMResponse(
+            text="ok",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "ok"}],
+            input_tokens=1,
+            output_tokens=1,
+        )
+        stream_chunks = [["ok", final_resp]]
+        agent = make_agent([], stream_chunks=stream_chunks)
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        agent.config.orchestrator.enabled = True
+        agent.config.orchestrator.mode = "hybrid"
+        route_events = []
+        agent.hooks.register("orchestrator.route", route_events.append)
+
+        chunks = list(agent.run_stream("hybrid stream route metadata"))
+
+        assert chunks == ["ok"]
+        assert len(route_events) == 1
+        assert route_events[0].payload == expected_route_payload(
+            turn_id="t001",
+            mode="hybrid",
+            path="hybrid_stream_planner_v0",
+        )
+
+    def test_orchestrator_legacy_route_hook_includes_default_metadata(self, monkeypatch):
+        responses = [
+            LLMResponse(
+                text="ok",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "ok"}],
+                input_tokens=1,
+                output_tokens=1,
+            )
+        ]
+        agent = make_agent(responses)
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        route_events = []
+        agent.hooks.register("orchestrator.route", route_events.append)
+
+        result = agent.run("legacy route metadata")
+
+        assert result == "ok"
+        assert len(route_events) == 1
+        assert route_events[0].payload == expected_route_payload(
+            turn_id="t001",
+            mode="legacy",
+            path="legacy_direct",
+        )
+
+    def test_route_payload_ignores_future_route_contract_fields(self, monkeypatch):
+        @dataclass
+        class FutureRouteDecision:
+            turn_id: str
+            mode: str
+            path: str
+            lane: str = "operator"
+            reason: str = "static_default_until_classifier"
+            surface: str = "terminal"
+            skill: str = "default"
+            future: str = "ignore-me"
+
+        monkeypatch.setattr(orchestrator_module, "RouteDecision", FutureRouteDecision)
+
+        payload = orchestrator_module._route_payload(
+            turn_id="t001",
+            mode="hybrid",
+            path="hybrid_planner_v0",
+        )
+
+        assert payload == expected_route_payload(
+            turn_id="t001",
+            mode="hybrid",
+            path="hybrid_planner_v0",
+        )
 
     def test_iteration_limit(self):
         # All responses have tool calls, never a text response
