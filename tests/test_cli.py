@@ -1311,11 +1311,13 @@ class TestCliLocalInteractiveCommands:
             ("/permissions", "Permissions: profile=safe | mode=review | tools=2 [read_file,shell]"),
             ("/approvals", "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0"),
             ("/approvals status", "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0"),
+            ("/approvals on", "Approvals: dangerous_mode=on | pending=none | approve_next_tokens=0"),
+            ("/approvals off", "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0"),
             ("/approve", "No pending dangerous request to approve."),
             ("/approve extra", "Usage: /approve"),
             ("/deny", "No pending dangerous request to deny."),
             ("/deny extra", "Usage: /deny"),
-            ("/approve_next", "Approve-next unavailable: session approval state not wired."),
+            ("/approve_next", "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=1"),
             ("/approve_next extra", "Usage: /approve_next"),
         ],
     )
@@ -1416,6 +1418,38 @@ class TestCliPendingApprovalInteractiveChat:
         assert pending["status"] == "pending"
         assert pending["blocked_command_preview"] == "systemctl restart nginx"
         assert pending["blocked_user_input"] == "second"
+
+    def test_chat_approvals_on_and_off_update_interactive_session_state(self):
+        agent = _DangerousActionAgent({})
+
+        outputs = self._plain_outputs(
+            _run_local_command_session(agent, ["/approvals on", "/approvals", "/approvals off", "/approvals", "quit"])
+        )
+
+        assert outputs.count("Approvals: dangerous_mode=on | pending=none | approve_next_tokens=0") == 2
+        assert outputs.count("Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0") == 2
+        assert agent.run_calls == []
+
+    def test_chat_approve_next_updates_interactive_session_state(self):
+        agent = _DangerousActionAgent({})
+
+        outputs = self._plain_outputs(_run_local_command_session(agent, ["/approve_next", "/approvals", "quit"]))
+
+        assert outputs.count("Approvals: dangerous_mode=off | pending=none | approve_next_tokens=1") == 2
+        assert agent.run_calls == []
+
+    def test_chat_pending_approval_acknowledges_without_replay_and_deny_clears_state(self):
+        agent = _DangerousActionAgent({"danger": "rm important.txt"})
+
+        outputs = self._plain_outputs(
+            _run_local_command_session(agent, ["danger", "/approve", "/approvals", "/deny", "/approvals", "quit"])
+        )
+
+        assert "Pending dangerous request approved. Replay not implemented yet." in outputs
+        assert "Approvals: dangerous_mode=off | pending=rm important.txt | approve_next_tokens=0" in outputs
+        assert "Denied pending dangerous request." in outputs
+        assert "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0" in outputs
+        assert agent.run_calls == ["danger"]
 
     def test_local_control_commands_do_not_mutate_agent_history(self):
         agent = _LocalCommandAgent()

@@ -130,6 +130,47 @@ def chat_cmd(
             "pending_request": dict(pending) if pending is not None else None,
         }
 
+    def format_terminal_approval_status() -> str:
+        status = get_terminal_approval_status()
+        mode = "on" if bool(status.get("dangerous_mode", False)) else "off"
+        pending = str(status.get("pending") or "none").strip() or "none"
+        approve_next_tokens = max(0, int(status.get("approve_next_tokens", 0) or 0))
+        return (
+            f"Approvals: dangerous_mode={mode} | "
+            f"pending={pending} | "
+            f"approve_next_tokens={approve_next_tokens}"
+        )
+
+    def set_terminal_approval_mode(enabled: bool) -> str:
+        approval_state["dangerous_mode"] = bool(enabled)
+        return format_terminal_approval_status()
+
+    def approve_pending_request() -> str:
+        pending = clear_expired_pending()
+        if pending is None:
+            return "No pending dangerous request to approve."
+        status = str(pending.get("status") or "").strip().lower()
+        if status == "approved":
+            return "Pending dangerous request already approved. Replay not implemented yet."
+        pending["status"] = "approved"
+        approval_state["pending_request"] = pending
+        return "Pending dangerous request approved. Replay not implemented yet."
+
+    def deny_pending_request() -> str:
+        pending = clear_expired_pending()
+        if pending is None:
+            return "No pending dangerous request to deny."
+        pending["status"] = "denied"
+        approval_state["pending_request"] = None
+        return "Denied pending dangerous request."
+
+    def approve_next_dangerous_action() -> str:
+        approval_state["approve_next_tokens"] = max(
+            0,
+            int(approval_state.get("approve_next_tokens", 0) or 0),
+        ) + 1
+        return format_terminal_approval_status()
+
     def confirm_for_terminal_session(command: str, level: Level) -> bool:
         approval_state["blocked_pending_id"] = ""
         if level == Level.SAFE:
@@ -150,6 +191,10 @@ def chat_cmd(
     if tools is not None and hasattr(tools, "confirmer"):
         tools.confirmer = confirm_for_terminal_session
     agent.get_terminal_approval_status = get_terminal_approval_status
+    agent.set_terminal_approval_mode = set_terminal_approval_mode
+    agent.approve_pending_request = approve_pending_request
+    agent.deny_pending_request = deny_pending_request
+    agent.approve_next_dangerous_action = approve_next_dangerous_action
     agent._terminal_approval_state = approval_state
 
     def on_thinking():
