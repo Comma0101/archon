@@ -1318,6 +1318,11 @@ class TestSlashCompleter:
         assert _slash_completer("", 1) == "set"
         assert _slash_completer("", 2) is None
 
+    def test_profile_set_value_completion_from_line_buffer(self, monkeypatch):
+        monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/profile set ")
+        assert _slash_completer("", 0) == "default"
+        assert _slash_completer("", 1) is None
+
     def test_calls_subcommand_completion_from_line_buffer_prefix(self, monkeypatch):
         monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/calls o")
         assert _slash_completer("o", 0) == "on"
@@ -1332,10 +1337,39 @@ class TestSlashCompleter:
         assert _slash_completer("", 3) == "clear"
         assert _slash_completer("", 4) is None
 
+    def test_skills_show_value_completion_from_line_buffer(self, monkeypatch):
+        monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/skills show ")
+        assert _slash_completer("", 0) == "coder"
+        assert _slash_completer("", 1) is None
+
     def test_plugins_subcommand_completion_from_line_buffer(self, monkeypatch):
         monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/plugins ")
         assert _slash_completer("", 0) == "list"
         assert _slash_completer("", 1) == "show"
+        assert _slash_completer("", 2) is None
+
+    def test_plugins_show_value_completion_from_line_buffer(self, monkeypatch):
+        monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/plugins show ")
+        assert _slash_completer("", 0) == "calls"
+        assert _slash_completer("", 1) == "mcp:docs"
+        assert _slash_completer("", 2) is None
+
+    def test_mcp_subcommand_completion_from_line_buffer(self, monkeypatch):
+        monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/mcp ")
+        assert _slash_completer("", 0) == "servers"
+        assert _slash_completer("", 1) == "show"
+        assert _slash_completer("", 2) == "tools"
+        assert _slash_completer("", 3) is None
+
+    def test_mcp_show_value_completion_from_line_buffer(self, monkeypatch):
+        monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/mcp show ")
+        assert _slash_completer("", 0) == "docs"
+        assert _slash_completer("", 1) is None
+
+    def test_jobs_subcommand_completion_from_line_buffer(self, monkeypatch):
+        monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/jobs ")
+        assert _slash_completer("", 0) == "active"
+        assert _slash_completer("", 1) == "all"
         assert _slash_completer("", 2) is None
 
 

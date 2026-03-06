@@ -126,7 +126,12 @@ def build_slash_subvalues(model_catalog: dict[str, tuple[str, ...]]) -> dict[str
         ],
         "/mcp": [
             ("servers", "List configured MCP servers"),
-            ("tools", "List advertised tools for one server"),
+            ("show docs", "Show one MCP server config"),
+            ("tools docs", "List advertised tools for one server"),
+        ],
+        "/jobs": [
+            ("active", "Show unresolved jobs"),
+            ("all", "Show recent jobs"),
         ],
     }
 
@@ -138,17 +143,15 @@ def slash_completer(
     slash_subvalues: dict[str, list[tuple[str, str]]] | None = None,
     line_buffer: str = "",
 ) -> str | None:
-    """readline completer for slash commands and first-level subcommands."""
+    """readline completer for slash commands and token-aware subcommands."""
     subvalues = slash_subvalues or {}
     buffer = (line_buffer or "").lstrip()
 
     if buffer.startswith("/"):
         command, sep, _remainder = buffer.partition(" ")
         if sep and command in subvalues:
-            typed = (text or "").strip()
-            # Keep completion lightweight: first sub-token only (e.g. /profile set|show).
-            candidates = _first_subcommand_tokens(subvalues.get(command, []))
-            matches = [value for value in candidates if value.startswith(typed)]
+            typed_remainder = buffer[len(command) + 1 :]
+            matches = _subcommand_token_matches(subvalues.get(command, []), typed_remainder)
             return matches[state] if state < len(matches) else None
 
     if text.startswith("/"):
@@ -160,19 +163,33 @@ def slash_completer(
     return matches[state] if state < len(matches) else None
 
 
-def _first_subcommand_tokens(values: list[tuple[str, str]]) -> list[str]:
-    tokens: list[str] = []
+def _subcommand_token_matches(values: list[tuple[str, str]], typed_remainder: str) -> list[str]:
+    remainder = str(typed_remainder or "")
+    ends_with_space = remainder.endswith(" ")
+    stripped = remainder.strip()
+    typed_tokens = stripped.split() if stripped else []
+    prefix_tokens = typed_tokens if ends_with_space else typed_tokens[:-1]
+    current_prefix = "" if ends_with_space else (typed_tokens[-1] if typed_tokens else "")
+
+    matches: list[str] = []
     seen: set[str] = set()
     for raw_value, _desc in values:
         value = str(raw_value or "").strip()
         if not value:
             continue
-        token = value.split()[0]
+        parts = value.split()
+        if len(parts) <= len(prefix_tokens):
+            continue
+        if parts[: len(prefix_tokens)] != prefix_tokens:
+            continue
+        token = parts[len(prefix_tokens)]
+        if current_prefix and not token.startswith(current_prefix):
+            continue
         if token in seen:
             continue
         seen.add(token)
-        tokens.append(token)
-    return tokens
+        matches.append(token)
+    return matches
 
 
 def run_picker(items: list[tuple[str, str]], label_width: int = 10) -> str | None:
