@@ -66,11 +66,32 @@ def chat_cmd(
         refresh_slash_subvalues_fn(getattr(agent, "config", None))
     telegram_adapter = None
     session_id = new_session_id_fn()
+    prompt_state = {"value": ""}
+
+    def current_prompt() -> str:
+        return str(prompt_state.get("value") or "")
+
+    def current_input() -> str:
+        if not hasattr(readline_module, "get_line_buffer"):
+            return ""
+        try:
+            return str(readline_module.get_line_buffer() or "")
+        except Exception:
+            return ""
+
+    terminal_activity_feed = (
+        make_terminal_activity_feed_fn(current_prompt, current_input)
+        if callable(make_terminal_activity_feed_fn)
+        else TerminalActivityFeed(prompt_fn=current_prompt, input_fn=current_input)
+    )
+    agent.terminal_activity_feed = terminal_activity_feed
 
     tg = agent.config.telegram
     if tg.enabled and tg.connect_on_chat:
         try:
             telegram_adapter = make_telegram_adapter_fn(agent.config)
+            if hasattr(telegram_adapter, "set_activity_sink"):
+                telegram_adapter.set_activity_sink(terminal_activity_feed.emit)
             telegram_adapter.start()
             click_echo_fn(
                 f"[telegram] connected (users={len(tg.allowed_user_ids)}, poll={tg.poll_timeout_sec}s)"
@@ -215,25 +236,6 @@ def chat_cmd(
     agent.approve_next_dangerous_action = approve_next_dangerous_action
     agent.consume_terminal_pending_replay = consume_terminal_pending_replay
     agent._terminal_approval_state = approval_state
-    prompt_state = {"value": ""}
-
-    def current_prompt() -> str:
-        return str(prompt_state.get("value") or "")
-
-    def current_input() -> str:
-        if not hasattr(readline_module, "get_line_buffer"):
-            return ""
-        try:
-            return str(readline_module.get_line_buffer() or "")
-        except Exception:
-            return ""
-
-    terminal_activity_feed = (
-        make_terminal_activity_feed_fn(current_prompt, current_input)
-        if callable(make_terminal_activity_feed_fn)
-        else TerminalActivityFeed(prompt_fn=current_prompt, input_fn=current_input)
-    )
-    agent.terminal_activity_feed = terminal_activity_feed
 
     def read_input_with_feed(prompt: str) -> str:
         prompt_state["value"] = prompt or ""
@@ -459,7 +461,7 @@ def chat_cmd(
             finally:
                 approval_state["replay_guard_active"] = False
     finally:
-        if telegram_adapter is not None:
+        if telegram_adapter is not None and hasattr(telegram_adapter, "stop"):
             telegram_adapter.stop()
 
 

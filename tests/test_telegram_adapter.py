@@ -117,6 +117,53 @@ def _adapter():
 
 
 class TestTelegramAdapterCommands:
+    def test_activity_sink_emits_received_and_reply_notices(self, monkeypatch):
+        adapter = _adapter()
+        sent = []
+        events = []
+
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260306-190000")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: None,
+        )
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+        adapter.set_activity_sink(lambda event: events.append((event.source, event.message)))
+
+        adapter._handle_message({"text": "hello from telegram", "chat": {"id": 99}, "from": {"id": 42}})
+
+        assert sent == [(99, "ok")]
+        assert events[0] == ("telegram", "received from 99: hello from telegram")
+        assert events[-1] == ("telegram", "replied to 99: ok")
+
+    def test_activity_sink_emits_blocked_approval_notice(self, monkeypatch):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: _DangerousAgent(),
+            poll_timeout_sec=1,
+        )
+        sent = []
+        events = []
+
+        monkeypatch.setattr(adapter, "_send_typing", lambda chat_id: None)
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: None,
+        )
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+        monkeypatch.setattr(
+            adapter._bot,
+            "send_message",
+            lambda chat_id, text, **kwargs: sent.append((chat_id, text)) or {"message_id": 601},
+        )
+        adapter.set_activity_sink(lambda event: events.append((event.source, event.message)))
+
+        adapter._handle_message({"text": "check system packages", "chat": {"id": 99}, "from": {"id": 42}})
+
+        assert any(message == "approval blocked for 99: pacman -Q | head" for _source, message in events)
+        assert not any(message == "replied to 99: Command rejected by safety gate." for _source, message in events)
+
     def test_local_shell_parity_commands_are_handled_without_model_turn(self, monkeypatch):
         adapter = TelegramAdapter(
             token="123:abc",

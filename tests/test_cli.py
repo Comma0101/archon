@@ -1,6 +1,8 @@
 """CLI formatting helper tests."""
 
+import io
 import re
+from contextlib import redirect_stderr
 from types import SimpleNamespace
 
 import pytest
@@ -1230,6 +1232,81 @@ class TestCliCommands:
         )
 
         assert captured == {"prompt": "you> ", "input": "partial input"}
+
+    def test_chat_cmd_registers_terminal_feed_with_telegram_adapter(self):
+        class _Agent:
+            def __init__(self):
+                self.hooks = HookBus()
+                self.config = Config()
+                self.config.llm.model = "test-model"
+                self.config.telegram.enabled = True
+                self.config.telegram.connect_on_chat = True
+                self.config.telegram.allowed_user_ids = [42]
+                self.config.telegram.poll_timeout_sec = 30
+                self.total_input_tokens = 0
+                self.total_output_tokens = 0
+                self.log_label = ""
+                self.policy_profile = "default"
+                self.on_thinking = None
+                self.on_tool_call = None
+
+            def run(self, _text):
+                raise AssertionError("agent.run should not be called for this test")
+
+            def reset(self):
+                return None
+
+        class _Adapter:
+            def __init__(self):
+                self.activity_sink = None
+
+            def start(self):
+                return None
+
+            def set_activity_sink(self, sink):
+                self.activity_sink = sink
+
+        agent = _Agent()
+        adapter = _Adapter()
+        inputs = iter(["quit"])
+        session_ids = iter(["sess-1"])
+        stderr = io.StringIO()
+
+        def fake_input(_prompt):
+            assert callable(adapter.activity_sink)
+            adapter.activity_sink(ActivityEvent(source="telegram", message="received from 99: hello"))
+            return next(inputs)
+
+        with redirect_stderr(stderr):
+            _chat_cmd(
+                make_agent_fn=lambda: agent,
+                make_telegram_adapter_fn=lambda _cfg: adapter,
+                new_session_id_fn=lambda: next(session_ids),
+                save_exchange_fn=lambda *_args: None,
+                slash_completer_fn=lambda *_args: None,
+                pick_slash_command_fn=lambda: None,
+                is_bracketed_paste_start_fn=lambda _text: False,
+                collect_bracketed_paste_fn=lambda *_args, **_kwargs: "",
+                is_paste_command_fn=lambda _text: False,
+                collect_paste_message_fn=lambda *_args, **_kwargs: "",
+                handle_repl_command_fn=_handle_repl_command,
+                is_model_runtime_error_fn=lambda _err: False,
+                format_session_summary_fn=_format_session_summary,
+                format_chat_response_fn=lambda text: text,
+                format_turn_stats_fn=_format_turn_stats,
+                make_readline_prompt_fn=lambda label, _ansi: f"{label} ",
+                spinner_cls=_FakeSpinner,
+                ansi_prompt_user="",
+                ansi_error="",
+                ansi_reset="",
+                click_echo_fn=lambda *_args, **_kwargs: None,
+                input_fn=fake_input,
+                readline_module=_FakeReadline("draft"),
+                time_time_fn=lambda: 0.0,
+                version="test",
+            )
+
+        assert "\r\033[K[telegram] received from 99: hello\nyou> draft" in stderr.getvalue()
 
 class _FakeReadline:
     def __init__(self, line_buffer=""):

@@ -47,6 +47,7 @@ from archon.history import new_session_id, save_exchange
 from archon.news.runner import get_or_build_news_digest
 from archon.news.state import load_cached_digest, load_news_state, news_state_path
 from archon.safety import Level
+from archon.ux.events import ActivityEvent
 
 if TYPE_CHECKING:
     from archon.agent import Agent
@@ -96,9 +97,14 @@ class TelegramAdapter:
         self._pending_approvals: dict[int, dict] = {}
         self._active_replay_approval_ids: dict[int, str] = {}
         self._current_request_ctx: dict[int, dict] = {}
+        self._activity_sink: Callable[[ActivityEvent], None] | None = None
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._startup_synced = False
+
+    def set_activity_sink(self, sink: Callable[[ActivityEvent], None] | None) -> None:
+        """Register an optional cross-surface activity sink."""
+        self._activity_sink = sink
 
     def start(self) -> None:
         """Start polling in a daemon thread."""
@@ -206,19 +212,27 @@ class TelegramAdapter:
             print(f"[telegram] Ignoring message from unauthorized user_id={user_id}", file=sys.stderr)
             return
 
+        emit_receive_notice = not bool(message.get("_archon_internal_replay"))
+
         voice = message.get("voice")
         if isinstance(voice, dict):
+            if emit_receive_notice:
+                self._emit_activity(f"voice received from {chat_id}")
             self._handle_voice_or_audio_message(chat_id, user_id, voice, kind="voice")
             return
 
         audio = message.get("audio")
         if isinstance(audio, dict):
+            if emit_receive_notice:
+                self._emit_activity(f"audio received from {chat_id}")
             self._handle_voice_or_audio_message(chat_id, user_id, audio, kind="audio")
             return
 
         text = message.get("text")
         if not isinstance(text, str):
             return
+        if emit_receive_notice:
+            self._emit_activity(f"received from {chat_id}: {self._preview_text(text)}")
 
         body = text.strip()
         if not body:
@@ -590,6 +604,12 @@ class TelegramAdapter:
             return
         ctx["route_progress_turn_id"] = turn_id
         self._send_text(chat_id, self._format_route_progress_text(payload))
+        lane = str(payload.get("lane", "")).strip().lower() or "operator"
+        reason = str(payload.get("reason", "")).strip().replace("_", " ")
+        detail = f"route progress for {chat_id}: {lane}"
+        if reason:
+            detail += f" | {reason}"
+        self._emit_activity(detail)
 
     def _format_route_progress_text(self, payload: dict) -> str:
         lane = str(payload.get("lane", "")).strip().lower() or "operator"
@@ -605,20 +625,24 @@ class TelegramAdapter:
             return True
         if level == Level.FORBIDDEN:
             print(f"[telegram] FORBIDDEN: {command}", file=sys.stderr)
+            self._emit_activity(f"approval forbidden for {chat_id}: {truncate_approval_command(command)}")
             self._send_text(chat_id, "FORBIDDEN action blocked by safety policy.")
             return False
 
         if self._is_chat_elevated(chat_id):
             print(f"[telegram] APPROVED (mode=elevated): {command}", file=sys.stderr)
+            self._emit_activity(f"approval allowed for {chat_id}: {truncate_approval_command(command)}")
             return True
 
         active_replay_id = self._active_replay_approval_ids.get(chat_id)
         if active_replay_id:
             print(f"[telegram] APPROVED (mode=request-replay): {command}", file=sys.stderr)
+            self._emit_activity(f"approval allowed for {chat_id}: {truncate_approval_command(command)}")
             return True
 
         if chat_id in self._approval_always_on_chats:
             print(f"[telegram] APPROVED (mode=always): {command}", file=sys.stderr)
+            self._emit_activity(f"approval allowed for {chat_id}: {truncate_approval_command(command)}")
             return True
 
         tokens = self._approve_next_tokens.get(chat_id, 0)
@@ -632,9 +656,11 @@ class TelegramAdapter:
                 f"[telegram] APPROVED (mode=next, remaining={remaining}): {command}",
                 file=sys.stderr,
             )
+            self._emit_activity(f"approval allowed for {chat_id}: {truncate_approval_command(command)}")
             return True
 
         print(f"[telegram] BLOCKED (needs Telegram approval): {command}", file=sys.stderr)
+        self._emit_activity(f"approval blocked for {chat_id}: {truncate_approval_command(command)}")
         self._queue_pending_approval(chat_id, command)
         return False
 
@@ -813,7 +839,12 @@ class TelegramAdapter:
             replay_user_id = chat_id
         try:
             self._handle_message(
-                {"text": user_text, "chat": {"id": chat_id}, "from": {"id": replay_user_id}}
+                {
+                    "text": user_text,
+                    "chat": {"id": chat_id},
+                    "from": {"id": replay_user_id},
+                    "_archon_internal_replay": True,
+                }
             )
         finally:
             self._active_replay_approval_ids.pop(chat_id, None)
@@ -871,10 +902,26 @@ class TelegramAdapter:
 
     def _send_text_and_record(self, chat_id: int, user_text: str, response_text: str) -> None:
         self._send_text(chat_id, response_text)
+        self._emit_activity(f"replied to {chat_id}: {self._preview_text(response_text)}")
         try:
             save_exchange(self._history_session_id(chat_id), user_text, response_text)
         except Exception:
             pass
+
+    def _emit_activity(self, message: str) -> None:
+        sink = self._activity_sink
+        if not callable(sink):
+            return
+        try:
+            sink(ActivityEvent(source="telegram", message=message))
+        except Exception:
+            pass
+
+    def _preview_text(self, text: str, limit: int = 80) -> str:
+        compact = " ".join(str(text or "").split())
+        if len(compact) <= limit:
+            return compact
+        return compact[: max(0, limit - 3)] + "..."
 
     def _history_session_id(self, chat_id: int) -> str:
         sid = self._history_session_ids.get(chat_id)
