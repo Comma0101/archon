@@ -128,6 +128,22 @@ class MCPConfig:
 
 
 @dataclass
+class GoogleDeepResearchConfig:
+    enabled: bool = False
+    agent: str = "deep-research-pro-preview-12-2025"
+    timeout_minutes: int = 20
+    poll_interval_sec: int = 10
+    thinking_summaries: str = "auto"
+
+
+@dataclass
+class ResearchConfig:
+    google_deep_research: GoogleDeepResearchConfig = field(
+        default_factory=GoogleDeepResearchConfig
+    )
+
+
+@dataclass
 class NewsScheduleConfig:
     run_after_hour_local: int = 8
 
@@ -181,6 +197,7 @@ class Config:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     web: WebConfig = field(default_factory=WebConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
+    research: ResearchConfig = field(default_factory=ResearchConfig)
     news: NewsConfig = field(default_factory=NewsConfig)
     calls: CallsConfig = field(default_factory=CallsConfig)
 
@@ -334,6 +351,51 @@ def load_config() -> Config:
                     env=_resolve_mcp_env_map(env_map) if isinstance(env_map, dict) else {},
                 )
             cfg.mcp.servers = parsed_servers
+
+        research = data.get("research", {})
+        deep_research = research.get("google_deep_research", {})
+        cfg.research.google_deep_research.enabled = bool(
+            deep_research.get(
+                "enabled",
+                cfg.research.google_deep_research.enabled,
+            )
+        )
+        cfg.research.google_deep_research.agent = (
+            str(
+                deep_research.get(
+                    "agent",
+                    cfg.research.google_deep_research.agent,
+                )
+            ).strip()
+            or cfg.research.google_deep_research.agent
+        )
+        cfg.research.google_deep_research.timeout_minutes = max(
+            1,
+            int(
+                deep_research.get(
+                    "timeout_minutes",
+                    cfg.research.google_deep_research.timeout_minutes,
+                )
+            ),
+        )
+        cfg.research.google_deep_research.poll_interval_sec = max(
+            1,
+            int(
+                deep_research.get(
+                    "poll_interval_sec",
+                    cfg.research.google_deep_research.poll_interval_sec,
+                )
+            ),
+        )
+        cfg.research.google_deep_research.thinking_summaries = (
+            str(
+                deep_research.get(
+                    "thinking_summaries",
+                    cfg.research.google_deep_research.thinking_summaries,
+                )
+            ).strip().lower()
+            or cfg.research.google_deep_research.thinking_summaries
+        )
 
         news = data.get("news", {})
         cfg.news.enabled = bool(news.get("enabled", cfg.news.enabled))

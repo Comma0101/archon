@@ -21,6 +21,10 @@ def test_load_config_calls_defaults(monkeypatch, tmp_path):
     assert cfg.orchestrator.mode == "legacy"
     assert cfg.orchestrator.shadow_eval is True
     assert cfg.orchestrator.default_profile == "default"
+    assert cfg.research.google_deep_research.enabled is False
+    assert cfg.research.google_deep_research.agent == "deep-research-pro-preview-12-2025"
+    assert cfg.research.google_deep_research.timeout_minutes == 20
+    assert cfg.research.google_deep_research.poll_interval_sec == 10
 
 
 def test_load_config_orchestrator_section(monkeypatch, tmp_path):
@@ -198,6 +202,32 @@ def test_load_config_mcp_server_names_are_normalized_lowercase(monkeypatch, tmp_
 
     assert "docs" in cfg.mcp.servers
     assert "Docs" not in cfg.mcp.servers
+
+
+def test_load_config_parses_google_deep_research_settings(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config" / "archon"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        "\n".join(
+            [
+                "[research.google_deep_research]",
+                "enabled = true",
+                'agent = "deep-research-pro-preview-12-2025"',
+                "timeout_minutes = 25",
+                "poll_interval_sec = 7",
+                'thinking_summaries = "auto"',
+            ]
+        )
+    )
+    monkeypatch.setattr("archon.config.CONFIG_DIR", config_dir)
+
+    cfg = load_config()
+
+    assert cfg.research.google_deep_research.enabled is True
+    assert cfg.research.google_deep_research.agent == "deep-research-pro-preview-12-2025"
+    assert cfg.research.google_deep_research.timeout_minutes == 25
+    assert cfg.research.google_deep_research.poll_interval_sec == 7
+    assert cfg.research.google_deep_research.thinking_summaries == "auto"
 
 
 def test_builtin_skill_registry_contains_expected_skills():
