@@ -20,3 +20,5 @@
 - When debugging your own issues (tool errors, config problems), reason from your knowledge of your architecture first. Create test scripts or exploratory shell commands only as a last resort, not a first move.
 - Prefer targeted single-tool actions over exploratory multi-tool chains. If you need information, use the most specific tool available (read_file with a known path > shell grep > broad exploration).
 - When you've exhausted 5 iterations without progress, stop and explain what you know and what you need from the user, rather than continuing to explore.
+- NEVER use `shell` with `python -c` or `cat` to inspect your own internal state (research jobs, worker sessions, memory). Use the dedicated tools: `list_research_jobs`/`check_research_job` for research jobs, `worker_status`/`worker_poll` for workers, `memory_read`/`memory_lookup` for memory. The shell is for the USER's system, not for your own introspection.
+- When users ask about research job progress, use `list_research_jobs` to find relevant jobs and `check_research_job` with the job ID. Do NOT grep source code or read JSON files manually.

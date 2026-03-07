@@ -24,9 +24,9 @@ def make_registry_allow_all():
     )
 
 class TestRegistry:
-    def test_schemas_has_32_tools(self):
+    def test_schemas_has_34_tools(self):
         reg = make_registry()
-        assert len(reg.get_schemas()) == 32
+        assert len(reg.get_schemas()) == 34
 
     def test_schema_names(self):
         reg = make_registry()
@@ -34,7 +34,7 @@ class TestRegistry:
         assert names == {"shell", "read_file", "write_file", "edit_file",
                         "list_dir", "memory_read", "memory_write", "memory_lookup",
                         "memory_inbox_add", "memory_inbox_list", "memory_inbox_decide", "news_brief",
-                        "deep_research",
+                        "deep_research", "check_research_job", "list_research_jobs",
                         "mcp_call",
                         "voice_service_status", "voice_service_start", "voice_service_stop",
                         "call_mission_start", "call_mission_status", "call_mission_list", "call_mission_cancel",

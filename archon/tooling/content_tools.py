@@ -11,6 +11,31 @@ from .common import truncate_text
 
 
 def register_content_tools(registry) -> None:
+    def _resolve_deep_research_api_key(cfg) -> str:
+        llm_cfg = getattr(cfg, "llm", None)
+        api_key = ""
+        if str(getattr(llm_cfg, "provider", "") or "").strip().lower() == "google":
+            api_key = str(getattr(llm_cfg, "api_key", "") or "").strip()
+        if not api_key and str(getattr(llm_cfg, "fallback_provider", "") or "").strip().lower() == "google":
+            api_key = str(getattr(llm_cfg, "fallback_api_key", "") or "").strip()
+        if not api_key:
+            api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        if not api_key:
+            api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
+        return api_key
+
+    def _build_deep_research_client(cfg):
+        deep_cfg = getattr(getattr(cfg, "research", None), "google_deep_research", None)
+        if deep_cfg is None or not bool(getattr(deep_cfg, "enabled", False)):
+            return None
+        api_key = _resolve_deep_research_api_key(cfg)
+        if not api_key:
+            return None
+        from archon.research.google_deep_research import GoogleDeepResearchClient
+
+        agent_name = str(getattr(deep_cfg, "agent", "") or "").strip()
+        return GoogleDeepResearchClient.from_api_key(api_key, agent=agent_name)
+
     # 12. news_brief
     def news_brief(force_refresh: bool = False, send_to_telegram: bool = False) -> str:
         ensure_dirs()
@@ -181,26 +206,16 @@ def register_content_tools(registry) -> None:
                 "Enable [research.google_deep_research].enabled to use."
             )
 
-        from archon.research.google_deep_research import GoogleDeepResearchClient
         from archon.research.models import ResearchJobRecord
         from archon.research.store import save_research_job
         from datetime import datetime, timezone
 
-        # Resolve API key
-        llm_cfg = getattr(cfg, "llm", None)
-        api_key = ""
-        if str(getattr(llm_cfg, "provider", "") or "").strip().lower() == "google":
-            api_key = str(getattr(llm_cfg, "api_key", "") or "").strip()
-        if not api_key and str(getattr(llm_cfg, "fallback_provider", "") or "").strip().lower() == "google":
-            api_key = str(getattr(llm_cfg, "fallback_api_key", "") or "").strip()
-        if not api_key:
-            api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-        if not api_key:
+        client = _build_deep_research_client(cfg)
+        if client is None:
             return "Deep Research unavailable: no GEMINI_API_KEY configured."
 
         agent_name = str(getattr(deep_cfg, "agent", "") or "").strip()
         try:
-            client = GoogleDeepResearchClient.from_api_key(api_key, agent=agent_name)
             interaction = client.start_research(query)
         except Exception as e:
             return f"Deep Research failed to start: {type(e).__name__}: {e}"
@@ -241,4 +256,93 @@ def register_content_tools(registry) -> None:
             "required": ["query"],
         },
         deep_research_tool,
+    )
+
+    # 16. check_research_job
+    def check_research_job_tool(job_id: str) -> str:
+        """Check the status of a deep research job."""
+        ensure_dirs()
+        cfg = load_config()
+        from archon.research.store import load_research_job
+
+        # Strip "research:" prefix if present
+        interaction_id = job_id
+        if interaction_id.startswith("research:"):
+            interaction_id = interaction_id[9:]
+
+        refresh_client = _build_deep_research_client(cfg)
+        record = load_research_job(interaction_id, refresh_client=refresh_client)
+        if record is None:
+            return f"Research job '{job_id}' not found."
+
+        lines = [
+            f"Job: research:{record.interaction_id}",
+            f"Status: {record.status}",
+            f"Prompt: {record.prompt}",
+            f"Updated: {record.updated_at}",
+        ]
+        if record.summary:
+            lines.append(f"Summary: {record.summary}")
+        if record.output_text:
+            lines.append(f"Output:\n{record.output_text[:3000]}")
+        if record.error:
+            lines.append(f"Error: {record.error}")
+        return "\n".join(lines)
+
+    registry.register(
+        "check_research_job",
+        "Check the status of a running deep research job. "
+        "Use this to poll for progress instead of shelling out to Python.",
+        {
+            "properties": {
+                "job_id": {
+                    "type": "string",
+                    "description": "The research job ID (e.g. 'research:v1_xxx' or just 'v1_xxx')",
+                },
+            },
+            "required": ["job_id"],
+        },
+        check_research_job_tool,
+    )
+
+    # 17. list_research_jobs
+    def list_research_jobs_tool(limit: int = 10) -> str:
+        """List recent deep research jobs so the agent can inspect/poll them."""
+        ensure_dirs()
+        cfg = load_config()
+        from archon.research.store import list_research_jobs
+
+        refresh_client = _build_deep_research_client(cfg)
+        records = list_research_jobs(limit=max(1, int(limit)), refresh_client=refresh_client)
+        lines = [f"Research jobs: {len(records)}"]
+        if not records:
+            lines.append("No research jobs found.")
+            return "\n".join(lines)
+
+        for record in records:
+            summary = truncate_text(str(getattr(record, "summary", "") or ""), 160)
+            if not summary:
+                summary = truncate_text(str(getattr(record, "prompt", "") or ""), 160)
+            if not summary:
+                summary = "No summary"
+            lines.append(
+                f"- research:{record.interaction_id} | {record.status} | {summary}"
+            )
+        return "\n".join(lines)
+
+    registry.register(
+        "list_research_jobs",
+        "List recent deep research jobs so you can inspect existing job ids before polling one. "
+        "Use this when the user asks about current/past research jobs or how many research jobs exist.",
+        {
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of recent research jobs to list",
+                    "default": 10,
+                },
+            },
+            "required": [],
+        },
+        list_research_jobs_tool,
     )

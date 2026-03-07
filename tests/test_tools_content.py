@@ -121,3 +121,88 @@ class TestWebTools:
         result = reg.execute("web_read", {"url": "https://example.com"})
         assert "Title: Example" in result
         assert "Body text" in result
+
+
+class TestDeepResearchTools:
+    def test_check_research_job_uses_config_backed_refresh_client(self, monkeypatch):
+        reg = make_registry()
+        cfg = Config()
+        cfg.llm.provider = "google"
+        cfg.llm.api_key = "cfg-google-key"
+        cfg.research.google_deep_research.enabled = True
+
+        class _Record:
+            interaction_id = "abc123"
+            status = "completed"
+            prompt = "agentic ai"
+            updated_at = "2026-03-07T00:00:00Z"
+            summary = "done"
+            output_text = "report body"
+            error = ""
+
+        captured = {}
+
+        monkeypatch.setattr("archon.tooling.content_tools.ensure_dirs", lambda: None)
+        monkeypatch.setattr("archon.tooling.content_tools.load_config", lambda: cfg)
+        monkeypatch.setattr(
+            "archon.research.google_deep_research.GoogleDeepResearchClient.from_api_key",
+            lambda api_key, agent=None: captured.update({"api_key": api_key, "agent": agent}) or object(),
+        )
+        monkeypatch.setattr(
+            "archon.research.store.load_research_job",
+            lambda interaction_id, refresh_client=None: captured.update(
+                {"interaction_id": interaction_id, "refresh_client": refresh_client}
+            ) or _Record(),
+        )
+
+        result = reg.execute("check_research_job", {"job_id": "research:abc123"})
+
+        assert captured["api_key"] == "cfg-google-key"
+        assert captured["interaction_id"] == "abc123"
+        assert captured["refresh_client"] is not None
+        assert "Job: research:abc123" in result
+        assert "Status: completed" in result
+
+    def test_list_research_jobs_tool_formats_recent_jobs(self, monkeypatch):
+        reg = make_registry()
+        cfg = Config()
+        cfg.llm.provider = "google"
+        cfg.llm.api_key = "cfg-google-key"
+        cfg.research.google_deep_research.enabled = True
+
+        class _Record:
+            def __init__(self, interaction_id, status, summary):
+                self.interaction_id = interaction_id
+                self.status = status
+                self.prompt = f"prompt for {interaction_id}"
+                self.updated_at = "2026-03-07T00:00:00Z"
+                self.summary = summary
+                self.output_text = ""
+                self.error = ""
+
+        captured = {}
+
+        monkeypatch.setattr("archon.tooling.content_tools.ensure_dirs", lambda: None)
+        monkeypatch.setattr("archon.tooling.content_tools.load_config", lambda: cfg)
+        monkeypatch.setattr(
+            "archon.research.google_deep_research.GoogleDeepResearchClient.from_api_key",
+            lambda api_key, agent=None: captured.update({"api_key": api_key}) or object(),
+        )
+        monkeypatch.setattr(
+            "archon.research.store.list_research_jobs",
+            lambda limit=20, refresh_client=None: captured.update(
+                {"limit": limit, "refresh_client": refresh_client}
+            ) or [
+                _Record("job-1", "in_progress", "Running"),
+                _Record("job-2", "completed", "Finished"),
+            ],
+        )
+
+        result = reg.execute("list_research_jobs", {"limit": 2})
+
+        assert captured["api_key"] == "cfg-google-key"
+        assert captured["limit"] == 2
+        assert captured["refresh_client"] is not None
+        assert "Research jobs: 2" in result
+        assert "research:job-1 | in_progress | Running" in result
+        assert "research:job-2 | completed | Finished" in result
