@@ -252,6 +252,21 @@ def _picker_leaf_subvalues(values: list[tuple[str, str]]) -> list[tuple[str, str
     return leaf_items
 
 
+def _picker_selectable_subvalues(
+    command: str,
+    values: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    picker_values = _picker_leaf_subvalues(values)
+    blocked_by_command = {
+        "/plugins": {"show"},
+        "/mcp": {"show", "tools"},
+    }
+    blocked = blocked_by_command.get(str(command or "").strip(), set())
+    if not blocked:
+        return picker_values
+    return [(value, desc) for value, desc in picker_values if value not in blocked]
+
+
 def run_picker(items: list[tuple[str, str]], label_width: int = 10) -> str | None:
     """Interactive arrow-key picker. Returns selected item name or None."""
     if not items:
@@ -331,7 +346,7 @@ def pick_slash_command(
     subvalues = slash_subvalues.get(command)
     if not subvalues:
         return command
-    picker_values = _picker_leaf_subvalues(subvalues)
+    picker_values = _picker_selectable_subvalues(command, subvalues)
     if not picker_values:
         return command
     max_len = max(len(v) for v, _ in picker_values)

@@ -1867,6 +1867,39 @@ class TestPickSlashCommand:
         monkeypatch.setattr("archon.cli._run_picker", lambda *_a, **_k: next(picks))
         assert _pick_slash_command() == "/calls on"
 
+    def test_pick_slash_command_mcp_default_omits_incomplete_generic_verbs(self, monkeypatch):
+        monkeypatch.setattr("archon.cli._SLASH_SUBVALUES", _build_slash_subvalues(Config()))
+        seen = []
+
+        def fake_run_picker(items, **_kwargs):
+            seen.append([name for name, _desc in items])
+            if len(seen) == 1:
+                return "/mcp"
+            return "servers"
+
+        monkeypatch.setattr("archon.cli._run_picker", fake_run_picker)
+
+        assert _pick_slash_command() == "/mcp servers"
+        assert "servers" in seen[1]
+        assert "show" not in seen[1]
+        assert "tools" not in seen[1]
+
+    def test_pick_slash_command_plugins_default_omits_incomplete_generic_show(self, monkeypatch):
+        monkeypatch.setattr("archon.cli._SLASH_SUBVALUES", _build_slash_subvalues(Config()))
+        seen = []
+
+        def fake_run_picker(items, **_kwargs):
+            seen.append([name for name, _desc in items])
+            if len(seen) == 1:
+                return "/plugins"
+            return "list"
+
+        monkeypatch.setattr("archon.cli._run_picker", fake_run_picker)
+
+        assert _pick_slash_command() == "/plugins list"
+        assert "list" in seen[1]
+        assert "show" not in seen[1]
+
     def test_pick_slash_command_mcp_runtime_omits_incomplete_generic_verbs(self, monkeypatch):
         cfg = Config()
         cfg.mcp.servers = {
