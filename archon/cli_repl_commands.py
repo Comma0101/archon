@@ -94,16 +94,17 @@ def handle_status_command(agent, text: str) -> tuple[bool, str]:
     return True, "Status: " + " | ".join(parts)
 
 
+
 def handle_cost_command(agent, text: str) -> tuple[bool, str]:
-    """Handle `/cost` command with compact token totals."""
+    """Handle /cost command to show estimated session cost."""
     raw = (text or "").strip().lower()
     if raw != "/cost":
         return False, ""
 
     total_input = max(0, int(getattr(agent, "total_input_tokens", 0) or 0))
     total_output = max(0, int(getattr(agent, "total_output_tokens", 0) or 0))
-    total = total_input + total_output
-    return True, f"Cost: total_tokens={total:,} | input={total_input:,} | output={total_output:,}"
+    total_tokens = total_input + total_output
+    return True, f"Cost: total_tokens={total_tokens:,} | input={total_input:,} | output={total_output:,}"
 
 
 def handle_doctor_command(agent, text: str) -> tuple[bool, str]:
@@ -144,39 +145,29 @@ def handle_permissions_command(agent, text: str) -> tuple[bool, str]:
 
 
 def handle_compact_command(agent, text: str) -> tuple[bool, str]:
-    """Handle `/compact` command with explicit history compaction."""
+    """Handle /compact command to manually compact conversation history."""
     raw = (text or "").strip().lower()
     if raw != "/compact":
         return False, ""
 
-    compact_fn = getattr(agent, "compact_context", None)
-    if not callable(compact_fn):
-        return True, "Compact unavailable: missing agent.compact_context"
-
-    result = compact_fn() or {}
-    compacted_messages = max(0, int(result.get("compacted_messages", 0) or 0))
-    path = str(result.get("path", "") or "").strip()
-    summary = str(result.get("summary", "") or "").strip()
-    if compacted_messages <= 0 or not path:
-        return True, "Compact: nothing to compact"
-    parts = [f"Compact: history_messages={compacted_messages}", f"path={path}"]
-    if summary:
-        parts.append(f"summary={summary}")
-    return True, " | ".join(parts)
+    result = agent.compact_context()
+    compacted = result.get("compacted_messages", 0)
+    path = result.get("path", "")
+    summary = result.get("summary", "")
+    return True, f"Compact: history_messages={compacted} | path={path} | summary={summary}"
 
 
 def handle_context_command(agent, text: str) -> tuple[bool, str]:
-    """Handle `/context` command with a minimal local context summary."""
+    """Handle /context command to show current context usage."""
     raw = (text or "").strip().lower()
     if raw != "/context":
         return False, ""
 
-    history_messages = len(getattr(agent, "history", []) or [])
-    pending_compactions = len(getattr(agent, "_pending_compactions", []) or [])
-    return True, (
-        f"Context: history_messages={history_messages} | "
-        f"pending_compactions={pending_compactions}"
-    )
+    history = getattr(agent, "history", []) or []
+    messages = len(history)
+    pending = getattr(agent, "_pending_compactions", []) or []
+    pending_count = len(pending)
+    return True, f"Context: history_messages={messages} | pending_compactions={pending_count}"
 
 
 def handle_skills_command(agent, text: str) -> tuple[bool, str]:
