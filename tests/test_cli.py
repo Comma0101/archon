@@ -1379,6 +1379,14 @@ class TestCliCommands:
         assert (changed, msg) == (False, "")
         assert agent.policy_profile == "safe"
 
+    def test_auto_activate_skill_does_not_trigger_on_use_sales_data_phrase(self):
+        agent = _LocalCommandAgent()
+
+        changed, msg = _maybe_auto_activate_skill(agent, "use sales data to research restaurant churn")
+
+        assert (changed, msg) == (False, "")
+        assert agent.policy_profile == "safe"
+
 class _FakeReadline:
     def __init__(self, line_buffer=""):
         self.line_buffer = line_buffer

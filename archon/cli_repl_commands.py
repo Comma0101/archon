@@ -37,7 +37,7 @@ _SKILL_REQUEST_PATTERN = "|".join(
     sorted((re.escape(alias) for alias in _SKILL_REQUEST_ALIASES), key=len, reverse=True)
 )
 _EXPLICIT_SKILL_PATTERNS = (
-    re.compile(rf"\buse (?P<skill>{_SKILL_REQUEST_PATTERN})(?: skill)?\b", re.IGNORECASE),
+    re.compile(rf"\buse (?P<skill>{_SKILL_REQUEST_PATTERN}) skill\b", re.IGNORECASE),
     re.compile(rf"\bswitch to (?P<skill>{_SKILL_REQUEST_PATTERN})(?: skill| mode)?\b", re.IGNORECASE),
     re.compile(rf"\bact as(?: an?| the)? (?P<skill>{_SKILL_REQUEST_PATTERN})(?: skill)?\b", re.IGNORECASE),
     re.compile(rf"\benter (?P<skill>{_SKILL_REQUEST_PATTERN}) mode\b", re.IGNORECASE),
