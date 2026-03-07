@@ -266,6 +266,7 @@ class Agent:
                 "role": "user",
                 "content": tool_results,
             })
+            self._enforce_iteration_budget()
 
         return "[Iteration limit reached]"
 
@@ -463,6 +464,7 @@ class Agent:
                 "role": "user",
                 "content": tool_results,
             })
+            self._enforce_iteration_budget()
 
         yield "[Iteration limit reached]"
 
@@ -734,6 +736,23 @@ class Agent:
             i += 1
         if changed:
             self.history = repaired
+
+    def _enforce_iteration_budget(self) -> None:
+        """Lightweight mid-turn trim: drop oldest messages if over char budget.
+
+        Called after each tool-result append inside the iteration loop so that
+        history cannot grow unbounded within a single turn.
+        """
+        max_chars = self.history_max_chars
+        trim_to = self.history_trim_to_chars
+        if max_chars <= 0 or trim_to <= 0:
+            return
+        current = _estimate_history_chars(self.history)
+        if current <= max_chars:
+            return
+        while len(self.history) > 2 and current > trim_to:
+            dropped = self.history.pop(0)
+            current -= _estimate_message_chars(dropped)
 
     def _trim_history_if_needed(self) -> None:
         """Trim old history with a lightweight dual budget to avoid unbounded growth.
