@@ -484,9 +484,9 @@ class TestTelegramAdapterCommands:
         )
 
         assert sent
-        assert "/status - show current model/profile/token summary" in sent[0][1]
-        assert "/skills - inspect or select built-in skills" in sent[0][1]
-        assert "/mcp - inspect MCP server status and config" in sent[0][1]
+        assert "Core: /status, /approvals, /jobs, /skills, /mcp, /reset" in sent[0][1]
+        assert "Advanced:" in sent[0][1]
+        assert "/plugins" in sent[0][1]
 
     def test_startup_sync_skips_pending_updates_by_advancing_offset(self, monkeypatch):
         adapter = _adapter()
@@ -536,6 +536,25 @@ class TestTelegramAdapterCommands:
 
         assert adapter._offset == 221
         assert adapter._startup_synced is True
+
+    def test_immediate_duplicate_poll_error_after_startup_sync_failure_is_suppressed(self, monkeypatch, capsys):
+        adapter = _adapter()
+
+        adapter._log_poll_error(RuntimeError("Telegram API getUpdates network error: dns"), source="startup_sync")
+        adapter._log_poll_error(RuntimeError("Telegram API getUpdates network error: dns"), source="poll")
+
+        err = capsys.readouterr().err
+        assert err.count("Telegram API getUpdates network error: dns") == 1
+
+    def test_distinct_poll_error_is_still_logged_after_startup_sync_failure(self, monkeypatch, capsys):
+        adapter = _adapter()
+
+        adapter._log_poll_error(RuntimeError("Telegram API getUpdates network error: dns"), source="startup_sync")
+        adapter._log_poll_error(RuntimeError("different failure"), source="poll")
+
+        err = capsys.readouterr().err
+        assert "Startup sync skipped" in err
+        assert "Poll error" in err
 
     def test_news_command_uses_news_backend(self, monkeypatch):
         adapter = _adapter()

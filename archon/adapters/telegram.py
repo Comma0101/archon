@@ -103,6 +103,8 @@ class TelegramAdapter:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._startup_synced = False
+        self._last_error_signature: tuple[str, str] | None = None
+        self._last_error_at: float = 0.0
 
     def set_activity_sink(self, sink: Callable[[ActivityEvent], None] | None) -> None:
         """Register an optional cross-surface activity sink."""
@@ -145,7 +147,7 @@ class TelegramAdapter:
             except KeyboardInterrupt:
                 raise
             except Exception as e:
-                print(f"[telegram] Poll error: {type(e).__name__}: {e}", file=sys.stderr)
+                self._log_poll_error(e, source="poll")
                 if self._stop_event.wait(2.0):
                     break
 
@@ -178,7 +180,21 @@ class TelegramAdapter:
                 file=sys.stderr,
             )
         except Exception as e:
-            print(f"[telegram] Startup sync skipped ({type(e).__name__}: {e})", file=sys.stderr)
+            self._log_poll_error(e, source="startup_sync")
+
+    def _log_poll_error(self, error: Exception, *, source: str) -> None:
+        error_type = type(error).__name__
+        message = str(error)
+        signature = (error_type, message)
+        now = time.time()
+        if self._last_error_signature == signature and (now - self._last_error_at) < 5.0:
+            return
+        self._last_error_signature = signature
+        self._last_error_at = now
+        if source == "startup_sync":
+            print(f"[telegram] Startup sync skipped ({error_type}: {message})", file=sys.stderr)
+            return
+        print(f"[telegram] Poll error: {error_type}: {message}", file=sys.stderr)
 
     def _get_updates(self) -> list[dict]:
         payload: dict[str, object] = {
@@ -247,8 +263,8 @@ class TelegramAdapter:
                 chat_id,
                 body,
                 "Archon is connected.\n"
-                "Commands: /help, /reset, /jobs, /job <id>, /news, /news_status, /approve, /deny, /approvals\n"
-                "Dangerous commands can be approved with inline buttons or /approve.",
+                "Core: /status, /approvals, /jobs, /skills, /mcp, /reset\n"
+                "Use /help for the compact command guide.",
             )
             return
 
@@ -256,27 +272,10 @@ class TelegramAdapter:
             self._send_text_and_record(
                 chat_id,
                 body,
-                "Send a message to chat with Archon.\n"
-                "/reset - clear this chat's agent history\n"
-                "/status - show current model/profile/token summary\n"
-                "/cost - show session token totals\n"
-                "/doctor - show local runtime health checks\n"
-                "/permissions - show active policy permissions\n"
-                "/skills - inspect or select built-in skills\n"
-                "/plugins - inspect native and MCP plugins\n"
-                "/mcp - inspect MCP server status and config\n"
-                "/profile - inspect or change the active policy profile\n"
-                "/jobs - list recent jobs across workers and calls\n"
-                "/job <id> - show one normalized job summary\n"
-                "/news - fetch or reuse today's AI news digest\n"
-                "/news refresh - force refresh today's digest\n"
-                "/news_status - show daily news state/cache status\n"
-                "/approve - approve and replay the latest pending dangerous request\n"
-                "/deny - deny and clear the latest pending dangerous request\n"
-                "/approve_next - allow the next dangerous tool action only\n"
-                "/approvals - show approval mode status\n"
-                "/approvals on|off - enable/disable dangerous tool approvals for this chat\n"
-                "Note: FORBIDDEN actions are always blocked.",
+                "Core: /status, /approvals, /jobs, /skills, /mcp, /reset\n"
+                "Advanced: /cost, /doctor, /permissions, /plugins, /profile, /job <id>, "
+                "/approve, /deny, /approve_next, /news, /news_status\n"
+                "Dangerous commands can be approved with inline buttons or /approve.",
             )
             return
 

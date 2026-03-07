@@ -44,6 +44,12 @@ _EXPLICIT_SKILL_PATTERNS = (
     re.compile(rf"^\s*{_SKILL_REQUEST_PREFIX}act as(?: an?| the)? (?P<skill>{_SKILL_REQUEST_PATTERN})(?: skill)?\b", re.IGNORECASE),
     re.compile(rf"^\s*{_SKILL_REQUEST_PREFIX}enter (?P<skill>{_SKILL_REQUEST_PATTERN}) mode\b", re.IGNORECASE),
 )
+_TERMINAL_HELP_TEXT = (
+    "Core: /status, /approvals, /jobs, /skills, /mcp, /reset\n"
+    "Advanced: /cost, /compact, /context, /doctor, /permissions, /plugins, /model, "
+    "/calls, /profile, /job <id>, /paste\n"
+    "Use / to browse commands."
+)
 
 
 def handle_model_command(agent, text: str) -> tuple[bool, str]:
@@ -826,10 +832,18 @@ def handle_jobs_command(agent, text: str) -> tuple[bool, str]:
     view, limit = parsed
 
     scan_limit = max(limit, 100) if view == "active" else limit
-    jobs = _collect_job_summaries(limit=scan_limit)
-    refresh_client = _make_deep_research_refresh_client(agent)
-    if refresh_client is not None:
-        jobs = [_refresh_job_summary(job, refresh_client) for job in jobs]
+    try:
+        jobs = _collect_job_summaries(limit=scan_limit)
+        refresh_client = None
+        if any(
+            str(getattr(job, "kind", "") or "").strip().lower() == "deep_research"
+            for job in jobs
+        ):
+            refresh_client = _make_deep_research_refresh_client(agent)
+        if refresh_client is not None:
+            jobs = [_refresh_job_summary(job, refresh_client) for job in jobs]
+    except OSError as e:
+        return True, f"Jobs unavailable: {e}"
     return True, _format_jobs_list(jobs, view=view, limit=limit)
 
 
@@ -843,11 +857,16 @@ def handle_job_command(agent, text: str) -> tuple[bool, str]:
         return True, "Usage: /job <id>"
 
     job_ref = parts[1].strip()
-    refresh_client = _make_deep_research_refresh_client(agent)
-    if refresh_client is not None and job_ref.startswith("research:"):
-        job = load_research_job_summary(job_ref.split(":", 1)[1], refresh_client=refresh_client)
-    else:
-        job = _load_job_summary(job_ref)
+    try:
+        refresh_client = None
+        if job_ref.startswith("research:"):
+            refresh_client = _make_deep_research_refresh_client(agent)
+        if refresh_client is not None and job_ref.startswith("research:"):
+            job = load_research_job_summary(job_ref.split(":", 1)[1], refresh_client=refresh_client)
+        else:
+            job = _load_job_summary(job_ref)
+    except OSError as e:
+        return True, f"Job unavailable: {e}"
     if job is None:
         return True, f"Job not found: {job_ref}"
     return True, format_job_summary(job)
@@ -1035,11 +1054,7 @@ def handle_repl_command(
     if raw.lower() == "/reset":
         return "reset", ""
     if raw.lower() in {"/help", "/?"}:
-        return (
-            "help",
-            "Commands: /help, /reset, /status, /cost, /compact, /context, /doctor, /permissions, /approvals [status|on|off], /approve, /deny, /approve_next, /skills [list|show <name>|use <name>|clear], /plugins [list|show <name>], /model, /model-list, /model-set <provider>-<model>, /calls [status|on|off], /profile [show|set <name>], /mcp [servers|show <server>|tools <server>], /jobs [active|all] [limit], /job <id>, /paste\n"
-            "Multiline paste: paste normally (bracketed paste) or use /paste fallback, end with /end.",
-        )
+        return ("help", _TERMINAL_HELP_TEXT)
     handled, msg = handle_status_command(agent, raw)
     if handled:
         return "status", msg

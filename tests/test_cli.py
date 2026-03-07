@@ -331,7 +331,14 @@ class TestCliCommands:
         action, msg = _handle_repl_command(SimpleNamespace(), "/help")
 
         assert action == "help"
-        assert "/approvals [status|on|off]" in msg
+        assert "Core:" in msg
+        assert "/status" in msg
+        assert "/approvals" in msg
+        assert "/jobs" in msg
+        assert "Advanced:" in msg
+        assert "/cost" in msg
+        assert "/permissions" in msg
+        assert "Use / to browse commands." in msg
 
     def test_handle_repl_command_approvals_toggle_reports_requested_mode_without_state(self):
         action, msg = _handle_repl_command(SimpleNamespace(), "/approvals on")
@@ -571,6 +578,21 @@ class TestCliCommands:
         assert "research:abc" in msg
         assert "worker:sess-1" not in msg
 
+    def test_handle_repl_command_jobs_degrades_gracefully_on_store_error(self, monkeypatch):
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+        )
+        monkeypatch.setattr(
+            "archon.cli_repl_commands._collect_job_summaries",
+            lambda limit=10: (_ for _ in ()).throw(OSError("read-only file system")),
+        )
+
+        action, msg = _handle_repl_command(agent, "/jobs")
+
+        assert action == "jobs"
+        assert msg == "Jobs unavailable: read-only file system"
+
     def test_handle_repl_command_job_shows_summary(self, monkeypatch):
         agent = SimpleNamespace(
             llm=SimpleNamespace(model="test"),
@@ -706,6 +728,21 @@ class TestCliCommands:
         assert "job_status: completed" in msg
         assert "job_summary: Final report body" in msg
 
+    def test_handle_repl_command_job_degrades_gracefully_on_lookup_error(self, monkeypatch):
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+        )
+        monkeypatch.setattr(
+            "archon.cli_repl_commands._load_job_summary",
+            lambda job_ref: (_ for _ in ()).throw(OSError("read-only file system")),
+        )
+
+        action, msg = _handle_repl_command(agent, "/job worker:sess-1")
+
+        assert action == "job"
+        assert msg == "Job unavailable: read-only file system"
+
     def test_handle_repl_command_jobs_refreshes_research_job_from_client(self, monkeypatch):
         stale_job = SimpleNamespace(
             job_id="research:abc",
@@ -743,6 +780,30 @@ class TestCliCommands:
         assert load_calls == [("abc", client)]
         assert "completed" in msg
         assert "Final report body" in msg
+
+    def test_handle_repl_command_jobs_skips_deep_research_client_when_no_research_jobs(self, monkeypatch):
+        jobs = [
+            SimpleNamespace(
+                job_id="worker:sess-1",
+                kind="worker_session",
+                status="running",
+                summary="Still going",
+                last_update_at="2026-02-24T00:00:10Z",
+            ),
+        ]
+        monkeypatch.setattr("archon.cli_repl_commands._collect_job_summaries", lambda limit=10: jobs)
+        calls = []
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+            _create_google_deep_research_client=lambda: calls.append("created") or object(),
+        )
+
+        action, msg = _handle_repl_command(agent, "/jobs")
+
+        assert action == "jobs"
+        assert calls == []
+        assert "worker:sess-1" in msg
 
     def test_handle_repl_command_mcp_reports_enabled_counts_and_server_names(self):
         cfg = Config()
