@@ -53,11 +53,16 @@ SAFE_COMMANDS = {
     "sort", "uniq", "tr", "cut", "paste", "column",
     "tee", "xargs",
     "true", "false", "test",
+    "archon",
 }
 
 # Subcommand patterns that make a command safe
 SAFE_SUBCOMMANDS = {
     "pacman": {"-Q", "-Qi", "-Ql", "-Qs", "-Si", "-Ss", "-F"},
+    "yay": {"-Q", "-Qi", "-Ql", "-Qs", "-Si", "-Ss", "-F", "-G", "--show"},
+    "paru": {"-Q", "-Qi", "-Ql", "-Qs", "-Si", "-Ss", "-F", "-G"},
+    "pikaur": {"-Q", "-Qi", "-Ql", "-Qs", "-Si", "-Ss"},
+    "trizen": {"-Q", "-Qi", "-Ql", "-Qs", "-Si", "-Ss"},
     "systemctl": {"status", "is-active", "is-enabled", "list-units",
                   "list-unit-files", "show", "cat"},
     "git": {"log", "status", "diff", "show", "branch", "remote", "tag",
@@ -89,6 +94,8 @@ DANGEROUS_COMMANDS = {
 
 DANGEROUS_SUBCOMMANDS = {
     "pacman": {"-S", "-Sy", "-Syu", "-R", "-Rs", "-Rns", "-U"},
+    "yay": {"-S", "-Sy", "-Syu", "-R", "-Rs", "-Rns", "-U"},
+    "paru": {"-S", "-Sy", "-Syu", "-R", "-Rs", "-Rns", "-U"},
     "systemctl": {"start", "stop", "restart", "enable", "disable",
                   "mask", "unmask", "daemon-reload"},
     "git": {"push", "reset", "checkout", "rebase", "merge", "cherry-pick",
