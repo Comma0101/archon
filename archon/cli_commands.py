@@ -104,8 +104,49 @@ def build_model_set_subvalues(model_catalog: dict[str, tuple[str, ...]]) -> list
     return items
 
 
-def build_slash_subvalues(model_catalog: dict[str, tuple[str, ...]]) -> dict[str, list[tuple[str, str]]]:
+def _runtime_mcp_server_names(config) -> list[str]:
+    mcp = getattr(config, "mcp", None)
+    servers = getattr(mcp, "servers", None)
+    if not isinstance(servers, dict):
+        return []
+    names = {
+        str(name).strip().lower()
+        for name in servers.keys()
+        if str(name).strip()
+    }
+    return sorted(names)
+
+
+def build_slash_subvalues(
+    model_catalog_or_config,
+    runtime_config=None,
+) -> dict[str, list[tuple[str, str]]]:
     """Build slash command subvalue map."""
+    model_catalog = (
+        model_catalog_or_config
+        if isinstance(model_catalog_or_config, dict)
+        else MODEL_CATALOG
+    )
+    config = runtime_config if runtime_config is not None else (
+        None if isinstance(model_catalog_or_config, dict) else model_catalog_or_config
+    )
+    mcp_servers = _runtime_mcp_server_names(config)
+    plugin_values = [
+        ("list", "List native and MCP plugins"),
+        ("show calls", "Show one native plugin"),
+    ]
+    plugin_values.extend(
+        (f"show mcp:{server}", "Show one MCP plugin")
+        for server in mcp_servers
+    )
+    mcp_values: list[tuple[str, str]] = [
+        ("servers", "List configured MCP servers"),
+        ("show", "Show one MCP server config"),
+        ("tools", "List advertised tools for one server"),
+    ]
+    for server in mcp_servers:
+        mcp_values.append((f"show {server}", "Show one MCP server config"))
+        mcp_values.append((f"tools {server}", "List advertised tools for one server"))
     return {
         "/model-set": build_model_set_subvalues(model_catalog),
         "/approvals": [
@@ -129,14 +170,10 @@ def build_slash_subvalues(model_catalog: dict[str, tuple[str, ...]]) -> dict[str
             ("clear", "Clear active session skill"),
         ],
         "/plugins": [
-            ("list", "List native and MCP plugins"),
-            ("show calls", "Show one native plugin"),
-            ("show mcp:docs", "Show one MCP plugin"),
+            *plugin_values,
         ],
         "/mcp": [
-            ("servers", "List configured MCP servers"),
-            ("show docs", "Show one MCP server config"),
-            ("tools docs", "List advertised tools for one server"),
+            *mcp_values,
         ],
         "/jobs": [
             ("active", "Show unresolved jobs"),

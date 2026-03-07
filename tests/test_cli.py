@@ -11,6 +11,7 @@ from archon.cli import _is_paste_command, _collect_paste_message
 from archon.cli import (
     _make_readline_prompt,
     _build_model_set_subvalues,
+    _build_slash_subvalues,
     _SLASH_SUBVALUES,
     _format_turn_stats,
     _format_session_summary,
@@ -1023,6 +1024,64 @@ class TestCliCommands:
         plain = [re.sub(r"\x1b\[[0-9;]*m", "", text) for text, _err in outputs]
         assert any(text.startswith("Status:") for text in plain)
 
+    def test_chat_cmd_refreshes_slash_subvalues_from_agent_config(self):
+        seen = {}
+
+        class _Agent:
+            def __init__(self):
+                self.hooks = HookBus()
+                self.config = Config()
+                self.config.mcp.servers = {
+                    "exa": MCPServerConfig(enabled=True, mode="read_only", transport="stdio")
+                }
+                self.total_input_tokens = 0
+                self.total_output_tokens = 0
+                self.log_label = ""
+                self.policy_profile = "default"
+                self.on_thinking = None
+                self.on_tool_call = None
+
+            def run(self, _text):
+                raise AssertionError("agent.run should not be called for this test")
+
+            def reset(self):
+                return None
+
+        agent = _Agent()
+        inputs = iter(["quit"])
+        session_ids = iter(["sess-1"])
+
+        _chat_cmd(
+            make_agent_fn=lambda: agent,
+            make_telegram_adapter_fn=lambda _cfg: None,
+            new_session_id_fn=lambda: next(session_ids),
+            save_exchange_fn=lambda *_args: None,
+            refresh_slash_subvalues_fn=lambda config: seen.setdefault("config", config),
+            slash_completer_fn=lambda *_args: None,
+            pick_slash_command_fn=lambda: None,
+            is_bracketed_paste_start_fn=lambda _text: False,
+            collect_bracketed_paste_fn=lambda *_args, **_kwargs: "",
+            is_paste_command_fn=lambda _text: False,
+            collect_paste_message_fn=lambda *_args, **_kwargs: "",
+            handle_repl_command_fn=_handle_repl_command,
+            is_model_runtime_error_fn=lambda _err: False,
+            format_session_summary_fn=_format_session_summary,
+            format_chat_response_fn=lambda text: text,
+            format_turn_stats_fn=_format_turn_stats,
+            make_readline_prompt_fn=lambda label, _ansi: label,
+            spinner_cls=_FakeSpinner,
+            ansi_prompt_user="",
+            ansi_error="",
+            ansi_reset="",
+            click_echo_fn=lambda *_args, **_kwargs: None,
+            input_fn=lambda _prompt: next(inputs),
+            readline_module=_FakeReadline(),
+            time_time_fn=lambda: 0.0,
+            version="test",
+        )
+
+        assert seen["config"] is agent.config
+
 
 class _FakeReadline:
     def set_completer(self, _fn):
@@ -1683,8 +1742,7 @@ class TestSlashCompleter:
     def test_plugins_show_value_completion_from_line_buffer(self, monkeypatch):
         monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/plugins show ")
         assert _slash_completer("", 0) == "calls"
-        assert _slash_completer("", 1) == "mcp:docs"
-        assert _slash_completer("", 2) is None
+        assert _slash_completer("", 1) is None
 
     def test_mcp_subcommand_completion_from_line_buffer(self, monkeypatch):
         monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/mcp ")
@@ -1695,8 +1753,7 @@ class TestSlashCompleter:
 
     def test_mcp_show_value_completion_from_line_buffer(self, monkeypatch):
         monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/mcp show ")
-        assert _slash_completer("", 0) == "docs"
-        assert _slash_completer("", 1) is None
+        assert _slash_completer("", 0) is None
 
     def test_jobs_subcommand_completion_from_line_buffer(self, monkeypatch):
         monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/jobs ")
@@ -1732,6 +1789,52 @@ class TestPickSlashCommand:
         assert "openai-gpt-5.2" in names
         assert "anthropic-claude-sonnet-4-20250514" in names
 
+    def test_build_slash_subvalues_uses_live_mcp_server_names(self):
+        cfg = Config()
+        cfg.mcp.servers = {
+            "exa": MCPServerConfig(enabled=True, mode="read_only", transport="stdio")
+        }
+
+        values = _build_slash_subvalues(cfg)
+
+        assert ("show exa", "Show one MCP server config") in values["/mcp"]
+        assert ("tools exa", "List advertised tools for one server") in values["/mcp"]
+        assert all("docs" not in value for value, _desc in values["/mcp"])
+
+    def test_build_slash_subvalues_uses_live_mcp_plugin_names(self):
+        cfg = Config()
+        cfg.mcp.servers = {
+            "exa": MCPServerConfig(enabled=True, mode="read_only", transport="stdio")
+        }
+
+        values = _build_slash_subvalues(cfg)
+
+        assert ("show mcp:exa", "Show one MCP plugin") in values["/plugins"]
+        assert all("mcp:docs" not in value for value, _desc in values["/plugins"])
+
+    def test_plugins_show_value_completion_uses_live_runtime_names(self, monkeypatch):
+        cfg = Config()
+        cfg.mcp.servers = {
+            "exa": MCPServerConfig(enabled=True, mode="read_only", transport="stdio")
+        }
+        monkeypatch.setattr("archon.cli._SLASH_SUBVALUES", _build_slash_subvalues(cfg))
+        monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/plugins show ")
+
+        assert _slash_completer("", 0) == "calls"
+        assert _slash_completer("", 1) == "mcp:exa"
+        assert _slash_completer("", 2) is None
+
+    def test_mcp_show_value_completion_uses_live_runtime_names(self, monkeypatch):
+        cfg = Config()
+        cfg.mcp.servers = {
+            "exa": MCPServerConfig(enabled=True, mode="read_only", transport="stdio")
+        }
+        monkeypatch.setattr("archon.cli._SLASH_SUBVALUES", _build_slash_subvalues(cfg))
+        monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/mcp show ")
+
+        assert _slash_completer("", 0) == "exa"
+        assert _slash_completer("", 1) is None
+
     def test_slash_subvalues_map(self):
         assert "/model-set" in _SLASH_SUBVALUES
         assert "/approvals" in _SLASH_SUBVALUES
@@ -1748,7 +1851,7 @@ class TestPickSlashCommand:
         skill_values = [value for value, _desc in _SLASH_SUBVALUES["/skills"]]
         assert skill_values == ["list", "show coder", "use coder", "clear"]
         plugin_values = [value for value, _desc in _SLASH_SUBVALUES["/plugins"]]
-        assert plugin_values == ["list", "show calls", "show mcp:docs"]
+        assert plugin_values == ["list", "show calls"]
 
     def test_pick_slash_command_two_level(self, monkeypatch):
         picks = iter(["/calls", "on"])

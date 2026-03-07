@@ -105,7 +105,14 @@ def _build_model_set_subvalues() -> list[tuple[str, str]]:
     return _build_model_set_subvalues_impl(_MODEL_CATALOG)
 
 
-_SLASH_SUBVALUES: dict[str, list[tuple[str, str]]] = _build_slash_subvalues(_MODEL_CATALOG)
+def _refresh_slash_subvalues(config=None) -> dict[str, list[tuple[str, str]]]:
+    """Refresh slash sub-values from runtime config when available."""
+    global _SLASH_SUBVALUES
+    _SLASH_SUBVALUES = _build_slash_subvalues(_MODEL_CATALOG, config)
+    return _SLASH_SUBVALUES
+
+
+_SLASH_SUBVALUES: dict[str, list[tuple[str, str]]] = _refresh_slash_subvalues()
 
 
 def _slash_completer(text, state):
@@ -270,6 +277,7 @@ def chat():
         make_telegram_adapter_fn=_make_telegram_adapter,
         new_session_id_fn=new_session_id,
         save_exchange_fn=save_exchange,
+        refresh_slash_subvalues_fn=_refresh_slash_subvalues,
         slash_completer_fn=_slash_completer,
         pick_slash_command_fn=_pick_slash_command,
         is_bracketed_paste_start_fn=_is_bracketed_paste_start,

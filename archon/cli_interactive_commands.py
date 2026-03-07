@@ -35,6 +35,7 @@ def chat_cmd(
     make_telegram_adapter_fn,
     new_session_id_fn,
     save_exchange_fn,
+    refresh_slash_subvalues_fn=None,
     slash_completer_fn,
     pick_slash_command_fn,
     is_bracketed_paste_start_fn,
@@ -59,6 +60,8 @@ def chat_cmd(
 ) -> None:
     """Interactive chat REPL body."""
     agent = make_agent_fn()
+    if refresh_slash_subvalues_fn is not None:
+        refresh_slash_subvalues_fn(getattr(agent, "config", None))
     telegram_adapter = None
     session_id = new_session_id_fn()
 
