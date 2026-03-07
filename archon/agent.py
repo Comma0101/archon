@@ -14,8 +14,9 @@ from archon.control.orchestrator import orchestrate_response, orchestrate_stream
 from archon.control.policy import evaluate_mcp_policy, evaluate_tool_policy
 from archon.llm import LLMClient, LLMResponse
 from archon.tools import ToolRegistry
-from archon.prompt import build_skill_guidance, build_system_prompt
+from archon.prompt import build_runtime_capability_summary, build_skill_guidance, build_system_prompt
 from archon.config import Config
+from archon.security.redaction import redact_secret_like_text
 
 
 ANSI_RESET = "\033[0m"
@@ -94,6 +95,8 @@ class Agent:
         turn_system_prompt = _build_turn_system_prompt(
             self.system_prompt,
             user_message,
+            self.config,
+            profile_name=active_profile,
             skill_guidance=skill_guidance,
             compactions=pending_compactions,
         )
@@ -219,8 +222,8 @@ class Agent:
                     if self.on_tool_call:
                         self.on_tool_call(call.name, call.arguments)
                     result = self.tools.execute(call.name, call.arguments)
-                    _print_tool_result(result, prefix=log_prefix)
-                    result_text = str(result)
+                    result_text = redact_secret_like_text(str(result))
+                    _print_tool_result(result_text, prefix=log_prefix)
                     history_result = self._truncate_tool_result_for_history(call.name, result_text)
                     self._emit_hook(
                         "post_tool",
@@ -270,6 +273,8 @@ class Agent:
         turn_system_prompt = _build_turn_system_prompt(
             self.system_prompt,
             user_message,
+            self.config,
+            profile_name=active_profile,
             skill_guidance=skill_guidance,
             compactions=pending_compactions,
         )
@@ -406,8 +411,8 @@ class Agent:
                     if self.on_tool_call:
                         self.on_tool_call(call.name, call.arguments)
                     result = self.tools.execute(call.name, call.arguments)
-                    _print_tool_result(result, prefix=log_prefix)
-                    result_text = str(result)
+                    result_text = redact_secret_like_text(str(result))
+                    _print_tool_result(result_text, prefix=log_prefix)
                     history_result = self._truncate_tool_result_for_history(call.name, result_text)
                     self._emit_hook(
                         "post_tool",
@@ -672,23 +677,28 @@ def _print_tool_call(name: str, args: dict, prefix: str = ""):
     """Print tool call info to stderr."""
     pfx = f"{prefix} " if prefix else ""
     if name == "shell":
-        print(f"{ANSI_TOOL_CALL}{pfx}> {args.get('command', '')}{ANSI_RESET}", file=sys.stderr)
+        command = redact_secret_like_text(str(args.get("command", "") or ""))
+        print(f"{ANSI_TOOL_CALL}{pfx}> {command}{ANSI_RESET}", file=sys.stderr)
     elif name == "read_file":
+        path = redact_secret_like_text(str(args.get("path", "") or ""))
         print(
-            f"{ANSI_TOOL_CALL}{pfx}> read_file: {args.get('path', '')} "
+            f"{ANSI_TOOL_CALL}{pfx}> read_file: {path} "
             f"(offset={args.get('offset', 0)} limit={args.get('limit', 2000)}){ANSI_RESET}",
             file=sys.stderr,
         )
     elif name == "list_dir":
-        print(f"{ANSI_TOOL_CALL}{pfx}> {name}: {args.get('path', '')}{ANSI_RESET}", file=sys.stderr)
+        path = redact_secret_like_text(str(args.get("path", "") or ""))
+        print(f"{ANSI_TOOL_CALL}{pfx}> {name}: {path}{ANSI_RESET}", file=sys.stderr)
     elif name == "write_file":
+        path = redact_secret_like_text(str(args.get("path", "") or ""))
         print(
-            f"{ANSI_TOOL_CALL}{pfx}> write_file: {args.get('path', '')} "
+            f"{ANSI_TOOL_CALL}{pfx}> write_file: {path} "
             f"({len(args.get('content', ''))} chars){ANSI_RESET}",
             file=sys.stderr,
         )
     elif name == "edit_file":
-        print(f"{ANSI_TOOL_CALL}{pfx}> edit_file: {args.get('path', '')}{ANSI_RESET}", file=sys.stderr)
+        path = redact_secret_like_text(str(args.get("path", "") or ""))
+        print(f"{ANSI_TOOL_CALL}{pfx}> edit_file: {path}{ANSI_RESET}", file=sys.stderr)
     elif name == "delegate_code_task":
         worker = str(args.get("worker", "auto") or "auto")
         mode = str(args.get("mode", "implement") or "implement")
@@ -712,7 +722,8 @@ def _print_tool_call(name: str, args: dict, prefix: str = ""):
             file=sys.stderr,
         )
     elif name.startswith("memory_"):
-        print(f"{ANSI_TOOL_CALL}{pfx}> {name}: {args.get('path', '')}{ANSI_RESET}", file=sys.stderr)
+        path = redact_secret_like_text(str(args.get("path", "") or ""))
+        print(f"{ANSI_TOOL_CALL}{pfx}> {name}: {path}{ANSI_RESET}", file=sys.stderr)
     else:
         print(f"{ANSI_TOOL_CALL}{pfx}> {name}{ANSI_RESET}", file=sys.stderr)
 
@@ -930,11 +941,16 @@ def _maybe_capture_preference_memory(user_message: str) -> None:
 def _build_turn_system_prompt(
     base_prompt: str,
     user_message: str,
+    config: Config,
+    profile_name: str = "default",
     skill_guidance: str = "",
     compactions: list[dict] | None = None,
 ) -> str:
     """Augment the system prompt with best-effort indexed memory snippets for this turn."""
     lines = [base_prompt]
+    capability_summary = build_runtime_capability_summary(config, profile_name=profile_name)
+    if capability_summary:
+        lines.extend(["", capability_summary])
     if skill_guidance:
         lines.extend(["", skill_guidance])
 

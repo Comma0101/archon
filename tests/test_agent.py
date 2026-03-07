@@ -11,6 +11,7 @@ from archon.agent import Agent, _chat_with_retry, _print_tool_call, _print_tool_
 from archon.llm import LLMResponse, ToolCall
 from archon.tools import ToolRegistry
 from archon.config import Config, MCPServerConfig, ProfileConfig
+from archon.prompt import build_runtime_capability_summary
 
 
 def make_agent(responses: list[LLMResponse], stream_chunks: list | None = None) -> Agent:
@@ -404,6 +405,125 @@ class TestAgentLoop:
         assert isinstance(tool_result, str)
         assert len(tool_result) <= 300
         assert "archon truncated tool result" in tool_result
+
+    def test_tool_result_redacts_api_keys_before_terminal_render_and_history(self, monkeypatch, capsys):
+        responses = [
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(id="tc_secret", name="shell", arguments={"command": "print secret"})],
+                raw_content=[{"type": "tool_use", "id": "tc_secret", "name": "shell", "input": {"command": "print secret"}}],
+                input_tokens=20,
+                output_tokens=10,
+            ),
+            LLMResponse(
+                text="Done!",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "Done!"}],
+                input_tokens=30,
+                output_tokens=5,
+            ),
+        ]
+        agent = make_agent(responses)
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        agent.tools.register(
+            "shell",
+            "Return secret-like output",
+            {"properties": {"command": {"type": "string"}}, "required": ["command"]},
+            lambda command: f"OPENAI_API_KEY=sk-test-secret-value\ncmd={command}",
+        )
+
+        result = agent.run("print the secret")
+
+        assert result == "Done!"
+        err = capsys.readouterr().err
+        assert "sk-test-secret-value" not in err
+        assert "[REDACTED]" in err
+        tool_result = agent.history[2]["content"][0]["content"]
+        assert isinstance(tool_result, str)
+        assert "sk-test-secret-value" not in tool_result
+        assert "[REDACTED]" in tool_result
+
+    def test_tool_result_redacts_structured_secret_formats_in_run_and_stream(self, monkeypatch, capsys):
+        run_responses = [
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(id="tc_secret", name="shell", arguments={"command": "print json secret"})],
+                raw_content=[{"type": "tool_use", "id": "tc_secret", "name": "shell", "input": {"command": "print json secret"}}],
+                input_tokens=20,
+                output_tokens=10,
+            ),
+            LLMResponse(
+                text="Done!",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "Done!"}],
+                input_tokens=30,
+                output_tokens=5,
+            ),
+        ]
+        run_agent = make_agent(run_responses)
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        run_agent.tools.register(
+            "shell",
+            "Return structured secret-like output",
+            {"properties": {"command": {"type": "string"}}, "required": ["command"]},
+            lambda command: (
+                '{"OPENAI_API_KEY": "sk-test-json-secret", '
+                f"'api_key': 'sk-test-python-secret', 'command': '{command}'}}"
+            ),
+        )
+
+        result = run_agent.run("print the structured secret")
+
+        assert result == "Done!"
+        run_err = capsys.readouterr().err
+        assert "sk-test-json-secret" not in run_err
+        assert "sk-test-python-secret" not in run_err
+        run_tool_result = run_agent.history[2]["content"][0]["content"]
+        assert isinstance(run_tool_result, str)
+        assert "sk-test-json-secret" not in run_tool_result
+        assert "sk-test-python-secret" not in run_tool_result
+        assert run_tool_result.count("[REDACTED]") >= 2
+
+        stream_response = LLMResponse(
+            text=None,
+            tool_calls=[ToolCall(id="tc_stream", name="shell", arguments={"command": "print stream secret"})],
+            raw_content=[{"type": "tool_use", "id": "tc_stream", "name": "shell", "input": {"command": "print stream secret"}}],
+            input_tokens=25,
+            output_tokens=9,
+        )
+        final_response = LLMResponse(
+            text="stream done",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "stream done"}],
+            input_tokens=12,
+            output_tokens=4,
+        )
+        stream_agent = make_agent([], stream_chunks=[[stream_response], ["stream done", final_response]])
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        stream_agent.tools.register(
+            "shell",
+            "Return structured secret-like output",
+            {"properties": {"command": {"type": "string"}}, "required": ["command"]},
+            lambda command: (
+                '{"OPENAI_API_KEY": "sk-test-stream-secret", '
+                f"'api_key': 'sk-test-stream-python', 'command': '{command}'}}"
+            ),
+        )
+
+        chunks = list(stream_agent.run_stream("print the structured stream secret"))
+
+        assert chunks == ["stream done"]
+        stream_err = capsys.readouterr().err
+        assert "sk-test-stream-secret" not in stream_err
+        assert "sk-test-stream-python" not in stream_err
+        stream_tool_result = stream_agent.history[2]["content"][0]["content"]
+        assert isinstance(stream_tool_result, str)
+        assert "sk-test-stream-secret" not in stream_tool_result
+        assert "sk-test-stream-python" not in stream_tool_result
+        assert stream_tool_result.count("[REDACTED]") >= 2
 
     def test_hooks_emit_pre_and_post_tool_events_on_success(self, monkeypatch):
         responses = [
@@ -1253,8 +1373,44 @@ class TestAgentLoop:
         system_prompt_arg = agent.llm.chat.call_args[0][0]
         assert "[Skill Guidance]" in system_prompt_arg
         assert "researcher" in system_prompt_arg
-        assert "openai" in system_prompt_arg
-        assert "gpt-4o" in system_prompt_arg
+
+    def test_runtime_capability_summary_uses_effective_profile_and_allowed_mcp_servers(self):
+        config = Config()
+        config.profiles["research"] = ProfileConfig(skill="researcher")
+        config.mcp.servers = {
+            "exa": MCPServerConfig(enabled=True, mode="read_only", transport="stdio"),
+            "docs": MCPServerConfig(enabled=False, mode="read_only", transport="stdio"),
+        }
+
+        summary = build_runtime_capability_summary(config, profile_name="research")
+
+        assert "Active policy profile: research" in summary
+        assert "researcher" in summary
+        assert "Enabled MCP servers: none" in summary
+        assert "docs" not in summary
+        assert "Built-in skills" not in summary
+
+    def test_run_appends_runtime_capability_summary_to_turn_prompt(self, monkeypatch):
+        responses = [
+            LLMResponse(text="ok", tool_calls=[], raw_content=[{"type": "text", "text": "ok"}],
+                       input_tokens=10, output_tokens=5),
+        ]
+        agent = make_agent(responses)
+        agent.config.mcp.servers = {
+            "exa": MCPServerConfig(enabled=True, mode="read_only", transport="stdio"),
+        }
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+
+        result = agent.run("what can you do right now?")
+
+        assert result == "ok"
+        system_prompt_arg = agent.llm.chat.call_args[0][0]
+        assert "[Runtime Capabilities]" in system_prompt_arg
+        assert "Active policy profile: default" in system_prompt_arg
+        assert "exa" in system_prompt_arg
+        assert "Effective tool scope: all tools" in system_prompt_arg
+        assert "Active skill: none" in system_prompt_arg
 
     def test_run_stream_appends_skill_guidance_for_non_default_skill_profile(self, monkeypatch):
         final_resp = LLMResponse(
@@ -1469,6 +1625,18 @@ class TestAgentLoop:
         err = capsys.readouterr().err
         assert "\x1b[96m" in err  # bright cyan tool call
         assert "\x1b[37m" in err  # readable result lines (white/light gray)
+
+    def test_print_tool_call_redacts_secret_like_shell_arguments(self, capsys):
+        _print_tool_call(
+            "shell",
+            {"command": "echo '{\"OPENAI_API_KEY\": \"sk-shell-secret\"}' && echo API_KEY=sk-second-secret"},
+            prefix="[turn=t001]",
+        )
+
+        err = capsys.readouterr().err
+        assert "sk-shell-secret" not in err
+        assert "sk-second-secret" not in err
+        assert err.count("[REDACTED]") >= 2
 
     def test_run_trims_history_at_turn_start(self, monkeypatch):
         responses = [
