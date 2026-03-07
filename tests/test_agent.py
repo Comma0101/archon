@@ -1240,6 +1240,52 @@ class TestAgentLoop:
         assert started == []
         assert agent.llm.chat.call_count == 0
 
+    def test_disabled_deep_research_request_returns_explicit_unavailable_message(self, monkeypatch):
+        agent = make_agent([])
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        agent.config.orchestrator.enabled = True
+        agent.config.orchestrator.mode = "hybrid"
+        agent.config.research.google_deep_research.enabled = False
+        route_events = []
+        agent.hooks.register("orchestrator.route", route_events.append)
+
+        result = agent.run("Do a deep research on agentic AI and effective multi-agent systems")
+
+        assert result == (
+            "Native Deep Research unavailable: disabled in config. "
+            "Enable [research.google_deep_research].enabled to use research jobs."
+        )
+        assert agent.llm.chat.call_count == 0
+        assert route_events == []
+
+    def test_deep_research_startup_failure_returns_explicit_error_without_fallback(self, monkeypatch):
+        agent = make_agent([])
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        agent.config.orchestrator.enabled = True
+        agent.config.orchestrator.mode = "hybrid"
+        agent.config.research.google_deep_research.enabled = True
+        route_events = []
+        failed_events = []
+        agent.hooks.register("orchestrator.route", route_events.append)
+        agent.hooks.register("research.failed", failed_events.append)
+        monkeypatch.setattr(
+            agent,
+            "_create_google_deep_research_client",
+            lambda: (_ for _ in ()).throw(ValueError("Missing Google API key for Deep Research")),
+        )
+
+        result = agent.run("Do a deep research on agentic AI and effective multi-agent systems")
+
+        assert result == (
+            "Native Deep Research failed to start: "
+            "ValueError: Missing Google API key for Deep Research"
+        )
+        assert agent.llm.chat.call_count == 0
+        assert route_events == []
+        assert len(failed_events) == 1
+
     def test_researcher_skill_profile_allows_deep_research_job(self, monkeypatch, tmp_path):
         from archon.control.skills import ensure_session_skill_profile
 

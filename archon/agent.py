@@ -567,12 +567,15 @@ class Agent:
     ) -> str | None:
         if self._orchestrator_mode() != "hybrid":
             return None
-        deep_cfg = getattr(getattr(self.config, "research", None), "google_deep_research", None)
-        if deep_cfg is None or not bool(getattr(deep_cfg, "enabled", False)):
-            return None
         lane, reason = classify_route(user_message)
         if lane != "job" or reason != "deep_research_request":
             return None
+        deep_cfg = getattr(getattr(self.config, "research", None), "google_deep_research", None)
+        if deep_cfg is None or not bool(getattr(deep_cfg, "enabled", False)):
+            return (
+                "Native Deep Research unavailable: disabled in config. "
+                "Enable [research.google_deep_research].enabled to use research jobs."
+            )
         policy_decision = evaluate_tool_policy(
             config=self.config,
             tool_name="deep_research",
@@ -606,7 +609,10 @@ class Agent:
                     "error": str(e),
                 },
             )
-            return None
+            return (
+                "Native Deep Research failed to start: "
+                f"{type(e).__name__}: {e}"
+            )
         self._emit_hook(
             "orchestrator.route",
             build_route_payload(
