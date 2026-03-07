@@ -139,15 +139,22 @@ class Agent:
         _recent_tool_calls: list[tuple[str, dict]] = []
 
         for iteration in range(self.max_iterations):
+            if iteration > 0:
+                iteration_hint = f"\n\n[Iteration {iteration + 1}/{self.max_iterations}. Be targeted — don't repeat previous approaches.]"
+                iter_system_prompt = turn_system_prompt + iteration_hint
+            else:
+                iter_system_prompt = turn_system_prompt
+
             if self.on_thinking:
                 self.on_thinking()
+            _iter_sp = iter_system_prompt  # capture for lambda closure
             response = orchestrate_response(
                 mode=self._orchestrator_mode(),
                 turn_id=turn_id,
                 user_message=user_message,
                 run_legacy=lambda: _chat_with_retry(
                     self.llm,
-                    turn_system_prompt,
+                    _iter_sp,
                     self.history,
                     self.tools.get_schemas(),
                     max_attempts=self.llm_retry_attempts,
@@ -339,17 +346,24 @@ class Agent:
         _recent_tool_calls: list[tuple[str, dict]] = []
 
         for iteration in range(self.max_iterations):
+            if iteration > 0:
+                iteration_hint = f"\n\n[Iteration {iteration + 1}/{self.max_iterations}. Be targeted — don't repeat previous approaches.]"
+                iter_system_prompt = turn_system_prompt + iteration_hint
+            else:
+                iter_system_prompt = turn_system_prompt
+
             if self.on_thinking:
                 self.on_thinking()
 
             # Try streaming (with the same lightweight transient retry policy used by run()).
+            _iter_sp = iter_system_prompt  # capture for lambda closure
             collected_text, response = orchestrate_stream_response(
                 mode=self._orchestrator_mode(),
                 turn_id=turn_id,
                 user_message=user_message,
                 run_legacy_stream=lambda: _chat_stream_collect_with_retry(
                     self.llm,
-                    turn_system_prompt,
+                    _iter_sp,
                     self.history,
                     self.tools.get_schemas(),
                     max_attempts=self.llm_retry_attempts,
