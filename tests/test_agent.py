@@ -1168,168 +1168,38 @@ class TestAgentLoop:
             reason="simple_chat",
         )
 
-    def test_broad_research_request_starts_google_deep_research_job_when_enabled(self, monkeypatch, tmp_path):
-        agent = make_agent([])
+    def test_deep_research_goes_through_agent_loop_not_prerouted(self, monkeypatch):
+        """Deep research requests should go through normal agent loop, not be pre-routed."""
+        responses = [
+            LLMResponse(
+                text="I'd be happy to help with deep research. What topic would you like me to investigate?",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "I'd be happy to help."}],
+                input_tokens=10,
+                output_tokens=5,
+            )
+        ]
+        agent = make_agent(responses)
         monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
         monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
-        monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path / "research" / "jobs")
         agent.config.orchestrator.enabled = True
         agent.config.orchestrator.mode = "hybrid"
         agent.config.research.google_deep_research.enabled = True
-        started = []
 
-        class _FakeDeepResearchClient:
-            def start_research(self, prompt: str, *, tools=None):
-                started.append((prompt, tools))
-                return SimpleNamespace(
-                    interaction_id="int-123",
-                    status="running",
-                    output_text="",
-                )
+        result = agent.run("yo whats up, can you do deep research")
 
-        monkeypatch.setattr(agent, "_create_google_deep_research_client", lambda: _FakeDeepResearchClient())
-        route_events = []
-        agent.hooks.register("orchestrator.route", route_events.append)
-
-        result = agent.run("Deeply research the LA restaurant market and synthesize competitors")
-
-        assert "Research job started: research:int-123" in result
-        assert "/jobs" in result
-        assert started == [("Deeply research the LA restaurant market and synthesize competitors", None)]
-        assert agent.llm.chat.call_count == 0
-        assert route_events[0].payload == expected_route_payload(
-            turn_id="t001",
-            mode="hybrid",
-            path="hybrid_deep_research_job_v0",
-            lane="job",
-            reason="deep_research_request",
-        )
-
-    def test_deep_research_request_respects_policy_profile(self, monkeypatch, tmp_path):
-        agent = make_agent([])
-        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
-        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
-        monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path / "research" / "jobs")
-        agent.config.orchestrator.enabled = True
-        agent.config.orchestrator.mode = "hybrid"
-        agent.config.orchestrator.shadow_eval = False
-        agent.config.research.google_deep_research.enabled = True
-        agent.config.profiles = {
-            "default": ProfileConfig(),
-            "safe": ProfileConfig(allowed_tools=["memory_read"], max_mode="implement"),
-        }
-        started = []
-
-        class _FakeDeepResearchClient:
-            def start_research(self, prompt: str, *, tools=None):
-                started.append((prompt, tools))
-                return SimpleNamespace(
-                    interaction_id="int-123",
-                    status="running",
-                    output_text="",
-                )
-
-        monkeypatch.setattr(agent, "_create_google_deep_research_client", lambda: _FakeDeepResearchClient())
-
-        result = agent.run(
-            "Deeply research the LA restaurant market and synthesize competitors",
-            policy_profile="safe",
-        )
-
-        assert result == "Error: Policy denied research job 'deep_research' (tool_not_allowed)"
-        assert started == []
-        assert agent.llm.chat.call_count == 0
-
-    def test_disabled_deep_research_request_returns_explicit_unavailable_message(self, monkeypatch):
-        agent = make_agent([])
-        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
-        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
-        agent.config.orchestrator.enabled = True
-        agent.config.orchestrator.mode = "hybrid"
-        agent.config.research.google_deep_research.enabled = False
-        route_events = []
-        agent.hooks.register("orchestrator.route", route_events.append)
-
-        # Capability check should stay on fast path and get normal chat response
-        agent.llm.chat = MagicMock(return_value=LLMResponse(
-            text="Yes, I can do deep research.",
-            tool_calls=[],
-            raw_content=[{"type": "text", "text": "Yes"}],
-            input_tokens=10,
-            output_tokens=5,
-        ))
-        result_meta = agent.run("can you do deep research")
-        assert result_meta == "Yes, I can do deep research."
-        assert len(route_events) == 1
-        assert route_events[0].payload["path"] == "hybrid_planner_v0"
-        route_events.clear()
-
-        # Actual research job should hit the deep research route
-        result = agent.run("Do a deep research on agentic AI and effective multi-agent systems")
-
-        assert result == (
-            "Native Deep Research unavailable: disabled in config. "
-            "Enable [research.google_deep_research].enabled to use research jobs."
-        )
+        # LLM should be called (not bypassed by pre-routing)
         assert agent.llm.chat.call_count == 1
-        assert route_events == []
+        assert "help" in result.lower() or "research" in result.lower()
 
-    def test_deep_research_startup_failure_returns_explicit_error_without_fallback(self, monkeypatch):
-        agent = make_agent([])
-        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
-        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
-        agent.config.orchestrator.enabled = True
-        agent.config.orchestrator.mode = "hybrid"
-        agent.config.research.google_deep_research.enabled = True
-        route_events = []
-        failed_events = []
-        agent.hooks.register("orchestrator.route", route_events.append)
-        agent.hooks.register("research.failed", failed_events.append)
-        monkeypatch.setattr(
-            agent,
-            "_create_google_deep_research_client",
-            lambda: (_ for _ in ()).throw(ValueError("Missing Google API key for Deep Research")),
-        )
-
-        result = agent.run("Do a deep research on agentic AI and effective multi-agent systems")
-
-        assert result == (
-            "Native Deep Research failed to start: "
-            "ValueError: Missing Google API key for Deep Research"
-        )
-        assert agent.llm.chat.call_count == 0
-        assert route_events == []
-        assert len(failed_events) == 1
-
-    def test_researcher_skill_profile_allows_deep_research_job(self, monkeypatch, tmp_path):
-        from archon.control.skills import ensure_session_skill_profile
-
-        agent = make_agent([])
-        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
-        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
-        monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path / "research" / "jobs")
-        agent.config.orchestrator.enabled = True
-        agent.config.orchestrator.mode = "hybrid"
-        agent.config.orchestrator.shadow_eval = False
-        agent.config.research.google_deep_research.enabled = True
-        agent.policy_profile = ensure_session_skill_profile(agent.config, skill_name="researcher")
-        started = []
-
-        class _FakeDeepResearchClient:
-            def start_research(self, prompt: str, *, tools=None):
-                started.append((prompt, tools))
-                return SimpleNamespace(
-                    interaction_id="int-123",
-                    status="running",
-                    output_text="",
-                )
-
-        monkeypatch.setattr(agent, "_create_google_deep_research_client", lambda: _FakeDeepResearchClient())
-
-        result = agent.run("Deeply research the LA restaurant market and synthesize competitors")
-
-        assert "Research job started: research:int-123" in result
-        assert started == [("Deeply research the LA restaurant market and synthesize competitors", None)]
+    def test_deep_research_tool_registered(self):
+        """deep_research should be available as a tool the LLM can call."""
+        from archon.tooling.content_tools import register_content_tools
+        from unittest.mock import MagicMock
+        registry = MagicMock()
+        register_content_tools(registry)
+        tool_names = [call[0][0] for call in registry.register.call_args_list]
+        assert "deep_research" in tool_names
 
     def test_simple_research_question_stays_on_fast_path(self):
         lane, reason = orchestrator_module._classify_route("What is Exa MCP?")

@@ -1,4 +1,6 @@
-"""News and web retrieval tool registrations."""
+"""News, web retrieval, and deep research tool registrations."""
+
+import os
 
 from archon.config import ensure_dirs, load_config
 from archon.news.runner import get_or_build_news_digest, send_digest_to_telegram
@@ -165,4 +167,78 @@ def register_content_tools(registry) -> None:
             "required": ["url"],
         },
         web_read_tool,
+    )
+
+    # 15. deep_research
+    def deep_research_tool(query: str) -> str:
+        """Start a Google Deep Research job for comprehensive analysis."""
+        ensure_dirs()
+        cfg = load_config()
+        deep_cfg = getattr(getattr(cfg, "research", None), "google_deep_research", None)
+        if deep_cfg is None or not bool(getattr(deep_cfg, "enabled", False)):
+            return (
+                "Deep Research unavailable: disabled in config. "
+                "Enable [research.google_deep_research].enabled to use."
+            )
+
+        from archon.research.google_deep_research import GoogleDeepResearchClient
+        from archon.research.models import ResearchJobRecord
+        from archon.research.store import save_research_job
+        from datetime import datetime, timezone
+
+        # Resolve API key
+        llm_cfg = getattr(cfg, "llm", None)
+        api_key = ""
+        if str(getattr(llm_cfg, "provider", "") or "").strip().lower() == "google":
+            api_key = str(getattr(llm_cfg, "api_key", "") or "").strip()
+        if not api_key and str(getattr(llm_cfg, "fallback_provider", "") or "").strip().lower() == "google":
+            api_key = str(getattr(llm_cfg, "fallback_api_key", "") or "").strip()
+        if not api_key:
+            api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        if not api_key:
+            return "Deep Research unavailable: no GEMINI_API_KEY configured."
+
+        agent_name = str(getattr(deep_cfg, "agent", "") or "").strip()
+        try:
+            client = GoogleDeepResearchClient.from_api_key(api_key, agent=agent_name)
+            interaction = client.start_research(query)
+        except Exception as e:
+            return f"Deep Research failed to start: {type(e).__name__}: {e}"
+
+        timestamp = datetime.now(timezone.utc).isoformat()
+        record = save_research_job(
+            ResearchJobRecord(
+                interaction_id=str(getattr(interaction, "interaction_id", "") or "").strip(),
+                status=str(getattr(interaction, "status", "") or "running").strip() or "running",
+                prompt=query,
+                agent=agent_name,
+                created_at=timestamp,
+                updated_at=timestamp,
+                summary="Research job started",
+                output_text=str(getattr(interaction, "output_text", "") or ""),
+                error="",
+            )
+        )
+        job_id = f"research:{record.interaction_id}"
+        return (
+            f"Research job started: {job_id}\n"
+            f"Use /jobs or /job {job_id} to inspect progress."
+        )
+
+    registry.register(
+        "deep_research",
+        "Start a Google Deep Research job for comprehensive, multi-source analysis of a topic. "
+        "Use this when the user explicitly asks for deep research, thorough investigation, "
+        "or comprehensive analysis that goes beyond a simple web search. "
+        "Do NOT use this for casual questions — only when the user wants in-depth research.",
+        {
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The research query/topic to investigate in depth",
+                },
+            },
+            "required": ["query"],
+        },
+        deep_research_tool,
     )

@@ -117,14 +117,6 @@ class Agent:
         self._repair_history_tool_sequence()
         self.history.append({"role": "user", "content": user_message})
         _maybe_capture_preference_memory(user_message)
-        deep_research_message = self._maybe_start_deep_research_job(
-            turn_id,
-            user_message,
-            active_profile=active_profile,
-        )
-        if deep_research_message is not None:
-            self.history.append({"role": "assistant", "content": deep_research_message})
-            return deep_research_message
         skill_guidance = build_skill_guidance(self.config, profile_name=active_profile)
         pending_compactions = self._consume_pending_compactions()
         turn_system_prompt = _build_turn_system_prompt(
@@ -323,15 +315,6 @@ class Agent:
         self._repair_history_tool_sequence()
         self.history.append({"role": "user", "content": user_message})
         _maybe_capture_preference_memory(user_message)
-        deep_research_message = self._maybe_start_deep_research_job(
-            turn_id,
-            user_message,
-            active_profile=active_profile,
-        )
-        if deep_research_message is not None:
-            self.history.append({"role": "assistant", "content": deep_research_message})
-            yield deep_research_message
-            return
         skill_guidance = build_skill_guidance(self.config, profile_name=active_profile)
         pending_compactions = self._consume_pending_compactions()
         turn_system_prompt = _build_turn_system_prompt(
