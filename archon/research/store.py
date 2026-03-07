@@ -61,6 +61,20 @@ def list_research_jobs(limit: int = 20, *, refresh_client=None) -> list[Research
     return jobs
 
 
+def cancel_research_job(interaction_id: str, reason: str = "Cancelled by user") -> ResearchJobRecord | None:
+    """Cancel an in-progress research job by updating its status."""
+    record = load_research_job(interaction_id)
+    if record is None:
+        return None
+    if record.status not in ("in_progress", "running", "pending"):
+        return record  # Already terminal
+    record.status = "cancelled"
+    record.error = reason
+    record.updated_at = _now_iso()
+    save_research_job(record)
+    return record
+
+
 def load_research_job_summary(interaction_id: str, *, refresh_client=None) -> JobSummary | None:
     record = load_research_job(interaction_id, refresh_client=refresh_client)
     if record is None:

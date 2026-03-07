@@ -16,7 +16,7 @@ from archon.control.skills import (
     list_builtin_skills,
 )
 from archon.mcp import MCPClient
-from archon.research.store import list_research_job_summaries, load_research_job_summary
+from archon.research.store import cancel_research_job, list_research_job_summaries, load_research_job_summary
 from archon.workers.session_store import list_worker_job_summaries, load_worker_job_summary
 
 _NATIVE_PLUGIN_SPECS = (
@@ -856,7 +856,25 @@ def handle_job_command(agent, text: str) -> tuple[bool, str]:
     if len(parts) < 2 or not parts[1].strip():
         return True, "Usage: /job <id>"
 
-    job_ref = parts[1].strip()
+    sub = parts[1].strip()
+
+    # /job cancel <id>
+    if sub.lower() == "cancel":
+        cancel_parts = raw.split(maxsplit=2)
+        if len(cancel_parts) < 3 or not cancel_parts[2].strip():
+            return True, "Usage: /job cancel <research:id>"
+        cancel_ref = cancel_parts[2].strip()
+        if not cancel_ref.startswith("research:"):
+            return True, "Only research jobs can be cancelled (use research:<id>)."
+        interaction_id = cancel_ref.split(":", 1)[1]
+        result = cancel_research_job(interaction_id, reason="Cancelled by user")
+        if result is None:
+            return True, f"Job not found: {cancel_ref}"
+        if result.status != "cancelled":
+            return True, f"Job already in terminal state: {result.status}"
+        return True, f"Cancelled job {cancel_ref}."
+
+    job_ref = sub
     try:
         refresh_client = None
         if job_ref.startswith("research:"):
