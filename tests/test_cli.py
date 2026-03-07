@@ -1024,6 +1024,65 @@ class TestCliCommands:
         plain = [re.sub(r"\x1b\[[0-9;]*m", "", text) for text, _err in outputs]
         assert any(text.startswith("Status:") for text in plain)
 
+    def test_chat_cmd_echoes_picker_selected_slash_command(self):
+        class _FailIfRunAgent:
+            def __init__(self):
+                cfg = Config()
+                cfg.llm.provider = "openai"
+                cfg.llm.model = "gpt-5-mini"
+                cfg.llm.api_key = "test-key"
+                self.hooks = HookBus()
+                self.config = cfg
+                self.total_input_tokens = 0
+                self.total_output_tokens = 0
+                self.log_label = ""
+                self.policy_profile = "default"
+                self.on_thinking = None
+                self.on_tool_call = None
+
+            def run(self, _text):
+                raise AssertionError("agent.run should not be called for /status")
+
+            def reset(self):
+                return None
+
+        outputs = []
+        agent = _FailIfRunAgent()
+        inputs = iter(["/", "quit"])
+        session_ids = iter(["sess-1", "sess-2"])
+
+        _chat_cmd(
+            make_agent_fn=lambda: agent,
+            make_telegram_adapter_fn=lambda _cfg: None,
+            new_session_id_fn=lambda: next(session_ids),
+            save_exchange_fn=lambda *_args: None,
+            slash_completer_fn=lambda *_args: None,
+            pick_slash_command_fn=lambda: "/status",
+            is_bracketed_paste_start_fn=lambda _text: False,
+            collect_bracketed_paste_fn=lambda *_args, **_kwargs: "",
+            is_paste_command_fn=lambda _text: False,
+            collect_paste_message_fn=lambda *_args, **_kwargs: "",
+            handle_repl_command_fn=_handle_repl_command,
+            is_model_runtime_error_fn=lambda _err: False,
+            format_session_summary_fn=_format_session_summary,
+            format_chat_response_fn=lambda text: text,
+            format_turn_stats_fn=_format_turn_stats,
+            make_readline_prompt_fn=lambda label, _ansi: label,
+            spinner_cls=_FakeSpinner,
+            ansi_prompt_user="",
+            ansi_error="",
+            ansi_reset="",
+            click_echo_fn=lambda text="", err=False: outputs.append((text, err)),
+            input_fn=lambda _prompt: next(inputs),
+            readline_module=_FakeReadline(),
+            time_time_fn=lambda: 0.0,
+            version="test",
+        )
+
+        plain = [re.sub(r"\x1b\[[0-9;]*m", "", text) for text, _err in outputs]
+        assert "you> /status" in plain
+        assert any(text.startswith("Status:") for text in plain)
+
     def test_chat_cmd_refreshes_slash_subvalues_from_agent_config(self):
         import archon.cli as cli_module
 

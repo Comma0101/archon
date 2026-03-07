@@ -286,6 +286,7 @@ def chat_cmd(
                 picked = pick_slash_command_fn()
                 if picked is None:
                     continue
+                click_echo_fn(f"you> {picked}")
                 user_input = picked
             if is_paste_command_fn(user_input):
                 click_echo_fn("Paste mode: paste your message, then end with /end (or .end).")
