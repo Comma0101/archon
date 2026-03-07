@@ -89,6 +89,44 @@ def list_research_job_summaries(limit: int = 20, *, refresh_client=None) -> list
     ]
 
 
+def poll_research_job(interaction_id: str) -> ResearchJobRecord | None:
+    """Poll Google API for latest status and update stored record."""
+    record = load_research_job(interaction_id)
+    if record is None or record.status in ("completed", "cancelled", "error"):
+        return record  # Terminal states don't need polling
+    # Try polling via the API
+    try:
+        from archon.research.google_deep_research import GoogleDeepResearchClient
+        import os
+
+        api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY", "")
+        if not api_key:
+            return record
+        client = GoogleDeepResearchClient.from_api_key(api_key)
+        return _refresh_research_job(record, refresh_client=client)
+    except Exception:
+        pass  # Polling failure is non-fatal
+    return record
+
+
+def purge_completed_jobs(statuses: list[str] | None = None) -> int:
+    """Remove research jobs with given statuses. Returns count removed."""
+    if statuses is None:
+        statuses = ["cancelled", "error"]
+    removed = 0
+    if not RESEARCH_JOBS_DIR.exists():
+        return 0
+    for f in RESEARCH_JOBS_DIR.glob("*.json"):
+        try:
+            record = load_research_job(f.stem)
+            if record and record.status in statuses:
+                f.unlink()
+                removed += 1
+        except Exception:
+            continue
+    return removed
+
+
 def research_job_path(interaction_id: str) -> Path:
     return RESEARCH_JOBS_DIR / f"{interaction_id}.json"
 

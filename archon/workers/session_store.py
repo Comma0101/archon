@@ -491,6 +491,34 @@ def list_worker_job_summaries(limit: int = 20) -> list[JobSummary]:
     return normalized
 
 
+def purge_stale_sessions(statuses: list[str] | None = None) -> int:
+    """Remove worker sessions with given statuses. Returns count removed."""
+    if statuses is None:
+        statuses = ["error", "cancelled"]
+    removed = 0
+    with _STORE_LOCK:
+        if not WORKER_SESSIONS_DIR.exists():
+            return 0
+        for path in list(WORKER_SESSIONS_DIR.glob("*.json")):
+            try:
+                data = json.loads(path.read_text())
+            except Exception:
+                continue
+            record_data = data.get("record", data)
+            if not isinstance(record_data, dict):
+                continue
+            status = str(record_data.get("status", "")).strip().lower()
+            if status in statuses:
+                session_id = path.stem
+                path.unlink(missing_ok=True)
+                # Also remove associated event log
+                event_path = WORKER_EVENTS_DIR / f"{session_id}.jsonl"
+                if event_path.exists():
+                    event_path.unlink(missing_ok=True)
+                removed += 1
+    return removed
+
+
 def _write_session_record(
     record: WorkerSessionRecord,
     task: WorkerTask,

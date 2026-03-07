@@ -16,8 +16,8 @@ from archon.control.skills import (
     list_builtin_skills,
 )
 from archon.mcp import MCPClient
-from archon.research.store import cancel_research_job, list_research_job_summaries, load_research_job_summary
-from archon.workers.session_store import list_worker_job_summaries, load_worker_job_summary
+from archon.research.store import cancel_research_job, list_research_job_summaries, load_research_job_summary, poll_research_job, purge_completed_jobs
+from archon.workers.session_store import list_worker_job_summaries, load_worker_job_summary, purge_stale_sessions
 
 _NATIVE_PLUGIN_SPECS = (
     ("calls", "config.calls", lambda cfg: bool(getattr(getattr(cfg, "calls", None), "enabled", False))),
@@ -817,9 +817,24 @@ def handle_jobs_command(agent, text: str) -> tuple[bool, str]:
     if not parts or parts[0].lower() != "/jobs":
         return False, ""
 
+    # /jobs purge [statuses...]
+    if len(parts) >= 2 and parts[1].lower() == "purge":
+        statuses = [s.lower() for s in parts[2:]] if len(parts) > 2 else None
+        research_removed = purge_completed_jobs(statuses=statuses)
+        worker_removed = purge_stale_sessions(statuses=statuses)
+        total = research_removed + worker_removed
+        if total == 0:
+            return True, "No jobs to purge."
+        details = []
+        if research_removed:
+            details.append(f"{research_removed} research")
+        if worker_removed:
+            details.append(f"{worker_removed} worker")
+        return True, f"Purged {total} jobs ({', '.join(details)})."
+
     parsed = _parse_jobs_args(parts)
     if parsed is None:
-        return True, "Usage: /jobs [active|all] [limit]"
+        return True, "Usage: /jobs [active|all|purge] [limit]"
     view, limit = parsed
 
     scan_limit = max(limit, 100) if view == "active" else limit
@@ -867,11 +882,19 @@ def handle_job_command(agent, text: str) -> tuple[bool, str]:
 
     job_ref = sub
     try:
-        refresh_client = None
         if job_ref.startswith("research:"):
+            interaction_id = job_ref.split(":", 1)[1]
             refresh_client = _make_deep_research_refresh_client(agent)
-        if refresh_client is not None and job_ref.startswith("research:"):
-            job = load_research_job_summary(job_ref.split(":", 1)[1], refresh_client=refresh_client)
+            if refresh_client is not None:
+                job = load_research_job_summary(interaction_id, refresh_client=refresh_client)
+            else:
+                # Fall back to direct API polling when agent client unavailable
+                record = poll_research_job(interaction_id)
+                if record is not None:
+                    from archon.control.jobs import summarize_research_job
+                    job = summarize_research_job(record)
+                else:
+                    job = None
         else:
             job = _load_job_summary(job_ref)
     except OSError as e:
