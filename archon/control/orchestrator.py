@@ -278,11 +278,13 @@ def is_deep_research_request(user_message: str) -> bool:
     _trigger_phrases = ("deep research", "deeply research", "research this deeply")
     matched_trigger = next((p for p in _trigger_phrases if p in text_l), None)
     if matched_trigger:
-        remainder = text_l.replace(matched_trigger, "", 1).strip()
+        # Only consider text AFTER the trigger phrase as potential topic
+        trigger_pos = text_l.index(matched_trigger)
+        after_trigger = text_l[trigger_pos + len(matched_trigger):].strip()
         # Strip common filler words that don't constitute a topic
         filler = {"on", "about", "into", "for", "the", "a", "an", "of",
                   "can", "you", "do", "please", "me", "my", "i", "we"}
-        topic_words = [w for w in remainder.split() if len(w) >= 3 and w not in filler]
+        topic_words = [w for w in after_trigger.split() if len(w) >= 3 and w not in filler]
         if len(topic_words) < 2:
             return False
         return True

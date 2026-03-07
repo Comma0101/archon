@@ -20,3 +20,15 @@ def test_short_deep_research_not_routed():
     """Very short prompts with 'deep research' should not trigger — likely a question."""
     assert is_deep_research_request("deep research please") is False
     assert is_deep_research_request("do a deep research") is False
+
+
+def test_preamble_before_deep_research_not_counted_as_topic():
+    """Conversational preamble before 'deep research' should not count as topic."""
+    assert is_deep_research_request("yo whats up, can you do a deep research") is False
+    assert is_deep_research_request("hey there do deep research") is False
+    assert is_deep_research_request("hello can you do deep research for me") is False
+
+
+def test_preamble_with_topic_after_still_routes():
+    """Preamble is fine as long as there's a real topic AFTER the trigger."""
+    assert is_deep_research_request("hey can you do deep research on quantum computing applications") is True
