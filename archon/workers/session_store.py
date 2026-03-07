@@ -345,6 +345,36 @@ def reconcile_worker_session(
         return record
 
 
+def _maybe_reconcile_stale_reserved_session(record: WorkerSessionRecord | None) -> WorkerSessionRecord | None:
+    if record is None:
+        return None
+    if str(record.status or "").strip().lower() not in {"running", "starting"}:
+        return record
+    if str(record.summary or "").strip() != "Worker session reserved":
+        return record
+    try:
+        from archon.workers.runtime import get_background_run
+    except Exception:
+        get_background_run = None
+    active_run = None
+    if callable(get_background_run):
+        try:
+            active_run = get_background_run(record.session_id)
+        except Exception:
+            active_run = None
+    if active_run is not None and str(getattr(active_run, "state", "") or "").strip().lower() in {
+        "starting",
+        "running",
+    }:
+        return record
+    reconciled = reconcile_worker_session(
+        record.session_id,
+        reason="Worker session never started",
+        terminal_status="error",
+    )
+    return reconciled or record
+
+
 def load_worker_session(session_id: str) -> WorkerSessionRecord | None:
     with _STORE_LOCK:
         path = WORKER_SESSIONS_DIR / f"{session_id}.json"
@@ -376,7 +406,7 @@ def load_worker_result(session_id: str) -> WorkerResult | None:
 
 
 def load_worker_job_summary(session_id: str) -> JobSummary | None:
-    record = load_worker_session(session_id)
+    record = _maybe_reconcile_stale_reserved_session(load_worker_session(session_id))
     if record is None:
         return None
     return summarize_worker_session(record)
@@ -455,7 +485,10 @@ def list_worker_sessions(limit: int = 20) -> list[WorkerSessionRecord]:
 
 
 def list_worker_job_summaries(limit: int = 20) -> list[JobSummary]:
-    return [summarize_worker_session(record) for record in list_worker_sessions(limit=limit)]
+    records = [_maybe_reconcile_stale_reserved_session(record) for record in list_worker_sessions(limit=limit)]
+    normalized = [summarize_worker_session(record) for record in records if record is not None]
+    normalized.sort(key=lambda job: (job.last_update_at, job.job_id), reverse=True)
+    return normalized
 
 
 def _write_session_record(

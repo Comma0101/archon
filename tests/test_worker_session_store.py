@@ -13,8 +13,10 @@ from archon.workers.session_store import (
     cancel_worker_session,
     decide_worker_approval,
     format_worker_session_list,
+    list_worker_job_summaries,
     list_worker_approvals,
     load_worker_events,
+    load_worker_job_summary,
     load_worker_result,
     load_worker_session,
     load_worker_task,
@@ -235,6 +237,50 @@ class TestWorkerSessionStore:
 
         events = load_worker_events(rec.session_id, limit=0)
         assert any(e.kind == "session.reconciled" for e in events)
+
+    def test_load_worker_job_summary_auto_reconciles_stale_reserved_session(self, monkeypatch, tmp_path):
+        sessions_dir = tmp_path / "workers" / "sessions"
+        events_dir = tmp_path / "workers" / "events"
+        monkeypatch.setattr("archon.workers.session_store.WORKER_SESSIONS_DIR", sessions_dir)
+        monkeypatch.setattr("archon.workers.session_store.WORKER_EVENTS_DIR", events_dir)
+        monkeypatch.setattr("archon.workers.runtime.get_background_run", lambda session_id: None)
+
+        task = WorkerTask(task="Deep analysis", worker="opencode", mode="review", repo_path=str(tmp_path))
+        reserved = session_store.reserve_worker_session(task, requested_worker="opencode")
+
+        job = load_worker_job_summary(reserved.session_id)
+
+        assert job is not None
+        assert job.job_id == f"worker:{reserved.session_id}"
+        assert job.status == "error"
+        assert job.summary == "Worker session never started"
+
+        record = load_worker_session(reserved.session_id)
+        assert record is not None
+        assert record.status == "error"
+        assert record.summary == "Worker session never started"
+        assert record.completed_at
+
+    def test_list_worker_job_summaries_preserves_live_reserved_runtime(self, monkeypatch, tmp_path):
+        sessions_dir = tmp_path / "workers" / "sessions"
+        events_dir = tmp_path / "workers" / "events"
+        monkeypatch.setattr("archon.workers.session_store.WORKER_SESSIONS_DIR", sessions_dir)
+        monkeypatch.setattr("archon.workers.session_store.WORKER_EVENTS_DIR", events_dir)
+
+        task = WorkerTask(task="Deep analysis", worker="opencode", mode="review", repo_path=str(tmp_path))
+        reserved = session_store.reserve_worker_session(task, requested_worker="opencode")
+        active_run = type("ActiveRun", (), {"state": "running"})()
+        monkeypatch.setattr(
+            "archon.workers.runtime.get_background_run",
+            lambda session_id: active_run if session_id == reserved.session_id else None,
+        )
+
+        jobs = list_worker_job_summaries(limit=10)
+
+        assert len(jobs) == 1
+        assert jobs[0].job_id == f"worker:{reserved.session_id}"
+        assert jobs[0].status == "running"
+        assert jobs[0].summary == "Worker session reserved"
 
     def test_worker_summary_candidate_uses_unique_project_lookup_hit(self, monkeypatch, tmp_path):
         captured = {}
