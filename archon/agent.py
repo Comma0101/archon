@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import queue
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Callable, Generator, TypeVar, cast
 
 from archon import memory as memory_store
 from archon.control.hooks import HookBus
-from archon.control.orchestrator import orchestrate_response, orchestrate_stream_response
+from archon.control.orchestrator import (
+    build_route_payload,
+    classify_route,
+    orchestrate_response,
+    orchestrate_stream_response,
+)
 from archon.control.policy import evaluate_mcp_policy, evaluate_tool_policy
 from archon.llm import LLMClient, LLMResponse
 from archon.tools import ToolRegistry
@@ -90,6 +97,10 @@ class Agent:
         self._repair_history_tool_sequence()
         self.history.append({"role": "user", "content": user_message})
         _maybe_capture_preference_memory(user_message)
+        deep_research_message = self._maybe_start_deep_research_job(turn_id, user_message)
+        if deep_research_message is not None:
+            self.history.append({"role": "assistant", "content": deep_research_message})
+            return deep_research_message
         skill_guidance = build_skill_guidance(self.config, profile_name=active_profile)
         pending_compactions = self._consume_pending_compactions()
         turn_system_prompt = _build_turn_system_prompt(
@@ -268,6 +279,11 @@ class Agent:
         self._repair_history_tool_sequence()
         self.history.append({"role": "user", "content": user_message})
         _maybe_capture_preference_memory(user_message)
+        deep_research_message = self._maybe_start_deep_research_job(turn_id, user_message)
+        if deep_research_message is not None:
+            self.history.append({"role": "assistant", "content": deep_research_message})
+            yield deep_research_message
+            return
         skill_guidance = build_skill_guidance(self.config, profile_name=active_profile)
         pending_compactions = self._consume_pending_compactions()
         turn_system_prompt = _build_turn_system_prompt(
@@ -534,6 +550,92 @@ class Agent:
                 return cfg_profile
         return "default"
 
+    def _maybe_start_deep_research_job(self, turn_id: str, user_message: str) -> str | None:
+        if self._orchestrator_mode() != "hybrid":
+            return None
+        deep_cfg = getattr(getattr(self.config, "research", None), "google_deep_research", None)
+        if deep_cfg is None or not bool(getattr(deep_cfg, "enabled", False)):
+            return None
+        lane, reason = classify_route(user_message)
+        if lane != "job" or reason != "deep_research_request":
+            return None
+        try:
+            message = self._start_deep_research_job(turn_id, user_message)
+        except Exception as e:
+            self._emit_hook(
+                "research.failed",
+                {
+                    "turn_id": turn_id,
+                    "error_type": type(e).__name__,
+                    "error": str(e),
+                },
+            )
+            return None
+        self._emit_hook(
+            "orchestrator.route",
+            build_route_payload(
+                turn_id=turn_id,
+                mode="hybrid",
+                path="hybrid_deep_research_job_v0",
+                lane=lane,
+                reason=reason,
+            ),
+        )
+        return message
+
+    def _start_deep_research_job(self, turn_id: str, user_message: str) -> str:
+        from archon.research.models import ResearchJobRecord
+        from archon.research.store import save_research_job
+
+        deep_cfg = self.config.research.google_deep_research
+        client = self._create_google_deep_research_client()
+        interaction = client.start_research(user_message)
+        timestamp = _now_iso()
+        record = save_research_job(
+            ResearchJobRecord(
+                interaction_id=str(getattr(interaction, "interaction_id", "") or "").strip(),
+                status=str(getattr(interaction, "status", "") or "running").strip() or "running",
+                prompt=user_message,
+                agent=str(getattr(deep_cfg, "agent", "") or "").strip(),
+                created_at=timestamp,
+                updated_at=timestamp,
+                summary="Research job started",
+                output_text=str(getattr(interaction, "output_text", "") or ""),
+                error="",
+            )
+        )
+        job_id = f"research:{record.interaction_id}"
+        self._emit_hook(
+            "research.started",
+            {
+                "turn_id": turn_id,
+                "job_id": job_id,
+                "interaction_id": record.interaction_id,
+                "status": record.status,
+            },
+        )
+        return (
+            f"Research job started: {job_id}\n"
+            f"Use /jobs or /job {job_id} to inspect progress."
+        )
+
+    def _create_google_deep_research_client(self):
+        from archon.research.google_deep_research import GoogleDeepResearchClient
+
+        deep_cfg = self.config.research.google_deep_research
+        llm_cfg = getattr(self.config, "llm", None)
+        api_key = ""
+        if str(getattr(llm_cfg, "provider", "") or "").strip().lower() == "google":
+            api_key = str(getattr(llm_cfg, "api_key", "") or "").strip()
+        if not api_key and str(getattr(llm_cfg, "fallback_provider", "") or "").strip().lower() == "google":
+            api_key = str(getattr(llm_cfg, "fallback_api_key", "") or "").strip()
+        if not api_key:
+            api_key = str(os.environ.get("GEMINI_API_KEY", "")).strip()
+        return GoogleDeepResearchClient.from_api_key(
+            api_key,
+            agent=str(getattr(deep_cfg, "agent", "") or "").strip(),
+        )
+
     def _next_turn_id(self) -> str:
         self._turn_counter += 1
         return f"t{self._turn_counter:03d}"
@@ -777,6 +879,10 @@ def _make_log_prefix(log_label: str, turn_id: str) -> str:
     if label:
         return f"[{label} turn={turn_id}]"
     return f"[turn={turn_id}]"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _estimate_history_chars(history: list[dict]) -> int:

@@ -48,6 +48,25 @@ _JOB_NEGATED_DELEGATE_PATTERNS = (
     re.compile(r"\bnot\s+delegate(?:\b|\s)"),
     re.compile(r"\bwithout\s+delegat(?:e|ing)\b"),
 )
+_DEEP_RESEARCH_INTENT_MARKERS = (
+    "research",
+    "analyze",
+    "synthesize",
+    "compare",
+    "evaluate",
+)
+_DEEP_RESEARCH_SCOPE_MARKERS = (
+    "market",
+    "markets",
+    "competitor",
+    "competitors",
+    "landscape",
+    "industry",
+    "space",
+    "due diligence",
+    "literature",
+    "report",
+)
 
 
 def orchestrate_response(
@@ -211,12 +230,49 @@ def _route_payload(
     }
 
 
+def build_route_payload(
+    *,
+    turn_id: str,
+    mode: str,
+    path: str,
+    lane: str = "operator",
+    reason: str = "static_default_until_classifier",
+) -> dict:
+    return _route_payload(
+        turn_id=turn_id,
+        mode=mode,
+        path=path,
+        lane=lane,
+        reason=reason,
+    )
+
+
+def classify_route(user_message: str) -> tuple[str, str]:
+    return _classify_route(user_message)
+
+
+def is_deep_research_request(user_message: str) -> bool:
+    text_l = (user_message or "").strip().lower()
+    if not text_l:
+        return False
+    if any(
+        phrase in text_l
+        for phrase in ("deep research", "deeply research", "research this deeply")
+    ):
+        return True
+    has_research_intent = any(marker in text_l for marker in _DEEP_RESEARCH_INTENT_MARKERS)
+    has_scope_hint = any(marker in text_l for marker in _DEEP_RESEARCH_SCOPE_MARKERS)
+    return has_research_intent and has_scope_hint
+
+
 def _classify_route(user_message: str) -> tuple[str, str]:
     text = (user_message or "").strip()
     if not text:
         return "fast", "simple_chat"
 
     text_l = text.lower()
+    if is_deep_research_request(text_l):
+        return "job", "deep_research_request"
     if _is_job_request(text_l):
         return "job", "broad_or_delegated_request"
     if _is_operator_request(text, text_l):

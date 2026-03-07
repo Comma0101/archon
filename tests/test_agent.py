@@ -2,6 +2,7 @@
 
 import threading
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -1166,6 +1167,49 @@ class TestAgentLoop:
             lane="fast",
             reason="simple_chat",
         )
+
+    def test_broad_research_request_starts_google_deep_research_job_when_enabled(self, monkeypatch, tmp_path):
+        agent = make_agent([])
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path / "research" / "jobs")
+        agent.config.orchestrator.enabled = True
+        agent.config.orchestrator.mode = "hybrid"
+        agent.config.research.google_deep_research.enabled = True
+        started = []
+
+        class _FakeDeepResearchClient:
+            def start_research(self, prompt: str, *, tools=None):
+                started.append((prompt, tools))
+                return SimpleNamespace(
+                    interaction_id="int-123",
+                    status="running",
+                    output_text="",
+                )
+
+        monkeypatch.setattr(agent, "_create_google_deep_research_client", lambda: _FakeDeepResearchClient())
+        route_events = []
+        agent.hooks.register("orchestrator.route", route_events.append)
+
+        result = agent.run("Deeply research the LA restaurant market and synthesize competitors")
+
+        assert "Research job started: research:int-123" in result
+        assert "/jobs" in result
+        assert started == [("Deeply research the LA restaurant market and synthesize competitors", None)]
+        assert agent.llm.chat.call_count == 0
+        assert route_events[0].payload == expected_route_payload(
+            turn_id="t001",
+            mode="hybrid",
+            path="hybrid_deep_research_job_v0",
+            lane="job",
+            reason="deep_research_request",
+        )
+
+    def test_simple_research_question_stays_on_fast_path(self):
+        lane, reason = orchestrator_module._classify_route("What is Exa MCP?")
+
+        assert lane == "fast"
+        assert reason == "simple_chat"
 
     def test_orchestrator_legacy_route_hook_includes_default_metadata(self, monkeypatch):
         responses = [
