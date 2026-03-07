@@ -9,6 +9,15 @@ from archon.safety import Level, classify
 from .common import auto_commit, truncate_text
 
 
+def _should_confirm_write(registry) -> bool:
+    """Check if write operations need confirmation based on permission mode."""
+    config = getattr(registry, 'config', None)
+    if config is None:
+        return True
+    mode = getattr(getattr(config, 'safety', None), 'permission_mode', 'confirm_all')
+    return mode != 'auto'
+
+
 def register_filesystem_tools(registry) -> None:
     # 1. shell
     def shell(command: str, timeout: int = 30) -> str:
@@ -66,12 +75,13 @@ def register_filesystem_tools(registry) -> None:
     def write_file(path: str, content: str) -> str:
         p = Path(path).expanduser().resolve()
         home = Path.home()
-        if not str(p).startswith(str(home)):
-            if not registry.confirmer(f"Write to {p} (outside $HOME)", Level.DANGEROUS):
-                return "Write rejected by safety gate."
-        else:
-            if not registry.confirmer(f"Write file: {p}", Level.DANGEROUS):
-                return "Write rejected by safety gate."
+        if _should_confirm_write(registry):
+            if not str(p).startswith(str(home)):
+                if not registry.confirmer(f"Write to {p} (outside $HOME)", Level.DANGEROUS):
+                    return "Write rejected by safety gate."
+            else:
+                if not registry.confirmer(f"Write file: {p}", Level.DANGEROUS):
+                    return "Write rejected by safety gate."
         if registry.archon_source_dir and str(p).startswith(registry.archon_source_dir):
             if not registry.confirmer(f"Write to own source: {p}", Level.DANGEROUS):
                 return "Self-modification rejected."
@@ -94,12 +104,13 @@ def register_filesystem_tools(registry) -> None:
         if not p.exists():
             return f"Error: File not found: {p}"
         home = Path.home()
-        if not str(p).startswith(str(home)):
-            if not registry.confirmer(f"Edit {p} (outside $HOME)", Level.DANGEROUS):
-                return "Edit rejected by safety gate."
-        else:
-            if not registry.confirmer(f"Edit file: {p}", Level.DANGEROUS):
-                return "Edit rejected by safety gate."
+        if _should_confirm_write(registry):
+            if not str(p).startswith(str(home)):
+                if not registry.confirmer(f"Edit {p} (outside $HOME)", Level.DANGEROUS):
+                    return "Edit rejected by safety gate."
+            else:
+                if not registry.confirmer(f"Edit file: {p}", Level.DANGEROUS):
+                    return "Edit rejected by safety gate."
         if registry.archon_source_dir and str(p).startswith(registry.archon_source_dir):
             safety_path = os.path.join(registry.archon_source_dir, "safety.py")
             if str(p) == safety_path:

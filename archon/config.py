@@ -90,6 +90,7 @@ class ProfileConfig:
 @dataclass
 class SafetyConfig:
     default_action: str = "confirm"  # "allow" | "confirm" | "deny"
+    permission_mode: str = "confirm_all"  # confirm_all | accept_reads | auto
 
 
 @dataclass
@@ -299,6 +300,11 @@ def load_config() -> Config:
 
         safety = data.get("safety", {})
         cfg.safety.default_action = safety.get("default_action", cfg.safety.default_action)
+        permission_mode = str(
+            safety.get("permission_mode", cfg.safety.permission_mode)
+        ).strip().lower()
+        if permission_mode in {"confirm_all", "accept_reads", "auto"}:
+            cfg.safety.permission_mode = permission_mode
 
         telegram = data.get("telegram", {})
         cfg.telegram.enabled = bool(telegram.get("enabled", cfg.telegram.enabled))
