@@ -3,6 +3,11 @@
 import pytest
 
 from archon.research.google_deep_research import GoogleDeepResearchClient
+from archon.research.models import ResearchJobRecord
+from archon.research.store import (
+    load_research_job_summary,
+    save_research_job,
+)
 
 
 class _FakeInteractionsClient:
@@ -69,3 +74,30 @@ def test_google_deep_research_client_rejects_custom_tools():
             "Research LA restaurant market",
             tools=[{"type": "mcp", "server": "exa"}],
         )
+
+
+def test_research_job_summary_round_trips_from_store(tmp_path, monkeypatch):
+    jobs_dir = tmp_path / "research" / "jobs"
+    monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", jobs_dir)
+
+    save_research_job(
+        ResearchJobRecord(
+            interaction_id="abc",
+            status="running",
+            prompt="Research LA restaurant market",
+            agent="deep-research-pro-preview-12-2025",
+            created_at="2026-03-06T22:00:00Z",
+            updated_at="2026-03-06T22:05:00Z",
+            summary="LA market research started",
+            output_text="",
+            error="",
+        )
+    )
+
+    summary = load_research_job_summary("abc")
+
+    assert summary is not None
+    assert summary.job_id == "research:abc"
+    assert summary.kind == "deep_research"
+    assert summary.status == "running"
+    assert summary.summary == "LA market research started"

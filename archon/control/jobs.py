@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from archon.calls.models import CallMission
+    from archon.research.models import ResearchJobRecord
     from archon.workers.session_store_models import WorkerSessionRecord
 
 
@@ -52,6 +53,22 @@ def job_summary_from_call_mission(mission: "CallMission") -> JobSummary:
             mission.status,
         ),
         last_update_at=_timestamp_to_iso(mission.updated_at or mission.created_at),
+    )
+
+
+def job_summary_from_research_record(record: "ResearchJobRecord") -> JobSummary:
+    return JobSummary(
+        job_id=f"research:{record.interaction_id}",
+        kind="deep_research",
+        status=str(record.status or "").strip(),
+        summary=_first_non_empty(
+            record.summary,
+            record.output_text,
+            record.error,
+            record.prompt,
+            record.status,
+        ),
+        last_update_at=_first_non_empty(record.updated_at, record.created_at),
     )
 
 
@@ -110,3 +127,4 @@ def _timestamp_to_iso(value: object) -> str:
 
 summarize_worker_session = job_summary_from_worker_record
 summarize_call_mission = job_summary_from_call_mission
+summarize_research_job = job_summary_from_research_record

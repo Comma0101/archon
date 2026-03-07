@@ -566,6 +566,69 @@ class TestCliCommands:
         assert "job_status: ok" in msg
         assert "job_summary: Looks good" in msg
 
+    def test_handle_repl_command_jobs_includes_research_jobs(self, monkeypatch, tmp_path):
+        from archon.research.models import ResearchJobRecord
+        from archon.research.store import save_research_job
+
+        monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path / "research" / "jobs")
+        monkeypatch.setattr("archon.cli_repl_commands.list_worker_job_summaries", lambda limit=10: [])
+        monkeypatch.setattr("archon.cli_repl_commands.list_call_job_summaries", lambda limit=10: [])
+        save_research_job(
+            ResearchJobRecord(
+                interaction_id="abc",
+                status="running",
+                prompt="Research LA restaurant market",
+                agent="deep-research-pro-preview-12-2025",
+                created_at="2026-03-06T22:00:00Z",
+                updated_at="2026-03-06T22:05:00Z",
+                summary="LA market research started",
+                output_text="",
+                error="",
+            )
+        )
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+        )
+
+        action, msg = _handle_repl_command(agent, "/jobs")
+
+        assert action == "jobs"
+        assert "research:abc" in msg
+        assert "LA market research started" in msg
+
+    def test_handle_repl_command_job_loads_research_job_summary(self, monkeypatch, tmp_path):
+        from archon.research.models import ResearchJobRecord
+        from archon.research.store import save_research_job
+
+        monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path / "research" / "jobs")
+        monkeypatch.setattr("archon.cli_repl_commands.load_worker_job_summary", lambda _ref: None)
+        monkeypatch.setattr("archon.cli_repl_commands.load_call_job_summary", lambda _ref: None)
+        save_research_job(
+            ResearchJobRecord(
+                interaction_id="abc",
+                status="done",
+                prompt="Research LA restaurant market",
+                agent="deep-research-pro-preview-12-2025",
+                created_at="2026-03-06T22:00:00Z",
+                updated_at="2026-03-06T22:10:00Z",
+                summary="Completed",
+                output_text="done",
+                error="",
+            )
+        )
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+        )
+
+        action, msg = _handle_repl_command(agent, "/job research:abc")
+
+        assert action == "job"
+        assert "job_id: research:abc" in msg
+        assert "job_kind: deep_research" in msg
+        assert "job_summary: Completed" in msg
+
     def test_handle_repl_command_mcp_reports_enabled_counts_and_server_names(self):
         cfg = Config()
         cfg.mcp.servers = {

@@ -16,6 +16,7 @@ from archon.control.skills import (
     list_builtin_skills,
 )
 from archon.mcp import MCPClient
+from archon.research.store import list_research_job_summaries, load_research_job_summary
 from archon.workers.session_store import list_worker_job_summaries, load_worker_job_summary
 
 _NATIVE_PLUGIN_SPECS = (
@@ -709,7 +710,11 @@ def handle_mcp_command(agent, text: str) -> tuple[bool, str]:
 
 def _collect_job_summaries(limit: int = 10):
     max_items = max(1, int(limit))
-    jobs = list_worker_job_summaries(limit=max_items) + list_call_job_summaries(limit=max_items)
+    jobs = (
+        list_worker_job_summaries(limit=max_items)
+        + list_call_job_summaries(limit=max_items)
+        + list_research_job_summaries(limit=max_items)
+    )
     jobs.sort(key=lambda job: (job.last_update_at, job.job_id), reverse=True)
     return jobs[:max_items]
 
@@ -722,10 +727,15 @@ def _load_job_summary(job_ref: str):
         return load_worker_job_summary(ref.split(":", 1)[1])
     if ref.startswith("call:"):
         return load_call_job_summary(ref.split(":", 1)[1])
+    if ref.startswith("research:"):
+        return load_research_job_summary(ref.split(":", 1)[1])
     job = load_worker_job_summary(ref)
     if job is not None:
         return job
-    return load_call_job_summary(ref)
+    job = load_call_job_summary(ref)
+    if job is not None:
+        return job
+    return load_research_job_summary(ref)
 
 
 _ACTIVE_JOB_STATUSES = {
