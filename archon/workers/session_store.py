@@ -91,6 +91,12 @@ def record_worker_run(task: WorkerTask, result: WorkerResult, requested_worker: 
         _write_payload(record.session_id, payload)
         _append_event_log(record.session_id, result.events, append=append_events)
         _maybe_queue_worker_summary_candidate(record, task, result)
+        _emit_job_completed_event(
+            job_kind="worker",
+            job_id=record.session_id,
+            status=record.status,
+            summary=record.summary,
+        )
         return record
 
 
@@ -626,3 +632,26 @@ def _ensure_dirs():
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _emit_job_completed_event(
+    *,
+    job_kind: str,
+    job_id: str,
+    status: str,
+    summary: str,
+) -> None:
+    """Best-effort cross-surface notification when a worker job completes."""
+    try:
+        from archon.ux.events import job_completed as _make_event
+        from archon.control.hooks import HookBus
+
+        event = _make_event(job_kind=job_kind, job_id=job_id, status=status, summary=summary)
+        # Emit through global hook bus if available; surfaces subscribe there.
+        _global_hook_bus = getattr(_emit_job_completed_event, "_hook_bus", None)
+        if isinstance(_global_hook_bus, HookBus):
+            from archon.control.contracts import HookEvent
+
+            _global_hook_bus.emit(HookEvent(kind="ux.job_completed", payload={"event": event}))
+    except Exception:
+        pass

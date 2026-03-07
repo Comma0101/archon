@@ -32,6 +32,8 @@ from archon.audio.stt import transcribe_audio_bytes
 from archon.audio.tts import convert_wav_to_ogg_opus, synthesize_speech_wav
 from archon.cli_repl_commands import (
     _maybe_auto_activate_skill,
+    handle_compact_command,
+    handle_context_command,
     handle_cost_command,
     handle_doctor_command,
     handle_job_command,
@@ -49,7 +51,7 @@ from archon.news.runner import get_or_build_news_digest
 from archon.news.state import load_cached_digest, load_news_state, news_state_path
 from archon.security.redaction import sanitize_terminal_notice_text
 from archon.safety import Level
-from archon.ux.events import ActivityEvent
+from archon.ux.events import ActivityEvent, UXEvent
 
 if TYPE_CHECKING:
     from archon.agent import Agent
@@ -264,6 +266,7 @@ class TelegramAdapter:
                 body,
                 "Archon is connected.\n"
                 "Core: /status, /approvals, /jobs, /skills, /mcp, /reset\n"
+                "Context: /compact, /context, /cost\n"
                 "Use /help for the compact command guide.",
             )
             return
@@ -273,7 +276,8 @@ class TelegramAdapter:
                 chat_id,
                 body,
                 "Core: /status, /approvals, /jobs, /skills, /mcp, /reset\n"
-                "Advanced: /cost, /doctor, /permissions, /plugins, /profile, /job <id>, "
+                "Context: /compact, /context, /cost\n"
+                "Advanced: /doctor, /permissions, /plugins, /profile, /job <id>, "
                 "/approve, /deny, /approve_next, /news, /news_status\n"
                 "Dangerous commands can be approved with inline buttons or /approve.",
             )
@@ -343,6 +347,8 @@ class TelegramAdapter:
         for handler in (
             handle_status_command,
             handle_cost_command,
+            handle_compact_command,
+            handle_context_command,
             handle_doctor_command,
             handle_permissions_command,
             handle_skills_command,
@@ -375,7 +381,7 @@ class TelegramAdapter:
             return None
         if cmd == "/profile" and sub not in {"", "show", "status", "list"}:
             return None
-        if cmd in {"/status", "/cost", "/doctor", "/permissions", "/plugins", "/mcp"} or (
+        if cmd in {"/status", "/cost", "/context", "/doctor", "/permissions", "/plugins", "/mcp"} or (
             cmd == "/skills" and sub in {"", "list", "show", "status"}
         ) or (cmd == "/profile" and sub in {"", "show", "status", "list"}):
             cfg = load_config()
@@ -928,6 +934,29 @@ class TelegramAdapter:
             sink(ActivityEvent(source="telegram", message=message))
         except Exception:
             pass
+
+    def handle_ux_event(self, event: UXEvent) -> None:
+        """Receive a cross-surface UXEvent and broadcast it to all active Telegram chats."""
+        text = event.render_text()
+        if not text:
+            return
+        for chat_id in list(self._agents):
+            try:
+                self._send_text(chat_id, text)
+            except Exception:
+                pass
+
+    def wire_hook_bus(self, hook_bus) -> None:
+        """Subscribe to ux.job_completed events on a HookBus for cross-surface visibility."""
+        if hook_bus is None or not hasattr(hook_bus, "register"):
+            return
+        hook_bus.register("ux.job_completed", self._on_hook_job_completed)
+
+    def _on_hook_job_completed(self, hook_event) -> None:
+        payload = getattr(hook_event, "payload", None) or {}
+        event = payload.get("event")
+        if isinstance(event, UXEvent):
+            self.handle_ux_event(event)
 
     def _preview_text(self, text: str, limit: int = 80) -> str:
         compact = sanitize_terminal_notice_text(text)

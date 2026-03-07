@@ -176,7 +176,15 @@ def _refresh_research_job(record: ResearchJobRecord, *, refresh_client=None) -> 
         error=record.error,
     )
     if changed:
-        return save_research_job(updated)
+        saved = save_research_job(updated)
+        if status.lower() in {"completed", "done", "failed", "cancelled"}:
+            _emit_job_completed_event(
+                job_kind="research",
+                job_id=record.interaction_id,
+                status=status,
+                summary=summary,
+            )
+        return saved
     return updated
 
 
@@ -191,3 +199,25 @@ def _summarize_research_state(*, status: str, output_text: str, fallback: str) -
     if normalized in {"running", "queued", "starting", "in_progress"} and fallback:
         return fallback
     return fallback or normalized or "unknown"
+
+
+def _emit_job_completed_event(
+    *,
+    job_kind: str,
+    job_id: str,
+    status: str,
+    summary: str,
+) -> None:
+    """Best-effort cross-surface notification when a research job completes."""
+    try:
+        from archon.ux.events import job_completed as _make_event
+        from archon.control.hooks import HookBus
+
+        event = _make_event(job_kind=job_kind, job_id=job_id, status=status, summary=summary)
+        _global_hook_bus = getattr(_emit_job_completed_event, "_hook_bus", None)
+        if isinstance(_global_hook_bus, HookBus):
+            from archon.control.contracts import HookEvent
+
+            _global_hook_bus.emit(HookEvent(kind="ux.job_completed", payload={"event": event}))
+    except Exception:
+        pass
