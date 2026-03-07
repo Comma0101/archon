@@ -1741,8 +1741,7 @@ class TestSlashCompleter:
 
     def test_plugins_show_value_completion_from_line_buffer(self, monkeypatch):
         monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/plugins show ")
-        assert _slash_completer("", 0) == "calls"
-        assert _slash_completer("", 1) is None
+        assert _slash_completer("", 0) is None
 
     def test_mcp_subcommand_completion_from_line_buffer(self, monkeypatch):
         monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/mcp ")
@@ -1820,9 +1819,8 @@ class TestPickSlashCommand:
         monkeypatch.setattr("archon.cli._SLASH_SUBVALUES", _build_slash_subvalues(cfg))
         monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/plugins show ")
 
-        assert _slash_completer("", 0) == "calls"
-        assert _slash_completer("", 1) == "mcp:exa"
-        assert _slash_completer("", 2) is None
+        assert _slash_completer("", 0) == "mcp:exa"
+        assert _slash_completer("", 1) is None
 
     def test_mcp_show_value_completion_uses_live_runtime_names(self, monkeypatch):
         cfg = Config()
@@ -1851,7 +1849,7 @@ class TestPickSlashCommand:
         skill_values = [value for value, _desc in _SLASH_SUBVALUES["/skills"]]
         assert skill_values == ["list", "show coder", "use coder", "clear"]
         plugin_values = [value for value, _desc in _SLASH_SUBVALUES["/plugins"]]
-        assert plugin_values == ["list", "show calls"]
+        assert plugin_values == ["list", "show"]
 
     def test_pick_slash_command_two_level(self, monkeypatch):
         picks = iter(["/calls", "on"])

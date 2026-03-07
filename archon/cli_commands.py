@@ -133,7 +133,7 @@ def build_slash_subvalues(
     mcp_servers = _runtime_mcp_server_names(config)
     plugin_values = [
         ("list", "List native and MCP plugins"),
-        ("show calls", "Show one native plugin"),
+        ("show", "Show one plugin"),
     ]
     plugin_values.extend(
         (f"show mcp:{server}", "Show one MCP plugin")
