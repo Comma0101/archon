@@ -33,6 +33,7 @@ class GoogleDeepResearchClient:
         *,
         agent: str = DEFAULT_DEEP_RESEARCH_AGENT,
     ) -> None:
+        self._client_ref = interactions_client  # Keep strong reference to prevent httpx client GC
         self._interactions = _resolve_interactions_client(interactions_client)
         self.agent = str(agent or DEFAULT_DEEP_RESEARCH_AGENT).strip() or DEFAULT_DEEP_RESEARCH_AGENT
 
