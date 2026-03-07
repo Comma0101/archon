@@ -1025,7 +1025,9 @@ class TestCliCommands:
         assert any(text.startswith("Status:") for text in plain)
 
     def test_chat_cmd_refreshes_slash_subvalues_from_agent_config(self):
-        seen = {}
+        import archon.cli as cli_module
+
+        original_subvalues = cli_module._SLASH_SUBVALUES.copy()
 
         class _Agent:
             def __init__(self):
@@ -1050,37 +1052,46 @@ class TestCliCommands:
         agent = _Agent()
         inputs = iter(["quit"])
         session_ids = iter(["sess-1"])
+        cli_module._SLASH_SUBVALUES = _build_slash_subvalues(Config())
 
-        _chat_cmd(
-            make_agent_fn=lambda: agent,
-            make_telegram_adapter_fn=lambda _cfg: None,
-            new_session_id_fn=lambda: next(session_ids),
-            save_exchange_fn=lambda *_args: None,
-            refresh_slash_subvalues_fn=lambda config: seen.setdefault("config", config),
-            slash_completer_fn=lambda *_args: None,
-            pick_slash_command_fn=lambda: None,
-            is_bracketed_paste_start_fn=lambda _text: False,
-            collect_bracketed_paste_fn=lambda *_args, **_kwargs: "",
-            is_paste_command_fn=lambda _text: False,
-            collect_paste_message_fn=lambda *_args, **_kwargs: "",
-            handle_repl_command_fn=_handle_repl_command,
-            is_model_runtime_error_fn=lambda _err: False,
-            format_session_summary_fn=_format_session_summary,
-            format_chat_response_fn=lambda text: text,
-            format_turn_stats_fn=_format_turn_stats,
-            make_readline_prompt_fn=lambda label, _ansi: label,
-            spinner_cls=_FakeSpinner,
-            ansi_prompt_user="",
-            ansi_error="",
-            ansi_reset="",
-            click_echo_fn=lambda *_args, **_kwargs: None,
-            input_fn=lambda _prompt: next(inputs),
-            readline_module=_FakeReadline(),
-            time_time_fn=lambda: 0.0,
-            version="test",
-        )
+        try:
+            _chat_cmd(
+                make_agent_fn=lambda: agent,
+                make_telegram_adapter_fn=lambda _cfg: None,
+                new_session_id_fn=lambda: next(session_ids),
+                save_exchange_fn=lambda *_args: None,
+                refresh_slash_subvalues_fn=lambda config: setattr(
+                    cli_module,
+                    "_SLASH_SUBVALUES",
+                    _build_slash_subvalues(config),
+                ),
+                slash_completer_fn=lambda *_args: None,
+                pick_slash_command_fn=lambda: None,
+                is_bracketed_paste_start_fn=lambda _text: False,
+                collect_bracketed_paste_fn=lambda *_args, **_kwargs: "",
+                is_paste_command_fn=lambda _text: False,
+                collect_paste_message_fn=lambda *_args, **_kwargs: "",
+                handle_repl_command_fn=_handle_repl_command,
+                is_model_runtime_error_fn=lambda _err: False,
+                format_session_summary_fn=_format_session_summary,
+                format_chat_response_fn=lambda text: text,
+                format_turn_stats_fn=_format_turn_stats,
+                make_readline_prompt_fn=lambda label, _ansi: label,
+                spinner_cls=_FakeSpinner,
+                ansi_prompt_user="",
+                ansi_error="",
+                ansi_reset="",
+                click_echo_fn=lambda *_args, **_kwargs: None,
+                input_fn=lambda _prompt: next(inputs),
+                readline_module=_FakeReadline(),
+                time_time_fn=lambda: 0.0,
+                version="test",
+            )
 
-        assert seen["config"] is agent.config
+            assert ("show exa", "Show one MCP server config") in cli_module._SLASH_SUBVALUES["/mcp"]
+            assert ("show mcp:exa", "Show one MCP plugin") in cli_module._SLASH_SUBVALUES["/plugins"]
+        finally:
+            cli_module._SLASH_SUBVALUES = original_subvalues
 
 
 class _FakeReadline:
@@ -1855,3 +1866,45 @@ class TestPickSlashCommand:
         picks = iter(["/calls", "on"])
         monkeypatch.setattr("archon.cli._run_picker", lambda *_a, **_k: next(picks))
         assert _pick_slash_command() == "/calls on"
+
+    def test_pick_slash_command_mcp_runtime_omits_incomplete_generic_verbs(self, monkeypatch):
+        cfg = Config()
+        cfg.mcp.servers = {
+            "exa": MCPServerConfig(enabled=True, mode="read_only", transport="stdio")
+        }
+        monkeypatch.setattr("archon.cli._SLASH_SUBVALUES", _build_slash_subvalues(cfg))
+        seen = []
+
+        def fake_run_picker(items, **_kwargs):
+            seen.append([name for name, _desc in items])
+            if len(seen) == 1:
+                return "/mcp"
+            return "show exa"
+
+        monkeypatch.setattr("archon.cli._run_picker", fake_run_picker)
+
+        assert _pick_slash_command() == "/mcp show exa"
+        assert "show" not in seen[1]
+        assert "tools" not in seen[1]
+        assert "show exa" in seen[1]
+        assert "tools exa" in seen[1]
+
+    def test_pick_slash_command_plugins_runtime_omits_incomplete_generic_show(self, monkeypatch):
+        cfg = Config()
+        cfg.mcp.servers = {
+            "exa": MCPServerConfig(enabled=True, mode="read_only", transport="stdio")
+        }
+        monkeypatch.setattr("archon.cli._SLASH_SUBVALUES", _build_slash_subvalues(cfg))
+        seen = []
+
+        def fake_run_picker(items, **_kwargs):
+            seen.append([name for name, _desc in items])
+            if len(seen) == 1:
+                return "/plugins"
+            return "show mcp:exa"
+
+        monkeypatch.setattr("archon.cli._run_picker", fake_run_picker)
+
+        assert _pick_slash_command() == "/plugins show mcp:exa"
+        assert "show" not in seen[1]
+        assert "show mcp:exa" in seen[1]

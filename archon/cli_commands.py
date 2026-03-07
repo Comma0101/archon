@@ -238,6 +238,20 @@ def _subcommand_token_matches(values: list[tuple[str, str]], typed_remainder: st
     return matches
 
 
+def _picker_leaf_subvalues(values: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    raw_values = [str(value or "").strip() for value, _desc in values]
+    leaf_items: list[tuple[str, str]] = []
+    for value, desc in values:
+        normalized = str(value or "").strip()
+        if not normalized:
+            continue
+        prefix = normalized + " "
+        if any(other.startswith(prefix) for other in raw_values if other != normalized):
+            continue
+        leaf_items.append((normalized, desc))
+    return leaf_items
+
+
 def run_picker(items: list[tuple[str, str]], label_width: int = 10) -> str | None:
     """Interactive arrow-key picker. Returns selected item name or None."""
     if not items:
@@ -317,8 +331,11 @@ def pick_slash_command(
     subvalues = slash_subvalues.get(command)
     if not subvalues:
         return command
-    max_len = max(len(v) for v, _ in subvalues)
-    value = run_picker_fn(subvalues, label_width=max_len + 2)
+    picker_values = _picker_leaf_subvalues(subvalues)
+    if not picker_values:
+        return command
+    max_len = max(len(v) for v, _ in picker_values)
+    value = run_picker_fn(picker_values, label_width=max_len + 2)
     if value is None:
         return None
     return f"{command} {value}"
