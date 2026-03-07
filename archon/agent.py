@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import queue
@@ -25,6 +26,8 @@ from archon.prompt import build_runtime_capability_summary, build_skill_guidance
 from archon.config import Config
 from archon.security.redaction import redact_secret_like_text
 
+
+logger = logging.getLogger(__name__)
 
 ANSI_RESET = "\033[0m"
 ANSI_TOOL_CALL = "\033[96m"       # bright cyan
@@ -792,9 +795,19 @@ class Agent:
         current = _estimate_history_chars(self.history)
         if current <= max_chars:
             return
+        original_chars = current
+        dropped_count = 0
         while len(self.history) > 2 and current > trim_to:
             dropped = self.history.pop(0)
             current -= _estimate_message_chars(dropped)
+            dropped_count += 1
+        if dropped_count > 0:
+            logger.info(
+                "Auto-compact: dropped %d oldest messages (was %d chars, now %d)",
+                dropped_count,
+                original_chars,
+                current,
+            )
 
     def _trim_history_if_needed(self) -> None:
         """Trim old history with a lightweight dual budget to avoid unbounded growth.
