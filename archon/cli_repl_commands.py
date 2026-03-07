@@ -45,7 +45,7 @@ _EXPLICIT_SKILL_PATTERNS = (
     re.compile(rf"^\s*{_SKILL_REQUEST_PREFIX}enter (?P<skill>{_SKILL_REQUEST_PATTERN}) mode\b", re.IGNORECASE),
 )
 _TERMINAL_HELP_TEXT = (
-    "Core: /status, /approvals, /jobs, /skills, /mcp, /reset\n"
+    "Core: /status, /approvals, /jobs, /skills, /mcp, /reset, /clear\n"
     "Advanced: /cost, /compact, /context, /doctor, /permissions, /plugins, /model, "
     "/calls, /profile, /job <id>, /paste\n"
     "Use / to browse commands."
@@ -155,6 +155,18 @@ def handle_compact_command(agent, text: str) -> tuple[bool, str]:
     path = result.get("path", "")
     summary = result.get("summary", "")
     return True, f"Compact: history_messages={compacted} | path={path} | summary={summary}"
+
+
+def handle_clear_command(agent, text: str) -> tuple[bool, str]:
+    """Handle /clear — reset conversation history."""
+    raw = (text or "").strip().lower()
+    if raw != "/clear":
+        return False, ""
+    count = len(agent.history)
+    agent.history.clear()
+    agent.total_input_tokens = 0
+    agent.total_output_tokens = 0
+    return True, f"Cleared {count} messages. Fresh start."
 
 
 def handle_context_command(agent, text: str) -> tuple[bool, str]:
@@ -1096,6 +1108,9 @@ def handle_repl_command(
     handled, msg = handle_compact_command(agent, raw)
     if handled:
         return "compact", msg
+    handled, msg = handle_clear_command(agent, raw)
+    if handled:
+        return "clear", msg
     handled, msg = handle_context_command(agent, raw)
     if handled:
         return "context", msg

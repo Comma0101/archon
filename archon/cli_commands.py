@@ -17,6 +17,7 @@ SLASH_COMMAND_GROUPS = (
             ("/reset", "clear conversation"),
             ("/status", "current status"),
             ("/cost", "token usage"),
+            ("/clear", "clear history"),
             ("/compact", "compact context"),
             ("/context", "context state"),
             ("/doctor", "health checks"),

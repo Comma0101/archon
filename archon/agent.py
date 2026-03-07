@@ -962,17 +962,16 @@ def _print_tool_call(name: str, args: dict, prefix: str = ""):
 
 
 def _print_tool_result(result: str, prefix: str = ""):
-    """Print truncated tool result to stderr."""
+    """Print compact tool result to stderr: first line + line count summary."""
     lines = result.splitlines()
     pfx = f"{prefix} " if prefix else ""
-    if len(lines) <= 5:
-        for line in lines:
-            print(f"{ANSI_TOOL_RESULT}{pfx}  {line}{ANSI_RESET}", file=sys.stderr)
-    else:
-        for line in lines[:3]:
-            print(f"{ANSI_TOOL_RESULT}{pfx}  {line}{ANSI_RESET}", file=sys.stderr)
+    if not lines:
+        return
+    first = lines[0][:200]
+    print(f"{ANSI_TOOL_RESULT}{pfx}  {first}{ANSI_RESET}", file=sys.stderr)
+    if len(lines) > 1:
         print(
-            f"{ANSI_TOOL_RESULT_META}{pfx}  ... ({len(lines) - 3} more lines){ANSI_RESET}",
+            f"{ANSI_TOOL_RESULT_META}{pfx}  ... ({len(lines) - 1} more lines){ANSI_RESET}",
             file=sys.stderr,
         )
 
