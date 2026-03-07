@@ -29,17 +29,22 @@ def save_research_job(record: ResearchJobRecord) -> ResearchJobRecord:
     return ResearchJobRecord.from_dict(payload)
 
 
-def load_research_job(interaction_id: str) -> ResearchJobRecord | None:
+def load_research_job(
+    interaction_id: str,
+    *,
+    refresh_client=None,
+) -> ResearchJobRecord | None:
     path = research_job_path(interaction_id)
     if not path.exists():
         return None
     data = _read_json_object(path)
     if data is None:
         return None
-    return ResearchJobRecord.from_dict(data)
+    record = ResearchJobRecord.from_dict(data)
+    return _refresh_research_job(record, refresh_client=refresh_client)
 
 
-def list_research_jobs(limit: int = 20) -> list[ResearchJobRecord]:
+def list_research_jobs(limit: int = 20, *, refresh_client=None) -> list[ResearchJobRecord]:
     _ensure_dirs()
     jobs: list[ResearchJobRecord] = []
     files = sorted(RESEARCH_JOBS_DIR.glob("*.json"), reverse=True)
@@ -47,19 +52,27 @@ def list_research_jobs(limit: int = 20) -> list[ResearchJobRecord]:
         data = _read_json_object(path)
         if data is None:
             continue
-        jobs.append(ResearchJobRecord.from_dict(data))
+        jobs.append(
+            _refresh_research_job(
+                ResearchJobRecord.from_dict(data),
+                refresh_client=refresh_client,
+            )
+        )
     return jobs
 
 
-def load_research_job_summary(interaction_id: str) -> JobSummary | None:
-    record = load_research_job(interaction_id)
+def load_research_job_summary(interaction_id: str, *, refresh_client=None) -> JobSummary | None:
+    record = load_research_job(interaction_id, refresh_client=refresh_client)
     if record is None:
         return None
     return summarize_research_job(record)
 
 
-def list_research_job_summaries(limit: int = 20) -> list[JobSummary]:
-    return [summarize_research_job(record) for record in list_research_jobs(limit=limit)]
+def list_research_job_summaries(limit: int = 20, *, refresh_client=None) -> list[JobSummary]:
+    return [
+        summarize_research_job(record)
+        for record in list_research_jobs(limit=limit, refresh_client=refresh_client)
+    ]
 
 
 def research_job_path(interaction_id: str) -> Path:
@@ -81,3 +94,48 @@ def _read_json_object(path: Path) -> dict | None:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _refresh_research_job(record: ResearchJobRecord, *, refresh_client=None) -> ResearchJobRecord:
+    if refresh_client is None:
+        return record
+    try:
+        interaction = refresh_client.get_research(record.interaction_id)
+    except Exception:
+        return record
+
+    status = str(getattr(interaction, "status", "") or record.status or "unknown").strip()
+    output_text = str(getattr(interaction, "output_text", "") or record.output_text or "").strip()
+    summary = _summarize_research_state(status=status, output_text=output_text, fallback=record.summary)
+    changed = (
+        status != record.status
+        or output_text != record.output_text
+        or summary != record.summary
+    )
+    updated = ResearchJobRecord(
+        interaction_id=record.interaction_id,
+        status=status,
+        prompt=record.prompt,
+        agent=record.agent,
+        created_at=record.created_at,
+        updated_at=_now_iso() if changed else record.updated_at,
+        summary=summary,
+        output_text=output_text,
+        error=record.error,
+    )
+    if changed:
+        return save_research_job(updated)
+    return updated
+
+
+def _summarize_research_state(*, status: str, output_text: str, fallback: str) -> str:
+    if output_text:
+        first_line = output_text.splitlines()[0].strip()
+        if first_line:
+            return first_line
+    normalized = str(status or "").strip().lower()
+    if normalized in {"completed", "done"}:
+        return "Research job completed"
+    if normalized in {"running", "queued", "starting", "in_progress"} and fallback:
+        return fallback
+    return fallback or normalized or "unknown"

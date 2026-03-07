@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Callable
 
+from archon.security.redaction import sanitize_terminal_notice_text, strip_readline_prompt_markers
 from archon.ux.events import ActivityEvent
 
 
@@ -26,14 +27,14 @@ class TerminalActivityFeed:
 
     @property
     def current_prompt(self) -> str:
-        return self._safe_text(self._prompt_fn)
+        return strip_readline_prompt_markers(self._safe_text(self._prompt_fn))
 
     def emit(self, event: ActivityEvent) -> None:
         self._write_fn("\r\033[K")
-        self._write_fn(event.render_text())
+        self._write_fn(sanitize_terminal_notice_text(event.render_text()))
         self._write_fn("\n")
         prompt = self.current_prompt
-        buffer_text = self._safe_text(self._input_fn)
+        buffer_text = strip_readline_prompt_markers(self._safe_text(self._input_fn))
         if prompt or buffer_text:
             self._write_fn(f"{prompt}{buffer_text}")
         self._flush_fn()

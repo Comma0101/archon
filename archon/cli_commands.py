@@ -117,6 +117,10 @@ def _runtime_mcp_server_names(config) -> list[str]:
     return sorted(names)
 
 
+def _native_plugin_names() -> list[str]:
+    return ["calls", "telegram", "web"]
+
+
 def build_slash_subvalues(
     model_catalog_or_config,
     runtime_config=None,
@@ -135,6 +139,10 @@ def build_slash_subvalues(
         ("list", "List native and MCP plugins"),
         ("show", "Show one plugin"),
     ]
+    plugin_values.extend(
+        (f"show {name}", "Show one native plugin")
+        for name in _native_plugin_names()
+    )
     plugin_values.extend(
         (f"show mcp:{server}", "Show one MCP plugin")
         for server in mcp_servers

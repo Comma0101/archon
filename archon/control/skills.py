@@ -75,6 +75,7 @@ BUILTIN_SKILLS: dict[str, BuiltinSkill] = {
     "researcher": BuiltinSkill(
         name="researcher",
         allowed_tools=(
+            "deep_research",
             "read_file",
             "list_dir",
             "memory_read",

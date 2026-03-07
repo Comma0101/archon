@@ -1,5 +1,7 @@
 """Tests for native research clients and stores."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from archon.research.google_deep_research import GoogleDeepResearchClient
@@ -65,6 +67,30 @@ def test_google_deep_research_client_loads_interaction_status():
     assert fake.get_calls == ["int-123"]
 
 
+def test_google_deep_research_client_reads_output_text_from_outputs_list():
+    class _DocShapeInteractionsClient:
+        def create(self, **kwargs):
+            return {"id": "unused", "status": "running"}
+
+        def get(self, interaction_id: str):
+            return {
+                "id": interaction_id,
+                "status": "completed",
+                "outputs": [
+                    {"text": "final report body"},
+                ],
+            }
+
+    client = GoogleDeepResearchClient(
+        _DocShapeInteractionsClient(),
+        agent="deep-research-pro-preview-12-2025",
+    )
+
+    result = client.get_research("int-123")
+
+    assert result.output_text == "final report body"
+
+
 def test_google_deep_research_client_rejects_custom_tools():
     fake = _FakeInteractionsClient()
     client = GoogleDeepResearchClient(fake, agent="deep-research-pro-preview-12-2025")
@@ -101,3 +127,49 @@ def test_research_job_summary_round_trips_from_store(tmp_path, monkeypatch):
     assert summary.kind == "deep_research"
     assert summary.status == "running"
     assert summary.summary == "LA market research started"
+
+
+def test_load_research_job_summary_refreshes_and_persists_latest_interaction_state(tmp_path, monkeypatch):
+    jobs_dir = tmp_path / "research" / "jobs"
+    monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", jobs_dir)
+
+    save_research_job(
+        ResearchJobRecord(
+            interaction_id="abc",
+            status="running",
+            prompt="Research LA restaurant market",
+            agent="deep-research-pro-preview-12-2025",
+            created_at="2026-03-06T22:00:00Z",
+            updated_at="2026-03-06T22:05:00Z",
+            summary="Research job started",
+            output_text="",
+            error="",
+        )
+    )
+
+    class _RefreshClient:
+        def __init__(self):
+            self.calls = []
+
+        def get_research(self, interaction_id: str):
+            self.calls.append(interaction_id)
+            return SimpleNamespace(
+                interaction_id=interaction_id,
+                status="completed",
+                output_text="Final report body",
+            )
+
+    refresh_client = _RefreshClient()
+
+    summary = load_research_job_summary("abc", refresh_client=refresh_client)
+
+    assert refresh_client.calls == ["abc"]
+    assert summary is not None
+    assert summary.status == "completed"
+    assert summary.summary == "Final report body"
+
+    reloaded = load_research_job_summary("abc")
+
+    assert reloaded is not None
+    assert reloaded.status == "completed"
+    assert reloaded.summary == "Final report body"

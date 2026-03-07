@@ -97,7 +97,11 @@ class Agent:
         self._repair_history_tool_sequence()
         self.history.append({"role": "user", "content": user_message})
         _maybe_capture_preference_memory(user_message)
-        deep_research_message = self._maybe_start_deep_research_job(turn_id, user_message)
+        deep_research_message = self._maybe_start_deep_research_job(
+            turn_id,
+            user_message,
+            active_profile=active_profile,
+        )
         if deep_research_message is not None:
             self.history.append({"role": "assistant", "content": deep_research_message})
             return deep_research_message
@@ -279,7 +283,11 @@ class Agent:
         self._repair_history_tool_sequence()
         self.history.append({"role": "user", "content": user_message})
         _maybe_capture_preference_memory(user_message)
-        deep_research_message = self._maybe_start_deep_research_job(turn_id, user_message)
+        deep_research_message = self._maybe_start_deep_research_job(
+            turn_id,
+            user_message,
+            active_profile=active_profile,
+        )
         if deep_research_message is not None:
             self.history.append({"role": "assistant", "content": deep_research_message})
             yield deep_research_message
@@ -550,7 +558,13 @@ class Agent:
                 return cfg_profile
         return "default"
 
-    def _maybe_start_deep_research_job(self, turn_id: str, user_message: str) -> str | None:
+    def _maybe_start_deep_research_job(
+        self,
+        turn_id: str,
+        user_message: str,
+        *,
+        active_profile: str,
+    ) -> str | None:
         if self._orchestrator_mode() != "hybrid":
             return None
         deep_cfg = getattr(getattr(self.config, "research", None), "google_deep_research", None)
@@ -559,6 +573,28 @@ class Agent:
         lane, reason = classify_route(user_message)
         if lane != "job" or reason != "deep_research_request":
             return None
+        policy_decision = evaluate_tool_policy(
+            config=self.config,
+            tool_name="deep_research",
+            mode="implement",
+            profile_name=active_profile,
+        )
+        self._emit_hook(
+            "policy.decision",
+            {
+                "turn_id": turn_id,
+                "name": "deep_research",
+                "decision": policy_decision.decision,
+                "reason": policy_decision.reason,
+                "profile": policy_decision.profile,
+                "mode": policy_decision.mode,
+            },
+        )
+        if policy_decision.decision == "deny":
+            return (
+                "Error: Policy denied research job 'deep_research' "
+                f"({policy_decision.reason})"
+            )
         try:
             message = self._start_deep_research_job(turn_id, user_message)
         except Exception as e:

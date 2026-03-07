@@ -107,6 +107,8 @@ def _coerce_interaction(interaction: object) -> DeepResearchInteraction:
             or _field(response, "text")
             or ""
         )
+    if not output_text:
+        output_text = _extract_output_text_from_outputs(_field(interaction, "outputs"))
     return DeepResearchInteraction(
         interaction_id=str(interaction_id or "").strip(),
         status=str(status or "unknown").strip().lower() or "unknown",
@@ -118,3 +120,16 @@ def _field(obj: object, name: str) -> Any:
     if isinstance(obj, dict):
         return obj.get(name)
     return getattr(obj, name, None)
+
+
+def _extract_output_text_from_outputs(outputs: object) -> str:
+    if not isinstance(outputs, list):
+        return ""
+    for item in reversed(outputs):
+        text = _field(item, "text")
+        if text is None:
+            continue
+        normalized = str(text or "").strip()
+        if normalized:
+            return normalized
+    return ""

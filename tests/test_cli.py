@@ -541,6 +541,36 @@ class TestCliCommands:
         assert "call:call-1" in msg
         assert "worker:sess-2" not in msg
 
+    def test_handle_repl_command_jobs_active_includes_in_progress_research_jobs(self, monkeypatch):
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+        )
+        jobs = [
+            SimpleNamespace(
+                job_id="research:abc",
+                kind="deep_research",
+                status="in_progress",
+                summary="Still researching",
+                last_update_at="2026-03-06T22:05:00Z",
+            ),
+            SimpleNamespace(
+                job_id="worker:sess-1",
+                kind="worker_session",
+                status="ok",
+                summary="Done",
+                last_update_at="2026-03-06T22:00:00Z",
+            ),
+        ]
+        monkeypatch.setattr("archon.cli_repl_commands._collect_job_summaries", lambda limit=10: jobs)
+
+        action, msg = _handle_repl_command(agent, "/jobs active")
+
+        assert action == "jobs"
+        assert msg.startswith("Jobs: showing=1 | active=1 | filter=active")
+        assert "research:abc" in msg
+        assert "worker:sess-1" not in msg
+
     def test_handle_repl_command_job_shows_summary(self, monkeypatch):
         agent = SimpleNamespace(
             llm=SimpleNamespace(model="test"),
@@ -628,6 +658,91 @@ class TestCliCommands:
         assert "job_id: research:abc" in msg
         assert "job_kind: deep_research" in msg
         assert "job_summary: Completed" in msg
+
+    def test_handle_repl_command_job_refreshes_research_job_from_client(self, monkeypatch, tmp_path):
+        from archon.research.models import ResearchJobRecord
+        from archon.research.store import save_research_job
+
+        monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path / "research" / "jobs")
+        monkeypatch.setattr("archon.cli_repl_commands.load_worker_job_summary", lambda _ref: None)
+        monkeypatch.setattr("archon.cli_repl_commands.load_call_job_summary", lambda _ref: None)
+        save_research_job(
+            ResearchJobRecord(
+                interaction_id="abc",
+                status="running",
+                prompt="Research LA restaurant market",
+                agent="deep-research-pro-preview-12-2025",
+                created_at="2026-03-06T22:00:00Z",
+                updated_at="2026-03-06T22:05:00Z",
+                summary="Research job started",
+                output_text="",
+                error="",
+            )
+        )
+
+        class _FakeDeepResearchClient:
+            def __init__(self):
+                self.calls = []
+
+            def get_research(self, interaction_id: str):
+                self.calls.append(interaction_id)
+                return SimpleNamespace(
+                    interaction_id=interaction_id,
+                    status="completed",
+                    output_text="Final report body",
+                )
+
+        client = _FakeDeepResearchClient()
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+            _create_google_deep_research_client=lambda: client,
+        )
+
+        action, msg = _handle_repl_command(agent, "/job research:abc")
+
+        assert action == "job"
+        assert client.calls == ["abc"]
+        assert "job_status: completed" in msg
+        assert "job_summary: Final report body" in msg
+
+    def test_handle_repl_command_jobs_refreshes_research_job_from_client(self, monkeypatch):
+        stale_job = SimpleNamespace(
+            job_id="research:abc",
+            kind="deep_research",
+            status="running",
+            summary="Research job started",
+            last_update_at="2026-03-06T22:05:00Z",
+        )
+        monkeypatch.setattr("archon.cli_repl_commands._collect_job_summaries", lambda limit=10: [stale_job])
+
+        client = object()
+        load_calls = []
+
+        def fake_load(interaction_id: str, refresh_client=None):
+            load_calls.append((interaction_id, refresh_client))
+            assert refresh_client is client
+            return SimpleNamespace(
+                job_id="research:abc",
+                kind="deep_research",
+                status="completed",
+                summary="Final report body",
+                last_update_at="2026-03-06T22:10:00Z",
+            )
+
+        monkeypatch.setattr("archon.cli_repl_commands.load_research_job_summary", fake_load)
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+            _create_google_deep_research_client=lambda: client,
+        )
+
+        action, msg = _handle_repl_command(agent, "/jobs")
+
+        assert action == "jobs"
+        assert load_calls == [("abc", client)]
+        assert "completed" in msg
+        assert "Final report body" in msg
 
     def test_handle_repl_command_mcp_reports_enabled_counts_and_server_names(self):
         cfg = Config()
@@ -1450,6 +1565,14 @@ class TestCliCommands:
         assert (changed, msg) == (False, "")
         assert agent.policy_profile == "safe"
 
+    def test_auto_activate_skill_ignores_quoted_meta_discussion(self):
+        agent = _LocalCommandAgent()
+
+        changed, msg = _maybe_auto_activate_skill(agent, 'What does "use researcher skill" do?')
+
+        assert (changed, msg) == (False, "")
+        assert agent.policy_profile == "safe"
+
 class _FakeReadline:
     def __init__(self, line_buffer=""):
         self.line_buffer = line_buffer
@@ -2114,7 +2237,10 @@ class TestSlashCompleter:
 
     def test_plugins_show_value_completion_from_line_buffer(self, monkeypatch):
         monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/plugins show ")
-        assert _slash_completer("", 0) is None
+        assert _slash_completer("", 0) == "calls"
+        assert _slash_completer("", 1) == "telegram"
+        assert _slash_completer("", 2) == "web"
+        assert _slash_completer("", 3) is None
 
     def test_mcp_subcommand_completion_from_line_buffer(self, monkeypatch):
         monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/mcp ")
@@ -2184,6 +2310,13 @@ class TestPickSlashCommand:
         assert ("show mcp:exa", "Show one MCP plugin") in values["/plugins"]
         assert all("mcp:docs" not in value for value, _desc in values["/plugins"])
 
+    def test_build_slash_subvalues_exposes_native_plugin_show_values(self):
+        values = _build_slash_subvalues(Config())
+
+        assert ("show calls", "Show one native plugin") in values["/plugins"]
+        assert ("show telegram", "Show one native plugin") in values["/plugins"]
+        assert ("show web", "Show one native plugin") in values["/plugins"]
+
     def test_plugins_show_value_completion_uses_live_runtime_names(self, monkeypatch):
         cfg = Config()
         cfg.mcp.servers = {
@@ -2192,8 +2325,16 @@ class TestPickSlashCommand:
         monkeypatch.setattr("archon.cli._SLASH_SUBVALUES", _build_slash_subvalues(cfg))
         monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/plugins show ")
 
-        assert _slash_completer("", 0) == "mcp:exa"
-        assert _slash_completer("", 1) is None
+        matches = []
+        idx = 0
+        while True:
+            match = _slash_completer("", idx)
+            if match is None:
+                break
+            matches.append(match)
+            idx += 1
+
+        assert matches == ["calls", "telegram", "web", "mcp:exa"]
 
     def test_mcp_show_value_completion_uses_live_runtime_names(self, monkeypatch):
         cfg = Config()
@@ -2222,7 +2363,7 @@ class TestPickSlashCommand:
         skill_values = [value for value, _desc in _SLASH_SUBVALUES["/skills"]]
         assert skill_values == ["list", "show coder", "use coder", "clear"]
         plugin_values = [value for value, _desc in _SLASH_SUBVALUES["/plugins"]]
-        assert plugin_values == ["list", "show"]
+        assert plugin_values == ["list", "show", "show calls", "show telegram", "show web"]
 
     def test_pick_slash_command_two_level(self, monkeypatch):
         picks = iter(["/calls", "on"])
@@ -2261,6 +2402,9 @@ class TestPickSlashCommand:
         assert _pick_slash_command() == "/plugins list"
         assert "list" in seen[1]
         assert "show" not in seen[1]
+        assert "show calls" in seen[1]
+        assert "show telegram" in seen[1]
+        assert "show web" in seen[1]
 
     def test_pick_slash_command_mcp_runtime_omits_incomplete_generic_verbs(self, monkeypatch):
         cfg = Config()

@@ -163,6 +163,33 @@ class TestTelegramAdapterCommands:
         assert events[0] == ("telegram", "received from 99: hello from telegram")
         assert events[-1] == ("telegram", "replied to 99: ok")
 
+    def test_activity_sink_redacts_and_sanitizes_received_message_preview(self, monkeypatch):
+        adapter = _adapter()
+        sent = []
+        events = []
+
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260306-190002")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: None,
+        )
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+        adapter.set_activity_sink(lambda event: events.append((event.source, event.message)))
+
+        adapter._handle_message(
+            {
+                "text": "hello OPENAI_API_KEY=sk-live \x1b[31mboom\x1b[0m",
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        assert sent == [(99, "ok")]
+        assert events[0] == (
+            "telegram",
+            "received from 99: hello OPENAI_API_KEY=[REDACTED] boom",
+        )
+
     def test_activity_sink_emits_blocked_approval_notice(self, monkeypatch):
         adapter = TelegramAdapter(
             token="123:abc",
@@ -483,6 +510,32 @@ class TestTelegramAdapterCommands:
 
         assert adapter._offset == 106
         assert len(calls) == 1
+
+    def test_startup_sync_retries_after_transient_failure(self, monkeypatch):
+        adapter = _adapter()
+        calls = []
+
+        def fake_api_call(method, payload, timeout=10):
+            calls.append((method, payload, timeout))
+            if len(calls) == 1:
+                raise RuntimeError("transient")
+            return {
+                "ok": True,
+                "result": [
+                    {"update_id": 220, "message": {"text": "latest"}},
+                ],
+            }
+
+        monkeypatch.setattr(adapter, "_api_call", fake_api_call)
+
+        adapter._sync_startup_offset()
+        assert adapter._offset is None
+        assert adapter._startup_synced is False
+
+        adapter._sync_startup_offset()
+
+        assert adapter._offset == 221
+        assert adapter._startup_synced is True
 
     def test_news_command_uses_news_backend(self, monkeypatch):
         adapter = _adapter()

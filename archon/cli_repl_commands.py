@@ -37,11 +37,12 @@ _SKILL_REQUEST_ALIASES = {
 _SKILL_REQUEST_PATTERN = "|".join(
     sorted((re.escape(alias) for alias in _SKILL_REQUEST_ALIASES), key=len, reverse=True)
 )
+_SKILL_REQUEST_PREFIX = r"(?:please\s+)?(?:archon[,:]?\s+)?(?:can you\s+)?(?:could you\s+)?(?:let'?s\s+)?"
 _EXPLICIT_SKILL_PATTERNS = (
-    re.compile(rf"\buse (?P<skill>{_SKILL_REQUEST_PATTERN}) skill\b", re.IGNORECASE),
-    re.compile(rf"\bswitch to (?P<skill>{_SKILL_REQUEST_PATTERN})(?: skill| mode)?\b", re.IGNORECASE),
-    re.compile(rf"\bact as(?: an?| the)? (?P<skill>{_SKILL_REQUEST_PATTERN})(?: skill)?\b", re.IGNORECASE),
-    re.compile(rf"\benter (?P<skill>{_SKILL_REQUEST_PATTERN}) mode\b", re.IGNORECASE),
+    re.compile(rf"^\s*{_SKILL_REQUEST_PREFIX}use (?P<skill>{_SKILL_REQUEST_PATTERN}) skill\b", re.IGNORECASE),
+    re.compile(rf"^\s*{_SKILL_REQUEST_PREFIX}switch to (?P<skill>{_SKILL_REQUEST_PATTERN})(?: skill| mode)?\b", re.IGNORECASE),
+    re.compile(rf"^\s*{_SKILL_REQUEST_PREFIX}act as(?: an?| the)? (?P<skill>{_SKILL_REQUEST_PATTERN})(?: skill)?\b", re.IGNORECASE),
+    re.compile(rf"^\s*{_SKILL_REQUEST_PREFIX}enter (?P<skill>{_SKILL_REQUEST_PATTERN}) mode\b", re.IGNORECASE),
 )
 
 
@@ -740,6 +741,7 @@ def _load_job_summary(job_ref: str):
 
 _ACTIVE_JOB_STATUSES = {
     "approved",
+    "in_progress",
     "pending",
     "paused",
     "queued",
@@ -751,6 +753,28 @@ _ACTIVE_JOB_STATUSES = {
 
 def _job_is_active(job) -> bool:
     return str(getattr(job, "status", "") or "").strip().lower() in _ACTIVE_JOB_STATUSES
+
+
+def _make_deep_research_refresh_client(agent):
+    creator = getattr(agent, "_create_google_deep_research_client", None)
+    if not callable(creator):
+        return None
+    try:
+        return creator()
+    except Exception:
+        return None
+
+
+def _refresh_job_summary(job, refresh_client):
+    if refresh_client is None:
+        return job
+    if str(getattr(job, "kind", "") or "").strip().lower() != "deep_research":
+        return job
+    job_id = str(getattr(job, "job_id", "") or "").strip()
+    if not job_id.startswith("research:"):
+        return job
+    refreshed = load_research_job_summary(job_id.split(":", 1)[1], refresh_client=refresh_client)
+    return refreshed or job
 
 
 def _parse_jobs_args(parts: list[str]) -> tuple[str, int] | None:
@@ -791,7 +815,6 @@ def _format_jobs_list(jobs, *, view: str, limit: int) -> str:
 
 def handle_jobs_command(agent, text: str) -> tuple[bool, str]:
     """Handle `/jobs` command (list recent cross-surface jobs)."""
-    _ = agent
     raw = (text or "").strip()
     parts = raw.split()
     if not parts or parts[0].lower() != "/jobs":
@@ -804,12 +827,14 @@ def handle_jobs_command(agent, text: str) -> tuple[bool, str]:
 
     scan_limit = max(limit, 100) if view == "active" else limit
     jobs = _collect_job_summaries(limit=scan_limit)
+    refresh_client = _make_deep_research_refresh_client(agent)
+    if refresh_client is not None:
+        jobs = [_refresh_job_summary(job, refresh_client) for job in jobs]
     return True, _format_jobs_list(jobs, view=view, limit=limit)
 
 
 def handle_job_command(agent, text: str) -> tuple[bool, str]:
     """Handle `/job <id>` command (show one normalized job summary)."""
-    _ = agent
     raw = (text or "").strip()
     parts = raw.split(maxsplit=1)
     if not parts or parts[0].lower() != "/job":
@@ -817,9 +842,14 @@ def handle_job_command(agent, text: str) -> tuple[bool, str]:
     if len(parts) < 2 or not parts[1].strip():
         return True, "Usage: /job <id>"
 
-    job = _load_job_summary(parts[1].strip())
+    job_ref = parts[1].strip()
+    refresh_client = _make_deep_research_refresh_client(agent)
+    if refresh_client is not None and job_ref.startswith("research:"):
+        job = load_research_job_summary(job_ref.split(":", 1)[1], refresh_client=refresh_client)
+    else:
+        job = _load_job_summary(job_ref)
     if job is None:
-        return True, f"Job not found: {parts[1].strip()}"
+        return True, f"Job not found: {job_ref}"
     return True, format_job_summary(job)
 
 

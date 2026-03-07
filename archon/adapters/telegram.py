@@ -47,6 +47,7 @@ from archon.config import ensure_dirs, load_config
 from archon.history import new_session_id, save_exchange
 from archon.news.runner import get_or_build_news_digest
 from archon.news.state import load_cached_digest, load_news_state, news_state_path
+from archon.security.redaction import sanitize_terminal_notice_text
 from archon.safety import Level
 from archon.ux.events import ActivityEvent
 
@@ -157,8 +158,8 @@ class TelegramAdapter:
         """
         if self._startup_synced:
             return
-        self._startup_synced = True
         if self._offset is not None:
+            self._startup_synced = True
             return
         try:
             data = self._api_call(
@@ -171,6 +172,7 @@ class TelegramAdapter:
                 return
             latest_update_id = max(int(update["update_id"]) for update in result if "update_id" in update)
             self._offset = latest_update_id + 1
+            self._startup_synced = True
             print(
                 f"[telegram] Skipped {len(result)} pending update(s) on startup",
                 file=sys.stderr,
@@ -296,12 +298,14 @@ class TelegramAdapter:
             self._send_text_and_record(chat_id, body, self._build_news_reply(body))
             return
 
-        handled, msg = handle_jobs_command(None, body)
+        job_agent = self._get_local_shell_agent(chat_id, body)
+
+        handled, msg = handle_jobs_command(job_agent, body)
         if handled:
             self._send_text_and_record(chat_id, body, msg)
             return
 
-        handled, msg = handle_job_command(None, body)
+        handled, msg = handle_job_command(job_agent, body)
         if handled:
             self._send_text_and_record(chat_id, body, msg)
             return
@@ -333,13 +337,10 @@ class TelegramAdapter:
         self._handle_chat_body(chat_id, user_id, body, history_user_text=body)
 
     def _handle_local_shell_command(self, chat_id: int, body: str) -> bool:
-        try:
-            agent = self._get_or_create_chat_agent(chat_id)
-        except Exception as exc:
-            agent = self._build_local_shell_fallback_agent(body)
-            if agent is None:
-                self._send_text_and_record(chat_id, body, f"Local command unavailable: {exc}")
-                return True
+        agent = self._get_local_shell_agent(chat_id, body)
+        if agent is None:
+            self._send_text_and_record(chat_id, body, "Local command unavailable")
+            return True
         for handler in (
             handle_status_command,
             handle_cost_command,
@@ -355,6 +356,12 @@ class TelegramAdapter:
                 self._send_text_and_record(chat_id, body, msg)
                 return True
         return False
+
+    def _get_local_shell_agent(self, chat_id: int, body: str):
+        try:
+            return self._get_or_create_chat_agent(chat_id)
+        except Exception:
+            return self._build_local_shell_fallback_agent(body)
 
     def _build_local_shell_fallback_agent(self, body: str):
         raw = (body or "").strip()
@@ -924,7 +931,7 @@ class TelegramAdapter:
             pass
 
     def _preview_text(self, text: str, limit: int = 80) -> str:
-        compact = " ".join(str(text or "").split())
+        compact = sanitize_terminal_notice_text(text)
         if len(compact) <= limit:
             return compact
         return compact[: max(0, limit - 3)] + "..."

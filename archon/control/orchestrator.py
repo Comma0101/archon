@@ -271,12 +271,12 @@ def _classify_route(user_message: str) -> tuple[str, str]:
         return "fast", "simple_chat"
 
     text_l = text.lower()
+    if _is_operator_request(text, text_l):
+        return "operator", "bounded_file_or_status_request"
     if is_deep_research_request(text_l):
         return "job", "deep_research_request"
     if _is_job_request(text_l):
         return "job", "broad_or_delegated_request"
-    if _is_operator_request(text, text_l):
-        return "operator", "bounded_file_or_status_request"
     return "fast", "simple_chat"
 
 

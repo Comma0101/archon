@@ -1205,11 +1205,84 @@ class TestAgentLoop:
             reason="deep_research_request",
         )
 
+    def test_deep_research_request_respects_policy_profile(self, monkeypatch, tmp_path):
+        agent = make_agent([])
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path / "research" / "jobs")
+        agent.config.orchestrator.enabled = True
+        agent.config.orchestrator.mode = "hybrid"
+        agent.config.orchestrator.shadow_eval = False
+        agent.config.research.google_deep_research.enabled = True
+        agent.config.profiles = {
+            "default": ProfileConfig(),
+            "safe": ProfileConfig(allowed_tools=["memory_read"], max_mode="implement"),
+        }
+        started = []
+
+        class _FakeDeepResearchClient:
+            def start_research(self, prompt: str, *, tools=None):
+                started.append((prompt, tools))
+                return SimpleNamespace(
+                    interaction_id="int-123",
+                    status="running",
+                    output_text="",
+                )
+
+        monkeypatch.setattr(agent, "_create_google_deep_research_client", lambda: _FakeDeepResearchClient())
+
+        result = agent.run(
+            "Deeply research the LA restaurant market and synthesize competitors",
+            policy_profile="safe",
+        )
+
+        assert result == "Error: Policy denied research job 'deep_research' (tool_not_allowed)"
+        assert started == []
+        assert agent.llm.chat.call_count == 0
+
+    def test_researcher_skill_profile_allows_deep_research_job(self, monkeypatch, tmp_path):
+        from archon.control.skills import ensure_session_skill_profile
+
+        agent = make_agent([])
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path / "research" / "jobs")
+        agent.config.orchestrator.enabled = True
+        agent.config.orchestrator.mode = "hybrid"
+        agent.config.orchestrator.shadow_eval = False
+        agent.config.research.google_deep_research.enabled = True
+        agent.policy_profile = ensure_session_skill_profile(agent.config, skill_name="researcher")
+        started = []
+
+        class _FakeDeepResearchClient:
+            def start_research(self, prompt: str, *, tools=None):
+                started.append((prompt, tools))
+                return SimpleNamespace(
+                    interaction_id="int-123",
+                    status="running",
+                    output_text="",
+                )
+
+        monkeypatch.setattr(agent, "_create_google_deep_research_client", lambda: _FakeDeepResearchClient())
+
+        result = agent.run("Deeply research the LA restaurant market and synthesize competitors")
+
+        assert "Research job started: research:int-123" in result
+        assert started == [("Deeply research the LA restaurant market and synthesize competitors", None)]
+
     def test_simple_research_question_stays_on_fast_path(self):
         lane, reason = orchestrator_module._classify_route("What is Exa MCP?")
 
         assert lane == "fast"
         assert reason == "simple_chat"
+
+    def test_operator_file_request_beats_deep_research_route(self):
+        lane, reason = orchestrator_module._classify_route(
+            "Open report.md and compare competitors in that file."
+        )
+
+        assert lane == "operator"
+        assert reason == "bounded_file_or_status_request"
 
     def test_orchestrator_legacy_route_hook_includes_default_metadata(self, monkeypatch):
         responses = [
