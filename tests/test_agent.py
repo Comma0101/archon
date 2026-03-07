@@ -405,7 +405,7 @@ class TestAgentLoop:
         tool_result = agent.history[2]["content"][0]["content"]
         assert isinstance(tool_result, str)
         assert len(tool_result) <= 300
-        assert "archon truncated tool result" in tool_result
+        assert "chars omitted" in tool_result
 
     def test_tool_result_redacts_api_keys_before_terminal_render_and_history(self, monkeypatch, capsys):
         responses = [
@@ -1404,16 +1404,19 @@ class TestAgentLoop:
         )
 
     def test_iteration_limit(self):
-        # All responses have tool calls, never a text response
-        tool_response = LLMResponse(
-            text=None,
-            tool_calls=[ToolCall(id="tc_loop", name="shell", arguments={"command": "echo loop"})],
-            raw_content=[{"type": "tool_use", "id": "tc_loop", "name": "shell", "input": {"command": "echo loop"}}],
-            input_tokens=10, output_tokens=10,
-        )
+        # All responses have tool calls with *different* arguments so loop
+        # detection doesn't fire — only the iteration cap should trigger.
         config = Config()
         config.agent.max_iterations = 3
-        responses = [tool_response] * 3
+        responses = [
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(id=f"tc_{i}", name="shell", arguments={"command": f"echo {i}"})],
+                raw_content=[{"type": "tool_use", "id": f"tc_{i}", "name": "shell", "input": {"command": f"echo {i}"}}],
+                input_tokens=10, output_tokens=10,
+            )
+            for i in range(3)
+        ]
 
         llm = MagicMock()
         llm.chat = MagicMock(side_effect=responses)
@@ -1423,6 +1426,29 @@ class TestAgentLoop:
 
         result = agent.run("loop forever")
         assert "Iteration limit" in result
+
+    def test_loop_detection_breaks_early(self):
+        # Same tool call repeated triggers loop detection before iteration limit.
+        tool_response = LLMResponse(
+            text=None,
+            tool_calls=[ToolCall(id="tc_loop", name="shell", arguments={"command": "echo loop"})],
+            raw_content=[{"type": "tool_use", "id": "tc_loop", "name": "shell", "input": {"command": "echo loop"}}],
+            input_tokens=10, output_tokens=10,
+        )
+        config = Config()
+        config.agent.max_iterations = 10
+        responses = [tool_response] * 10
+
+        llm = MagicMock()
+        llm.chat = MagicMock(side_effect=responses)
+        tools = ToolRegistry(archon_source_dir=None)
+        agent = Agent(llm, tools, config)
+        agent._system_prompt = "test"
+
+        result = agent.run("do something")
+        assert "repeating the same actions" in result
+        # Should have stopped early — fewer than max_iterations LLM calls
+        assert llm.chat.call_count == 3
 
     def test_token_tracking(self):
         responses = [

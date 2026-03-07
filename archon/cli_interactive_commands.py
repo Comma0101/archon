@@ -469,6 +469,20 @@ def chat_cmd(
             telegram_adapter.stop()
 
 
+_TOOL_PHASE_LABELS: dict[str, str] = {
+    "shell": "running command",
+    "read_file": "reading file",
+    "write_file": "writing file",
+    "edit_file": "editing file",
+    "web_search": "searching web",
+    "web_read": "fetching page",
+    "memory_read": "reading memory",
+    "memory_write": "writing memory",
+    "memory_lookup": "looking up memory",
+    "delegate_code_task": "delegating task",
+}
+
+
 def _tool_spinner_label(name: str, args: dict | None) -> str:
     """Compact label for long-running tool phases in terminal UX."""
     tool = (name or "").strip().lower()
@@ -478,7 +492,7 @@ def _tool_spinner_label(name: str, args: dict | None) -> str:
         return f"mcp {server}" if server else "mcp"
     if tool == "delegate_code_task":
         worker = str(data.get("worker", "auto") or "auto").strip().lower()
-        return f"delegate {worker}"
+        return f"delegating {worker}"
     if tool == "worker_send":
         session_id = str(data.get("session_id", "") or "").strip()
         return f"worker send {session_id[:8]}" if session_id else "worker send"
@@ -487,8 +501,9 @@ def _tool_spinner_label(name: str, args: dict | None) -> str:
         return f"worker start {worker}"
     if tool.startswith("worker_"):
         return "worker task"
-    if tool == "read_file":
-        return "reading file"
+    label = _TOOL_PHASE_LABELS.get(tool)
+    if label:
+        return label
     return f"tool {tool}" if tool else "tool"
 
 

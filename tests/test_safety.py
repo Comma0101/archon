@@ -123,6 +123,28 @@ class TestPipes:
         assert classify("ls && rm file") == Level.DANGEROUS
 
 
+class TestAURHelpers:
+    def test_yay_search_is_safe(self):
+        assert classify("yay -Ss tradingview") == Level.SAFE
+        assert classify("yay -Qi linux") == Level.SAFE
+        assert classify("yay -Qs python") == Level.SAFE
+
+    def test_yay_install_is_dangerous(self):
+        assert classify("yay -S firefox") == Level.DANGEROUS
+        assert classify("yay -Syu") == Level.DANGEROUS
+        assert classify("yay -R package") == Level.DANGEROUS
+
+    def test_paru_search_is_safe(self):
+        assert classify("paru -Ss tradingview") == Level.SAFE
+        assert classify("paru -Qi linux") == Level.SAFE
+
+    def test_archon_help_is_safe(self):
+        assert classify("archon --help") == Level.SAFE
+        assert classify("archon --version") == Level.SAFE
+        assert classify("archon system") == Level.SAFE
+        assert classify("archon news status") == Level.SAFE
+
+
 class TestSelfModification:
     def test_edit_own_source_dangerous(self):
         assert classify("vim /opt/archon/agent.py",

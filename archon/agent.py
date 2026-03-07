@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import queue
@@ -26,6 +27,8 @@ from archon.config import Config
 from archon.security.redaction import redact_secret_like_text
 
 
+logger = logging.getLogger(__name__)
+
 ANSI_RESET = "\033[0m"
 ANSI_TOOL_CALL = "\033[96m"       # bright cyan
 ANSI_TOOL_RESULT = "\033[37m"     # readable light gray/white
@@ -39,6 +42,23 @@ _WORKER_TOOL_NAMES = {
     "worker_poll",
     "worker_list",
 }
+
+
+def _detect_tool_loop(recent_calls: list[tuple[str, dict]], window: int = 6, min_repeats: int = 3) -> bool:
+    """Detect repetitive tool call patterns in recent history."""
+    if len(recent_calls) < min_repeats:
+        return False
+    # Check same exact call repeated
+    last = recent_calls[-1]
+    same_count = sum(1 for c in recent_calls[-window:] if c == last)
+    if same_count >= min_repeats:
+        return True
+    # Check alternating A-B-A-B pattern
+    if len(recent_calls) >= 6:
+        tail = recent_calls[-6:]
+        if tail[0] == tail[2] == tail[4] and tail[1] == tail[3] == tail[5]:
+            return True
+    return False
 
 
 class Agent:
@@ -116,16 +136,25 @@ class Agent:
             compactions=pending_compactions,
         )
 
+        _recent_tool_calls: list[tuple[str, dict]] = []
+
         for iteration in range(self.max_iterations):
+            if iteration > 0:
+                iteration_hint = f"\n\n[Iteration {iteration + 1}/{self.max_iterations}. Be targeted — don't repeat previous approaches.]"
+                iter_system_prompt = turn_system_prompt + iteration_hint
+            else:
+                iter_system_prompt = turn_system_prompt
+
             if self.on_thinking:
                 self.on_thinking()
+            _iter_sp = iter_system_prompt  # capture for lambda closure
             response = orchestrate_response(
                 mode=self._orchestrator_mode(),
                 turn_id=turn_id,
                 user_message=user_message,
                 run_legacy=lambda: _chat_with_retry(
                     self.llm,
-                    turn_system_prompt,
+                    _iter_sp,
                     self.history,
                     self.tools.get_schemas(),
                     max_attempts=self.llm_retry_attempts,
@@ -261,11 +290,22 @@ class Agent:
                     self.history.pop()
                 raise
 
+            # Track tool calls for loop detection
+            for call in response.tool_calls:
+                _recent_tool_calls.append((call.name, call.arguments))
+            if len(_recent_tool_calls) > 10:
+                _recent_tool_calls = _recent_tool_calls[-10:]
+            if _detect_tool_loop(_recent_tool_calls):
+                stuck_msg = "I notice I'm repeating the same actions. Let me stop and reassess."
+                self.history.append({"role": "assistant", "content": stuck_msg})
+                return stuck_msg
+
             # Append tool results as user message (Anthropic format)
             self.history.append({
                 "role": "user",
                 "content": tool_results,
             })
+            self._enforce_iteration_budget()
 
         return "[Iteration limit reached]"
 
@@ -303,18 +343,27 @@ class Agent:
             compactions=pending_compactions,
         )
 
+        _recent_tool_calls: list[tuple[str, dict]] = []
+
         for iteration in range(self.max_iterations):
+            if iteration > 0:
+                iteration_hint = f"\n\n[Iteration {iteration + 1}/{self.max_iterations}. Be targeted — don't repeat previous approaches.]"
+                iter_system_prompt = turn_system_prompt + iteration_hint
+            else:
+                iter_system_prompt = turn_system_prompt
+
             if self.on_thinking:
                 self.on_thinking()
 
             # Try streaming (with the same lightweight transient retry policy used by run()).
+            _iter_sp = iter_system_prompt  # capture for lambda closure
             collected_text, response = orchestrate_stream_response(
                 mode=self._orchestrator_mode(),
                 turn_id=turn_id,
                 user_message=user_message,
                 run_legacy_stream=lambda: _chat_stream_collect_with_retry(
                     self.llm,
-                    turn_system_prompt,
+                    _iter_sp,
                     self.history,
                     self.tools.get_schemas(),
                     max_attempts=self.llm_retry_attempts,
@@ -459,10 +508,22 @@ class Agent:
                     self.history.pop()
                 raise
 
+            # Track tool calls for loop detection
+            for call in response.tool_calls:
+                _recent_tool_calls.append((call.name, call.arguments))
+            if len(_recent_tool_calls) > 10:
+                _recent_tool_calls = _recent_tool_calls[-10:]
+            if _detect_tool_loop(_recent_tool_calls):
+                stuck_msg = "I notice I'm repeating the same actions. Let me stop and reassess."
+                self.history.append({"role": "assistant", "content": stuck_msg})
+                yield stuck_msg
+                return
+
             self.history.append({
                 "role": "user",
                 "content": tool_results,
             })
+            self._enforce_iteration_budget()
 
         yield "[Iteration limit reached]"
 
@@ -690,11 +751,12 @@ class Agent:
         if limit <= 0 or len(result_text) <= limit:
             return result_text
         omitted = len(result_text) - limit
-        suffix = f"\n... [archon truncated tool result: {omitted} chars omitted]"
-        keep = limit - len(suffix)
-        if keep < 32:
-            return result_text[:limit]
-        return result_text[:keep] + suffix
+        head_size = int(limit * 0.65)
+        tail_size = int(limit * 0.25)
+        middle = f"\n... [{omitted} chars omitted] ...\n"
+        if head_size + tail_size + len(middle) >= len(result_text):
+            return result_text
+        return result_text[:head_size] + middle + result_text[-tail_size:]
 
     def _repair_history_tool_sequence(self) -> None:
         """Drop malformed tool-turn fragments before provider calls.
@@ -734,6 +796,33 @@ class Agent:
             i += 1
         if changed:
             self.history = repaired
+
+    def _enforce_iteration_budget(self) -> None:
+        """Lightweight mid-turn trim: drop oldest messages if over char budget.
+
+        Called after each tool-result append inside the iteration loop so that
+        history cannot grow unbounded within a single turn.
+        """
+        max_chars = self.history_max_chars
+        trim_to = self.history_trim_to_chars
+        if max_chars <= 0 or trim_to <= 0:
+            return
+        current = _estimate_history_chars(self.history)
+        if current <= max_chars:
+            return
+        original_chars = current
+        dropped_count = 0
+        while len(self.history) > 2 and current > trim_to:
+            dropped = self.history.pop(0)
+            current -= _estimate_message_chars(dropped)
+            dropped_count += 1
+        if dropped_count > 0:
+            logger.info(
+                "Auto-compact: dropped %d oldest messages (was %d chars, now %d)",
+                dropped_count,
+                original_chars,
+                current,
+            )
 
     def _trim_history_if_needed(self) -> None:
         """Trim old history with a lightweight dual budget to avoid unbounded growth.
@@ -873,17 +962,16 @@ def _print_tool_call(name: str, args: dict, prefix: str = ""):
 
 
 def _print_tool_result(result: str, prefix: str = ""):
-    """Print truncated tool result to stderr."""
+    """Print compact tool result to stderr: first line + line count summary."""
     lines = result.splitlines()
     pfx = f"{prefix} " if prefix else ""
-    if len(lines) <= 5:
-        for line in lines:
-            print(f"{ANSI_TOOL_RESULT}{pfx}  {line}{ANSI_RESET}", file=sys.stderr)
-    else:
-        for line in lines[:3]:
-            print(f"{ANSI_TOOL_RESULT}{pfx}  {line}{ANSI_RESET}", file=sys.stderr)
+    if not lines:
+        return
+    first = lines[0][:200]
+    print(f"{ANSI_TOOL_RESULT}{pfx}  {first}{ANSI_RESET}", file=sys.stderr)
+    if len(lines) > 1:
         print(
-            f"{ANSI_TOOL_RESULT_META}{pfx}  ... ({len(lines) - 3} more lines){ANSI_RESET}",
+            f"{ANSI_TOOL_RESULT_META}{pfx}  ... ({len(lines) - 1} more lines){ANSI_RESET}",
             file=sys.stderr,
         )
 

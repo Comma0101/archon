@@ -267,13 +267,24 @@ def is_deep_research_request(user_message: str) -> bool:
         "do deep research",
         "deep research",
         "can you do deep research for me",
+        "deep research please",
+        "do a deep research",
+        "please do deep research",
     ):
         return False
 
-    if any(
-        phrase in text_l
-        for phrase in ("deep research", "deeply research", "research this deeply")
-    ):
+    # Check for deep research trigger phrases; if found, validate there is a
+    # substantive topic by requiring at least 2 remaining words of 3+ chars.
+    _trigger_phrases = ("deep research", "deeply research", "research this deeply")
+    matched_trigger = next((p for p in _trigger_phrases if p in text_l), None)
+    if matched_trigger:
+        remainder = text_l.replace(matched_trigger, "", 1).strip()
+        # Strip common filler words that don't constitute a topic
+        filler = {"on", "about", "into", "for", "the", "a", "an", "of",
+                  "can", "you", "do", "please", "me", "my", "i", "we"}
+        topic_words = [w for w in remainder.split() if len(w) >= 3 and w not in filler]
+        if len(topic_words) < 2:
+            return False
         return True
     has_research_intent = any(marker in text_l for marker in _DEEP_RESEARCH_INTENT_MARKERS)
     has_scope_hint = any(marker in text_l for marker in _DEEP_RESEARCH_SCOPE_MARKERS)

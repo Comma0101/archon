@@ -15,8 +15,8 @@ def test_load_config_calls_defaults(monkeypatch, tmp_path):
     assert cfg.calls.voice_service.mode in {"systemd", "subprocess"}
     assert cfg.agent.llm_request_timeout_sec == 45.0
     assert cfg.agent.llm_retry_attempts == 3
-    assert cfg.agent.tool_result_max_chars == 6000
-    assert cfg.agent.tool_result_worker_max_chars == 2500
+    assert cfg.agent.tool_result_max_chars == 3000
+    assert cfg.agent.tool_result_worker_max_chars == 1500
     assert cfg.orchestrator.enabled is False
     assert cfg.orchestrator.mode == "legacy"
     assert cfg.orchestrator.shadow_eval is True

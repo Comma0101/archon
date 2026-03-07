@@ -61,6 +61,20 @@ def list_research_jobs(limit: int = 20, *, refresh_client=None) -> list[Research
     return jobs
 
 
+def cancel_research_job(interaction_id: str, reason: str = "Cancelled by user") -> ResearchJobRecord | None:
+    """Cancel an in-progress research job by updating its status."""
+    record = load_research_job(interaction_id)
+    if record is None:
+        return None
+    if record.status not in ("in_progress", "running", "pending"):
+        return record  # Already terminal
+    record.status = "cancelled"
+    record.error = reason
+    record.updated_at = _now_iso()
+    save_research_job(record)
+    return record
+
+
 def load_research_job_summary(interaction_id: str, *, refresh_client=None) -> JobSummary | None:
     record = load_research_job(interaction_id, refresh_client=refresh_client)
     if record is None:
@@ -73,6 +87,44 @@ def list_research_job_summaries(limit: int = 20, *, refresh_client=None) -> list
         summarize_research_job(record)
         for record in list_research_jobs(limit=limit, refresh_client=refresh_client)
     ]
+
+
+def poll_research_job(interaction_id: str) -> ResearchJobRecord | None:
+    """Poll Google API for latest status and update stored record."""
+    record = load_research_job(interaction_id)
+    if record is None or record.status in ("completed", "cancelled", "error"):
+        return record  # Terminal states don't need polling
+    # Try polling via the API
+    try:
+        from archon.research.google_deep_research import GoogleDeepResearchClient
+        import os
+
+        api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY", "")
+        if not api_key:
+            return record
+        client = GoogleDeepResearchClient.from_api_key(api_key)
+        return _refresh_research_job(record, refresh_client=client)
+    except Exception:
+        pass  # Polling failure is non-fatal
+    return record
+
+
+def purge_completed_jobs(statuses: list[str] | None = None) -> int:
+    """Remove research jobs with given statuses. Returns count removed."""
+    if statuses is None:
+        statuses = ["cancelled", "error"]
+    removed = 0
+    if not RESEARCH_JOBS_DIR.exists():
+        return 0
+    for f in RESEARCH_JOBS_DIR.glob("*.json"):
+        try:
+            record = load_research_job(f.stem)
+            if record and record.status in statuses:
+                f.unlink()
+                removed += 1
+        except Exception:
+            continue
+    return removed
 
 
 def research_job_path(interaction_id: str) -> Path:
@@ -124,7 +176,15 @@ def _refresh_research_job(record: ResearchJobRecord, *, refresh_client=None) -> 
         error=record.error,
     )
     if changed:
-        return save_research_job(updated)
+        saved = save_research_job(updated)
+        if status.lower() in {"completed", "done", "failed", "cancelled"}:
+            _emit_job_completed_event(
+                job_kind="research",
+                job_id=record.interaction_id,
+                status=status,
+                summary=summary,
+            )
+        return saved
     return updated
 
 
@@ -139,3 +199,25 @@ def _summarize_research_state(*, status: str, output_text: str, fallback: str) -
     if normalized in {"running", "queued", "starting", "in_progress"} and fallback:
         return fallback
     return fallback or normalized or "unknown"
+
+
+def _emit_job_completed_event(
+    *,
+    job_kind: str,
+    job_id: str,
+    status: str,
+    summary: str,
+) -> None:
+    """Best-effort cross-surface notification when a research job completes."""
+    try:
+        from archon.ux.events import job_completed as _make_event
+        from archon.control.hooks import HookBus
+
+        event = _make_event(job_kind=job_kind, job_id=job_id, status=status, summary=summary)
+        _global_hook_bus = getattr(_emit_job_completed_event, "_hook_bus", None)
+        if isinstance(_global_hook_bus, HookBus):
+            from archon.control.contracts import HookEvent
+
+            _global_hook_bus.emit(HookEvent(kind="ux.job_completed", payload={"event": event}))
+    except Exception:
+        pass

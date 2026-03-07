@@ -40,14 +40,14 @@ class LLMConfig:
 
 @dataclass
 class AgentConfig:
-    max_iterations: int = 40
+    max_iterations: int = 15
     temperature: float = 0.3
     llm_request_timeout_sec: float = 45.0
     llm_retry_attempts: int = 3
     # Prompt-budget guard: cap tool_result payload size before adding to history.
-    tool_result_max_chars: int = 6000
+    tool_result_max_chars: int = 3000
     # Stricter cap for verbose worker/delegation tools.
-    tool_result_worker_max_chars: int = 2500
+    tool_result_worker_max_chars: int = 1500
     history_max_messages: int = 80
     history_trim_to_messages: int = 60
     # Approximate character budget for history payload (lightweight token proxy).
@@ -90,6 +90,7 @@ class ProfileConfig:
 @dataclass
 class SafetyConfig:
     default_action: str = "confirm"  # "allow" | "confirm" | "deny"
+    permission_mode: str = "confirm_all"  # confirm_all | accept_reads | auto
 
 
 @dataclass
@@ -299,6 +300,11 @@ def load_config() -> Config:
 
         safety = data.get("safety", {})
         cfg.safety.default_action = safety.get("default_action", cfg.safety.default_action)
+        permission_mode = str(
+            safety.get("permission_mode", cfg.safety.permission_mode)
+        ).strip().lower()
+        if permission_mode in {"confirm_all", "accept_reads", "auto"}:
+            cfg.safety.permission_mode = permission_mode
 
         telegram = data.get("telegram", {})
         cfg.telegram.enabled = bool(telegram.get("enabled", cfg.telegram.enabled))
