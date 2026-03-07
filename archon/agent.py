@@ -41,6 +41,23 @@ _WORKER_TOOL_NAMES = {
 }
 
 
+def _detect_tool_loop(recent_calls: list[tuple[str, dict]], window: int = 6, min_repeats: int = 3) -> bool:
+    """Detect repetitive tool call patterns in recent history."""
+    if len(recent_calls) < min_repeats:
+        return False
+    # Check same exact call repeated
+    last = recent_calls[-1]
+    same_count = sum(1 for c in recent_calls[-window:] if c == last)
+    if same_count >= min_repeats:
+        return True
+    # Check alternating A-B-A-B pattern
+    if len(recent_calls) >= 6:
+        tail = recent_calls[-6:]
+        if tail[0] == tail[2] == tail[4] and tail[1] == tail[3] == tail[5]:
+            return True
+    return False
+
+
 class Agent:
     def __init__(self, llm: LLMClient, tools: ToolRegistry, config: Config):
         self.llm = llm
@@ -115,6 +132,8 @@ class Agent:
             skill_guidance=skill_guidance,
             compactions=pending_compactions,
         )
+
+        _recent_tool_calls: list[tuple[str, dict]] = []
 
         for iteration in range(self.max_iterations):
             if self.on_thinking:
@@ -261,6 +280,16 @@ class Agent:
                     self.history.pop()
                 raise
 
+            # Track tool calls for loop detection
+            for call in response.tool_calls:
+                _recent_tool_calls.append((call.name, call.arguments))
+            if len(_recent_tool_calls) > 10:
+                _recent_tool_calls = _recent_tool_calls[-10:]
+            if _detect_tool_loop(_recent_tool_calls):
+                stuck_msg = "I notice I'm repeating the same actions. Let me stop and reassess."
+                self.history.append({"role": "assistant", "content": stuck_msg})
+                return stuck_msg
+
             # Append tool results as user message (Anthropic format)
             self.history.append({
                 "role": "user",
@@ -303,6 +332,8 @@ class Agent:
             skill_guidance=skill_guidance,
             compactions=pending_compactions,
         )
+
+        _recent_tool_calls: list[tuple[str, dict]] = []
 
         for iteration in range(self.max_iterations):
             if self.on_thinking:
@@ -459,6 +490,17 @@ class Agent:
                 if self.history and _is_assistant_tool_use_message(self.history[-1]):
                     self.history.pop()
                 raise
+
+            # Track tool calls for loop detection
+            for call in response.tool_calls:
+                _recent_tool_calls.append((call.name, call.arguments))
+            if len(_recent_tool_calls) > 10:
+                _recent_tool_calls = _recent_tool_calls[-10:]
+            if _detect_tool_loop(_recent_tool_calls):
+                stuck_msg = "I notice I'm repeating the same actions. Let me stop and reassess."
+                self.history.append({"role": "assistant", "content": stuck_msg})
+                yield stuck_msg
+                return
 
             self.history.append({
                 "role": "user",
