@@ -21,13 +21,13 @@ class _Buffer:
 def test_terminal_activity_feed_emits_notice_and_restores_prompt_with_input():
     buf = _Buffer()
     feed = TerminalActivityFeed(
+        prompt_fn=lambda: "you> ",
+        input_fn=lambda: "use researcher skill",
         write_fn=buf.write,
         flush_fn=buf.flush,
-        get_buffer_fn=lambda: "use researcher skill",
     )
-    feed.set_prompt("you> ")
 
-    feed.emit(ActivityEvent(source="telegram", text="message received"))
+    feed.emit(ActivityEvent(source="telegram", message="message received"))
 
     assert buf.render() == (
         "\r\033[K[telegram] message received\n"
@@ -38,10 +38,12 @@ def test_terminal_activity_feed_emits_notice_and_restores_prompt_with_input():
 def test_terminal_activity_feed_handles_empty_prompt_and_input():
     buf = _Buffer()
     feed = TerminalActivityFeed(
+        prompt_fn=lambda: "",
+        input_fn=lambda: "",
         write_fn=buf.write,
         flush_fn=buf.flush,
     )
 
-    feed.emit(ActivityEvent(source="skill", text="auto-activated: researcher"))
+    feed.emit(ActivityEvent(source="skill", message="auto-activated: researcher"))
 
     assert buf.render() == "\r\033[K[skill] auto-activated: researcher\n"
