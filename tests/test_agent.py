@@ -1250,13 +1250,28 @@ class TestAgentLoop:
         route_events = []
         agent.hooks.register("orchestrator.route", route_events.append)
 
+        # Capability check should stay on fast path and get normal chat response
+        agent.llm.chat = MagicMock(return_value=LLMResponse(
+            text="Yes, I can do deep research.",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "Yes"}],
+            input_tokens=10,
+            output_tokens=5,
+        ))
+        result_meta = agent.run("can you do deep research")
+        assert result_meta == "Yes, I can do deep research."
+        assert len(route_events) == 1
+        assert route_events[0].payload["path"] == "hybrid_planner_v0"
+        route_events.clear()
+
+        # Actual research job should hit the deep research route
         result = agent.run("Do a deep research on agentic AI and effective multi-agent systems")
 
         assert result == (
             "Native Deep Research unavailable: disabled in config. "
             "Enable [research.google_deep_research].enabled to use research jobs."
         )
-        assert agent.llm.chat.call_count == 0
+        assert agent.llm.chat.call_count == 1
         assert route_events == []
 
     def test_deep_research_startup_failure_returns_explicit_error_without_fallback(self, monkeypatch):

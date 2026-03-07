@@ -255,6 +255,21 @@ def is_deep_research_request(user_message: str) -> bool:
     text_l = (user_message or "").strip().lower()
     if not text_l:
         return False
+
+    normalized = re.sub(r'[^\w\s]', '', text_l).strip()
+    if normalized in (
+        "can you do deep research",
+        "do you do deep research",
+        "can you do a deep research",
+        "how do i use deep research",
+        "what is deep research",
+        "can we do deep research",
+        "do deep research",
+        "deep research",
+        "can you do deep research for me",
+    ):
+        return False
+
     if any(
         phrase in text_l
         for phrase in ("deep research", "deeply research", "research this deeply")
