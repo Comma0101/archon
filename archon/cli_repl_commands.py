@@ -23,6 +23,25 @@ _NATIVE_PLUGIN_SPECS = (
     ("telegram", "config.telegram", lambda cfg: bool(getattr(getattr(cfg, "telegram", None), "enabled", False))),
     ("web", "config.web", lambda cfg: bool(getattr(getattr(cfg, "web", None), "enabled", False))),
 )
+_SKILL_REQUEST_ALIASES = {
+    "general": "general",
+    "coder": "coder",
+    "research": "researcher",
+    "researcher": "researcher",
+    "operator": "operator",
+    "sales": "sales",
+    "memory curator": "memory_curator",
+    "memory_curator": "memory_curator",
+}
+_SKILL_REQUEST_PATTERN = "|".join(
+    sorted((re.escape(alias) for alias in _SKILL_REQUEST_ALIASES), key=len, reverse=True)
+)
+_EXPLICIT_SKILL_PATTERNS = (
+    re.compile(rf"\buse (?P<skill>{_SKILL_REQUEST_PATTERN})(?: skill)?\b", re.IGNORECASE),
+    re.compile(rf"\bswitch to (?P<skill>{_SKILL_REQUEST_PATTERN})(?: skill| mode)?\b", re.IGNORECASE),
+    re.compile(rf"\bact as(?: an?| the)? (?P<skill>{_SKILL_REQUEST_PATTERN})(?: skill)?\b", re.IGNORECASE),
+    re.compile(rf"\benter (?P<skill>{_SKILL_REQUEST_PATTERN}) mode\b", re.IGNORECASE),
+)
 
 
 def handle_model_command(agent, text: str) -> tuple[bool, str]:
@@ -884,6 +903,39 @@ def _clear_session_skill(agent) -> None:
         delattr(agent, "_skills_base_profile")
     if hasattr(agent, "_skills_active_name"):
         delattr(agent, "_skills_active_name")
+
+
+def _maybe_auto_activate_skill(agent, text: str) -> tuple[bool, str]:
+    """Auto-activate a built-in skill from an explicit natural-language request."""
+    skill_name = _extract_explicit_skill_request(text)
+    if not skill_name:
+        return False, ""
+    if _active_skill_name(agent) == skill_name:
+        return False, ""
+    cfg = getattr(agent, "config", None)
+    base_profile = _skill_base_profile_name(agent)
+    profile_name = ensure_session_skill_profile(
+        cfg,
+        skill_name=skill_name,
+        base_profile_name=base_profile,
+    )
+    _set_agent_policy_profile(agent, profile_name)
+    setattr(agent, "_skills_base_profile", base_profile)
+    setattr(agent, "_skills_active_name", skill_name)
+    return True, f"Skill auto-activated: {skill_name}"
+
+
+def _extract_explicit_skill_request(text: str) -> str:
+    compact = " ".join(str(text or "").split())
+    if not compact or compact.startswith("/"):
+        return ""
+    for pattern in _EXPLICIT_SKILL_PATTERNS:
+        match = pattern.search(compact)
+        if not match:
+            continue
+        requested = str(match.group("skill") or "").strip().lower()
+        return _SKILL_REQUEST_ALIASES.get(requested, "")
+    return ""
 
 
 def _llm_runtime_ready(agent, cfg) -> bool:

@@ -31,6 +31,7 @@ from archon.adapters.telegram_client import (
 from archon.audio.stt import transcribe_audio_bytes
 from archon.audio.tts import convert_wav_to_ogg_opus, synthesize_speech_wav
 from archon.cli_repl_commands import (
+    _maybe_auto_activate_skill,
     handle_cost_command,
     handle_doctor_command,
     handle_job_command,
@@ -458,6 +459,11 @@ class TelegramAdapter:
 
         try:
             self._send_typing(chat_id)
+            auto_skill_changed, auto_skill_msg = _maybe_auto_activate_skill(agent, body)
+            if auto_skill_changed and auto_skill_msg:
+                self._send_text(chat_id, auto_skill_msg)
+                skill_name = auto_skill_msg.split(":", 1)[-1].strip()
+                self._emit_activity(f"skill auto-activated for {chat_id}: {skill_name}")
             self._current_request_ctx[chat_id] = {
                 "user_id": user_id,
                 "chat_id": chat_id,

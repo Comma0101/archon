@@ -107,6 +107,33 @@ class _TelegramLocalCommandAgent:
         return None
 
 
+class _SkillAwareAgent:
+    def __init__(self):
+        cfg = Config()
+        cfg.llm.provider = "openai"
+        cfg.llm.model = "gpt-5-mini"
+        cfg.llm.api_key = "test-key"
+        cfg.profiles = {"default": ProfileConfig()}
+        self.hooks = HookBus()
+        self.config = cfg
+        self.llm = SimpleNamespace(provider="openai", model="gpt-5-mini")
+        self.policy_profile = "default"
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
+        self.history = []
+        self.log_label = ""
+        self.on_thinking = None
+        self.on_tool_call = None
+        self.run_calls = []
+
+    def run(self, text: str) -> str:
+        self.run_calls.append(text)
+        return "ok"
+
+    def reset(self):
+        return None
+
+
 def _adapter():
     return TelegramAdapter(
         token="123:abc",
@@ -163,6 +190,37 @@ class TestTelegramAdapterCommands:
 
         assert any(message == "approval blocked for 99: pacman -Q | head" for _source, message in events)
         assert not any(message == "replied to 99: Command rejected by safety gate." for _source, message in events)
+
+    def test_explicit_skill_request_auto_activates_before_telegram_run(self, monkeypatch):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: _SkillAwareAgent(),
+            poll_timeout_sec=1,
+        )
+        sent = []
+
+        monkeypatch.setattr(adapter, "_send_typing", lambda chat_id: None)
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260306-190001")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: None,
+        )
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+        adapter._handle_message(
+            {
+                "text": "use researcher skill to research LA restaurants",
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        agent = adapter._agents[99]  # type: ignore[attr-defined]
+        assert sent[0] == (99, "Skill auto-activated: researcher")
+        assert sent[1] == (99, "ok")
+        assert agent.run_calls == ["use researcher skill to research LA restaurants"]
+        assert agent.policy_profile == "__skill__:default:researcher"
 
     def test_local_shell_parity_commands_are_handled_without_model_turn(self, monkeypatch):
         adapter = TelegramAdapter(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from archon.cli_ui import _format_terminal_approval_required
+from archon.cli_repl_commands import _maybe_auto_activate_skill
 from archon.control.contracts import HookEvent
 from archon.safety import Level
 from archon.ux.terminal_feed import TerminalActivityFeed
@@ -401,6 +402,9 @@ def chat_cmd(
                 approval_state["current_user_input"] = user_input
                 approval_state["blocked_pending_id"] = ""
                 clear_expired_pending()
+                auto_skill_changed, auto_skill_msg = _maybe_auto_activate_skill(agent, user_input)
+                if auto_skill_changed and auto_skill_msg:
+                    click_echo_fn(auto_skill_msg)
                 pre_in = agent.total_input_tokens
                 pre_out = agent.total_output_tokens
                 t0 = time_time_fn()
