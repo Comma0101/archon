@@ -69,6 +69,9 @@ def register_filesystem_tools(registry) -> None:
         if not str(p).startswith(str(home)):
             if not registry.confirmer(f"Write to {p} (outside $HOME)", Level.DANGEROUS):
                 return "Write rejected by safety gate."
+        else:
+            if not registry.confirmer(f"Write file: {p}", Level.DANGEROUS):
+                return "Write rejected by safety gate."
         if registry.archon_source_dir and str(p).startswith(registry.archon_source_dir):
             if not registry.confirmer(f"Write to own source: {p}", Level.DANGEROUS):
                 return "Self-modification rejected."
@@ -93,6 +96,9 @@ def register_filesystem_tools(registry) -> None:
         home = Path.home()
         if not str(p).startswith(str(home)):
             if not registry.confirmer(f"Edit {p} (outside $HOME)", Level.DANGEROUS):
+                return "Edit rejected by safety gate."
+        else:
+            if not registry.confirmer(f"Edit file: {p}", Level.DANGEROUS):
                 return "Edit rejected by safety gate."
         if registry.archon_source_dir and str(p).startswith(registry.archon_source_dir):
             safety_path = os.path.join(registry.archon_source_dir, "safety.py")
