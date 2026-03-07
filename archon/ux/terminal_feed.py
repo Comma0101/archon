@@ -1,0 +1,45 @@
+"""Readline-safe terminal activity feed primitives."""
+
+from __future__ import annotations
+
+import sys
+from collections.abc import Callable
+
+from archon.ux.events import ActivityEvent
+
+
+class TerminalActivityFeed:
+    """Render compact notices above the current prompt and redraw typed input."""
+
+    def __init__(
+        self,
+        *,
+        prompt_fn: Callable[[], str] | None = None,
+        input_fn: Callable[[], str] | None = None,
+        write_fn: Callable[[str], object] | None = None,
+        flush_fn: Callable[[], object] | None = None,
+    ) -> None:
+        self._prompt_fn = prompt_fn or (lambda: "")
+        self._input_fn = input_fn or (lambda: "")
+        self._write_fn = write_fn or sys.stderr.write
+        self._flush_fn = flush_fn or sys.stderr.flush
+
+    @property
+    def current_prompt(self) -> str:
+        return self._safe_text(self._prompt_fn)
+
+    def emit(self, event: ActivityEvent) -> None:
+        self._write_fn("\r\033[K")
+        self._write_fn(event.render_text())
+        self._write_fn("\n")
+        prompt = self.current_prompt
+        buffer_text = self._safe_text(self._input_fn)
+        if prompt or buffer_text:
+            self._write_fn(f"{prompt}{buffer_text}")
+        self._flush_fn()
+
+    def _safe_text(self, fn: Callable[[], str]) -> str:
+        try:
+            return str(fn() or "")
+        except Exception:
+            return ""

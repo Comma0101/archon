@@ -5,6 +5,7 @@ from __future__ import annotations
 from archon.cli_ui import _format_terminal_approval_required
 from archon.control.contracts import HookEvent
 from archon.safety import Level
+from archon.ux.terminal_feed import TerminalActivityFeed
 
 
 PENDING_APPROVAL_TTL_SEC = 5 * 60
@@ -57,6 +58,7 @@ def chat_cmd(
     readline_module,
     time_time_fn,
     version: str,
+    make_terminal_activity_feed_fn=None,
 ) -> None:
     """Interactive chat REPL body."""
     agent = make_agent_fn()
@@ -213,6 +215,32 @@ def chat_cmd(
     agent.approve_next_dangerous_action = approve_next_dangerous_action
     agent.consume_terminal_pending_replay = consume_terminal_pending_replay
     agent._terminal_approval_state = approval_state
+    prompt_state = {"value": ""}
+
+    def current_prompt() -> str:
+        return str(prompt_state.get("value") or "")
+
+    def current_input() -> str:
+        if not hasattr(readline_module, "get_line_buffer"):
+            return ""
+        try:
+            return str(readline_module.get_line_buffer() or "")
+        except Exception:
+            return ""
+
+    terminal_activity_feed = (
+        make_terminal_activity_feed_fn(current_prompt, current_input)
+        if callable(make_terminal_activity_feed_fn)
+        else TerminalActivityFeed(prompt_fn=current_prompt, input_fn=current_input)
+    )
+    agent.terminal_activity_feed = terminal_activity_feed
+
+    def read_input_with_feed(prompt: str) -> str:
+        prompt_state["value"] = prompt or ""
+        try:
+            return input_fn(prompt)
+        finally:
+            prompt_state["value"] = ""
 
     def on_thinking():
         spinner.start("thinking")
@@ -253,7 +281,7 @@ def chat_cmd(
     try:
         while True:
             try:
-                raw_input = input_fn(make_readline_prompt_fn("you>", ansi_prompt_user))
+                raw_input = read_input_with_feed(make_readline_prompt_fn("you>", ansi_prompt_user))
             except (EOFError, KeyboardInterrupt):
                 if turn_count > 0:
                     click_echo_fn(
@@ -271,7 +299,7 @@ def chat_cmd(
                 try:
                     user_input = collect_bracketed_paste_fn(
                         raw_input,
-                        input_fn,
+                        read_input_with_feed,
                         prompt=make_readline_prompt_fn("...>", ansi_prompt_user),
                     )
                 except (EOFError, KeyboardInterrupt):
@@ -292,7 +320,7 @@ def chat_cmd(
                 click_echo_fn("Paste mode: paste your message, then end with /end (or .end).")
                 try:
                     user_input = collect_paste_message_fn(
-                        input_fn,
+                        read_input_with_feed,
                         prompt=make_readline_prompt_fn("...>", ansi_prompt_user),
                     ).strip()
                 except (EOFError, KeyboardInterrupt):

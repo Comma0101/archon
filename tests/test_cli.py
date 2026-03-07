@@ -32,6 +32,7 @@ from archon.cli_interactive_commands import _tool_spinner_label
 from archon.control.hooks import HookBus
 from archon.prompt import build_skill_guidance as _build_skill_guidance
 from archon.safety import Level
+from archon.ux.events import ActivityEvent
 
 
 class TestCliFormatting:
@@ -1152,8 +1153,10 @@ class TestCliCommands:
         finally:
             cli_module._SLASH_SUBVALUES = original_subvalues
 
-
 class _FakeReadline:
+    def __init__(self, line_buffer=""):
+        self.line_buffer = line_buffer
+
     def set_completer(self, _fn):
         return None
 
@@ -1162,6 +1165,9 @@ class _FakeReadline:
 
     def parse_and_bind(self, _value):
         return None
+
+    def get_line_buffer(self):
+        return self.line_buffer
 
 
 class _FakeSpinner:
