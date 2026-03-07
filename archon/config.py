@@ -40,7 +40,7 @@ class LLMConfig:
 
 @dataclass
 class AgentConfig:
-    max_iterations: int = 40
+    max_iterations: int = 15
     temperature: float = 0.3
     llm_request_timeout_sec: float = 45.0
     llm_retry_attempts: int = 3
