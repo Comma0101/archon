@@ -45,9 +45,9 @@ class AgentConfig:
     llm_request_timeout_sec: float = 45.0
     llm_retry_attempts: int = 3
     # Prompt-budget guard: cap tool_result payload size before adding to history.
-    tool_result_max_chars: int = 6000
+    tool_result_max_chars: int = 3000
     # Stricter cap for verbose worker/delegation tools.
-    tool_result_worker_max_chars: int = 2500
+    tool_result_worker_max_chars: int = 1500
     history_max_messages: int = 80
     history_trim_to_messages: int = 60
     # Approximate character budget for history payload (lightweight token proxy).

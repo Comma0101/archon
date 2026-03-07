@@ -405,7 +405,7 @@ class TestAgentLoop:
         tool_result = agent.history[2]["content"][0]["content"]
         assert isinstance(tool_result, str)
         assert len(tool_result) <= 300
-        assert "archon truncated tool result" in tool_result
+        assert "chars omitted" in tool_result
 
     def test_tool_result_redacts_api_keys_before_terminal_render_and_history(self, monkeypatch, capsys):
         responses = [

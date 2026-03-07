@@ -737,11 +737,12 @@ class Agent:
         if limit <= 0 or len(result_text) <= limit:
             return result_text
         omitted = len(result_text) - limit
-        suffix = f"\n... [archon truncated tool result: {omitted} chars omitted]"
-        keep = limit - len(suffix)
-        if keep < 32:
-            return result_text[:limit]
-        return result_text[:keep] + suffix
+        head_size = int(limit * 0.65)
+        tail_size = int(limit * 0.25)
+        middle = f"\n... [{omitted} chars omitted] ...\n"
+        if head_size + tail_size + len(middle) >= len(result_text):
+            return result_text
+        return result_text[:head_size] + middle + result_text[-tail_size:]
 
     def _repair_history_tool_sequence(self) -> None:
         """Drop malformed tool-turn fragments before provider calls.
