@@ -316,6 +316,8 @@ def chat_cmd(
 
     try:
         while True:
+            if refresh_slash_subvalues_fn is not None:
+                refresh_slash_subvalues_fn(getattr(agent, "config", None))
             try:
                 raw_input, used_live_slash_palette = read_interactive_input(
                     make_readline_prompt_fn("you>", ansi_prompt_user)

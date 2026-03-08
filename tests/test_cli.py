@@ -685,6 +685,94 @@ class TestCliCommands:
         assert "job_status: ok" in msg
         assert "job_summary: Looks good" in msg
 
+    def test_handle_repl_command_job_without_arg_shows_selector(self, monkeypatch):
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+        )
+        jobs = [
+            SimpleNamespace(
+                job_id="research:abc",
+                kind="deep_research",
+                status="in_progress",
+                summary="Research in progress",
+                last_update_at="2026-03-08T20:07:15Z",
+            ),
+            SimpleNamespace(
+                job_id="worker:sess-1",
+                kind="worker_session",
+                status="error",
+                summary="Worker session never started",
+                last_update_at="2026-03-08T20:00:09Z",
+            ),
+        ]
+        monkeypatch.setattr("archon.cli_repl_commands._collect_job_summaries", lambda limit=10: jobs)
+
+        action, msg = _handle_repl_command(agent, "/job")
+
+        assert action == "job"
+        assert msg.startswith("Select a job:")
+        assert "research:abc" in msg
+        assert "worker:sess-1" in msg
+        assert "Use /jobs show <job-id>" in msg
+
+    def test_handle_repl_command_jobs_show_resolves_recent_job(self, monkeypatch):
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+        )
+        jobs = [
+            SimpleNamespace(
+                job_id="research:abc",
+                kind="deep_research",
+                status="in_progress",
+                summary="Research in progress",
+                last_update_at="2026-03-08T20:07:15Z",
+            ),
+            SimpleNamespace(
+                job_id="worker:sess-1",
+                kind="worker_session",
+                status="error",
+                summary="Worker session never started",
+                last_update_at="2026-03-08T20:00:09Z",
+            ),
+        ]
+        monkeypatch.setattr("archon.cli_repl_commands._collect_job_summaries", lambda limit=10: jobs)
+        monkeypatch.setattr(
+            "archon.cli_repl_commands.load_research_job",
+            lambda interaction_id, refresh_client=None, hook_bus=None: SimpleNamespace(
+                interaction_id=interaction_id,
+                status="in_progress",
+                summary="Research in progress",
+                updated_at="2026-03-08T20:07:15Z",
+                provider_status="in_progress",
+                last_polled_at="",
+                last_event_at="2026-03-08T20:07:15Z",
+                stream_status="interaction.status_update",
+                created_at="2026-03-08T20:07:15Z",
+                latest_thought_summary="",
+                output_text="",
+                error="",
+                poll_count=2,
+                timeout_minutes=20,
+            ),
+        )
+
+        action, msg = _handle_repl_command(agent, "/jobs show research:abc")
+
+        assert action == "jobs"
+        assert "job_id: research:abc" in msg
+
+    def test_handle_repl_command_jobs_show_requires_job_id(self, monkeypatch):
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+        )
+        action, msg = _handle_repl_command(agent, "/jobs show")
+
+        assert action == "jobs"
+        assert msg == "Usage: /jobs show <job-id>"
+
     def test_handle_repl_command_jobs_includes_research_jobs(self, monkeypatch, tmp_path):
         from archon.research.models import ResearchJobRecord
         from archon.research.store import save_research_job
@@ -1710,6 +1798,78 @@ class TestCliCommands:
         finally:
             cli_module._SLASH_SUBVALUES = original_subvalues
 
+    def test_chat_cmd_refreshes_slash_subvalues_before_each_prompt(self):
+        import archon.cli as cli_module
+
+        original_subvalues = cli_module._SLASH_SUBVALUES.copy()
+        state = {"show_job": False}
+
+        class _Agent:
+            def __init__(self):
+                self.hooks = HookBus()
+                self.config = Config()
+                self.total_input_tokens = 0
+                self.total_output_tokens = 0
+                self.log_label = ""
+                self.policy_profile = "default"
+                self.on_thinking = None
+                self.on_tool_call = None
+
+            def run(self, _text):
+                raise AssertionError("agent.run should not be called for this test")
+
+            def reset(self):
+                return None
+
+        agent = _Agent()
+        inputs = iter(["/status", "quit"])
+        session_ids = iter(["sess-1"])
+
+        def _refresh(_config):
+            cli_module._SLASH_SUBVALUES = {
+                "/jobs": [("show research:abc", "Show one recent job")] if state["show_job"] else [],
+            }
+
+        def _handle(agent, text):
+            if text == "/status":
+                state["show_job"] = True
+                return "status", "Status: ok"
+            return _handle_repl_command(agent, text)
+
+        try:
+            _chat_cmd(
+                make_agent_fn=lambda: agent,
+                make_telegram_adapter_fn=lambda _cfg: None,
+                new_session_id_fn=lambda: next(session_ids),
+                save_exchange_fn=lambda *_args: None,
+                refresh_slash_subvalues_fn=_refresh,
+                slash_completer_fn=lambda *_args: None,
+                pick_slash_command_fn=lambda: None,
+                is_bracketed_paste_start_fn=lambda _text: False,
+                collect_bracketed_paste_fn=lambda *_args, **_kwargs: "",
+                is_paste_command_fn=lambda _text: False,
+                collect_paste_message_fn=lambda *_args, **_kwargs: "",
+                handle_repl_command_fn=_handle,
+                is_model_runtime_error_fn=lambda _err: False,
+                format_session_summary_fn=_format_session_summary,
+                format_chat_response_fn=lambda text: text,
+                format_turn_stats_fn=_format_turn_stats,
+                make_readline_prompt_fn=lambda label, _ansi: label,
+                spinner_cls=_FakeSpinner,
+                ansi_prompt_user="",
+                ansi_error="",
+                ansi_reset="",
+                click_echo_fn=lambda *_args, **_kwargs: None,
+                input_fn=lambda _prompt: next(inputs),
+                readline_module=_FakeReadline(),
+                time_time_fn=lambda: 0.0,
+                version="test",
+            )
+
+            assert ("show research:abc", "Show one recent job") in cli_module._SLASH_SUBVALUES["/jobs"]
+        finally:
+            cli_module._SLASH_SUBVALUES = original_subvalues
+
     def test_chat_cmd_wires_terminal_activity_feed_to_prompt_state(self):
         class _Agent:
             def __init__(self):
@@ -2681,7 +2841,8 @@ class TestSlashCompleter:
         assert _slash_completer("", 0) == "active"
         assert _slash_completer("", 1) == "all"
         assert _slash_completer("", 2) == "purge"
-        assert _slash_completer("", 3) is None
+        assert _slash_completer("", 3) == "show"
+        assert _slash_completer("", 4) is None
 
     def test_permissions_subcommand_completion_from_line_buffer(self, monkeypatch):
         monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/permissions ")
@@ -2760,6 +2921,26 @@ class TestPickSlashCommand:
         assert ("show calls", "Show one native plugin") in values["/plugins"]
         assert ("show telegram", "Show one native plugin") in values["/plugins"]
         assert ("show web", "Show one native plugin") in values["/plugins"]
+
+    def test_build_slash_subvalues_exposes_recent_jobs_under_jobs_command(self, monkeypatch):
+        monkeypatch.setattr(
+            "archon.cli_commands.list_research_job_summaries",
+            lambda limit=8: [
+                SimpleNamespace(
+                    job_id="research:abc",
+                    kind="deep_research",
+                    status="in_progress",
+                    summary="Research in progress",
+                    last_update_at="2026-03-08T20:07:15Z",
+                )
+            ],
+        )
+        monkeypatch.setattr("archon.cli_commands.list_worker_job_summaries", lambda limit=8: [])
+        monkeypatch.setattr("archon.cli_commands.list_call_job_summaries", lambda limit=8: [])
+
+        values = _build_slash_subvalues(Config())
+
+        assert ("show research:abc", "Show one recent job") in values["/jobs"]
 
     def test_plugins_show_value_completion_uses_live_runtime_names(self, monkeypatch):
         cfg = Config()

@@ -822,6 +822,16 @@ def _format_jobs_list(jobs, *, view: str, limit: int) -> str:
     return header + "\n" + format_job_summary_list(recent_jobs)
 
 
+def _format_job_selector(jobs, *, limit: int = 10) -> str:
+    recent_jobs = list(jobs[: max(1, int(limit))])
+    if not recent_jobs:
+        return "Jobs: none"
+    lines = ["Select a job:"]
+    lines.extend(format_job_summary_list(recent_jobs).splitlines())
+    lines.append("Use /jobs show <job-id> or select one from /jobs in the slash palette.")
+    return "\n".join(lines)
+
+
 def handle_jobs_command(agent, text: str) -> tuple[bool, str]:
     """Handle `/jobs` command (list recent cross-surface jobs)."""
     raw = (text or "").strip()
@@ -844,6 +854,14 @@ def handle_jobs_command(agent, text: str) -> tuple[bool, str]:
             details.append(f"{worker_removed} worker")
         return True, f"Purged {total} local records ({', '.join(details)})."
 
+    if len(parts) >= 2 and parts[1].lower() == "show":
+        if len(parts) < 3 or not parts[2].strip():
+            return True, "Usage: /jobs show <job-id>"
+        try:
+            return True, _render_job_detail(agent, parts[2].strip())
+        except OSError as e:
+            return True, f"Job unavailable: {e}"
+
     parsed = _parse_jobs_args(parts)
     if parsed is None:
         return True, "Usage: /jobs [active|all|purge] [limit]"
@@ -864,7 +882,10 @@ def handle_job_command(agent, text: str) -> tuple[bool, str]:
     if not parts or parts[0].lower() != "/job":
         return False, ""
     if len(parts) < 2 or not parts[1].strip():
-        return True, "Usage: /job <id>"
+        try:
+            return True, _format_job_selector(_collect_job_summaries(limit=10))
+        except OSError as e:
+            return True, f"Jobs unavailable: {e}"
 
     # /job cancel <id>
     if parts[1].strip().lower() == "cancel":
@@ -913,22 +934,29 @@ def handle_job_command(agent, text: str) -> tuple[bool, str]:
 
     job_ref = parts[1].strip()
     try:
-        if job_ref.startswith("research:"):
-            interaction_id = job_ref.split(":", 1)[1]
-            job = load_research_job(
-                interaction_id,
-                refresh_client=None,
-                hook_bus=getattr(agent, "hooks", None),
-            )
-        else:
-            job = _load_job_summary(job_ref)
+        return True, _render_job_detail(agent, job_ref)
     except OSError as e:
         return True, f"Job unavailable: {e}"
+
+
+def _render_job_detail(agent, job_ref: str) -> str:
+    ref = str(job_ref or "").strip()
+    if not ref:
+        return "Job not found: "
+    if ref.startswith("research:"):
+        interaction_id = ref.split(":", 1)[1]
+        job = load_research_job(
+            interaction_id,
+            refresh_client=None,
+            hook_bus=getattr(agent, "hooks", None),
+        )
+        if job is None:
+            return f"Job not found: {ref}"
+        return format_research_job_record(job, cfg=getattr(agent, "config", None))
+    job = _load_job_summary(ref)
     if job is None:
-        return True, f"Job not found: {job_ref}"
-    if job_ref.startswith("research:"):
-        return True, format_research_job_record(job, cfg=getattr(agent, "config", None))
-    return True, format_job_summary(job)
+        return f"Job not found: {ref}"
+    return format_job_summary(job)
 
 
 def _describe_orchestrator_mode(cfg) -> str:
