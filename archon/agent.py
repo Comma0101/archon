@@ -183,18 +183,18 @@ class Agent:
             compactions=pending_compactions,
         )
 
-        yield from execute_turn_stream(
-            self,
+        yield from orchestrate_stream_response(
+            mode=self._orchestrator_mode(),
             turn_id=turn_id,
             user_message=user_message,
-            active_profile=active_profile,
-            log_prefix=log_prefix,
-            turn_system_prompt=turn_system_prompt,
-            llm_stream_step=lambda iter_system_prompt: orchestrate_stream_response(
-                mode=self._orchestrator_mode(),
+            run_legacy_stream=lambda: execute_turn_stream(
+                self,
                 turn_id=turn_id,
                 user_message=user_message,
-                run_legacy_stream=lambda: _chat_stream_collect_with_retry(
+                active_profile=active_profile,
+                log_prefix=log_prefix,
+                turn_system_prompt=turn_system_prompt,
+                llm_stream_step=lambda iter_system_prompt: _chat_stream_collect_with_retry(
                     self.llm,
                     iter_system_prompt,
                     self.history,
@@ -202,8 +202,8 @@ class Agent:
                     max_attempts=self.llm_retry_attempts,
                     request_timeout_sec=self.llm_request_timeout_sec,
                 ),
-                emit_hook=self._emit_hook,
             ),
+            emit_hook=self._emit_hook,
         )
 
     @staticmethod

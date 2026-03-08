@@ -158,7 +158,7 @@ def orchestrate_stream_response(
             _route_payload(
                 turn_id=turn_id,
                 mode="hybrid",
-                path="hybrid_stream_legacy_bridge_v0",
+                path="hybrid_stream_shared_executor_v1",
                 lane=lane,
                 reason=reason,
             ),
@@ -199,7 +199,7 @@ def _run_hybrid_stream_response(
     run_legacy_stream: Callable[[], T],
     emit_hook: Callable[[str, dict], None] | None,
 ) -> T:
-    # Hybrid mode still preserves behavior parity by bridging into legacy streaming execution.
+    # Hybrid mode now routes whole streaming turns through the shared executor path.
     return run_legacy_stream()
 
 
