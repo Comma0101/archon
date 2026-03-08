@@ -208,6 +208,9 @@ class TestCliCommands:
     def test_slash_commands_include_local_shell_status_commands(self):
         names = {name for name, _desc in _SLASH_COMMANDS}
         assert {"/status", "/cost", "/doctor", "/permissions"} <= names
+        assert "/model" in names
+        assert "/model-list" not in names
+        assert "/model-set" not in names
 
     def test_slash_commands_include_terminal_approval_commands(self):
         names = {name for name, _desc in _SLASH_COMMANDS}
@@ -218,12 +221,12 @@ class TestCliCommands:
         assert descriptions["/status"] == "Shell: current status"
         assert descriptions["/skills"] == "Shell: skills"
         assert descriptions["/plugins"] == "Shell: plugins"
-        assert descriptions["/model"] == "Model: current provider/model"
+        assert descriptions["/model"] == "Model: current or set provider/model"
         assert descriptions["/mcp"] == "Integrations: MCP servers and tools"
 
     def test_slash_command_descriptions_include_terminal_approval_controls(self):
         descriptions = dict(_SLASH_COMMANDS)
-        assert descriptions["/approvals"] == "Shell: approval status"
+        assert descriptions["/approvals"] == "Shell: approvals status/on/off"
         assert descriptions["/approve"] == "Shell: approve pending request"
         assert descriptions["/deny"] == "Shell: deny pending request"
         assert descriptions["/approve_next"] == "Shell: approve next dangerous action"
@@ -237,6 +240,37 @@ class TestCliCommands:
         assert handled is True
         assert "google" in msg
         assert "old-model" in msg
+
+    def test_handle_model_command_set_alias_can_switch_provider_and_model(self, monkeypatch):
+        monkeypatch.setattr(
+            "archon.cli.LLMClient",
+            lambda provider, model, api_key, temperature, base_url: SimpleNamespace(
+                provider=provider, model=model
+            ),
+        )
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(provider="google", model="gemini-x"),
+            config=SimpleNamespace(
+                llm=SimpleNamespace(
+                    provider="google",
+                    model="gemini-x",
+                    api_key="test-key",
+                    base_url="",
+                    fallback_provider="google",
+                    fallback_model="gemini-3-flash-preview",
+                    fallback_api_key="",
+                    fallback_base_url="",
+                ),
+                agent=SimpleNamespace(temperature=0.3),
+            ),
+        )
+
+        handled, msg = _handle_model_command(agent, "/model set openai-gpt-5.2")
+
+        assert handled is True
+        assert msg == "Model set to: openai/gpt-5.2"
+        assert agent.llm.provider == "openai"
+        assert agent.llm.model == "gpt-5.2"
 
     def test_handle_model_list_command_shows_known_models(self):
         handled, msg = _handle_model_list_command("/model-list")
@@ -423,7 +457,7 @@ class TestCliCommands:
         assert "Shell: current status" in msg
         assert "Shell: skills" in msg
         assert "Shell: plugins" in msg
-        assert "Model: current provider/model" in msg
+        assert "Model: current or set provider/model" in msg
         for name, _desc in _SLASH_COMMANDS:
             assert name in msg
 
@@ -1058,7 +1092,9 @@ class TestCliCommands:
         action, msg = _handle_repl_command(agent, "/permissions")
 
         assert action == "permissions"
-        assert msg == "Permissions: profile=safe | mode=review | tools=2 [read_file,shell]"
+        assert msg == (
+            "Permissions: permission_mode=confirm_all | profile=safe | mode=review | tools=2 [read_file,shell]"
+        )
 
     def test_handle_repl_command_status_reports_compact_shell_state(self):
         cfg = Config()
@@ -1177,9 +1213,21 @@ class TestCliCommands:
 
         assert action == "permissions"
         assert "Permissions:" in msg
+        assert "permission_mode=confirm_all" in msg
         assert "profile=safe" in msg
         assert "mode=review" in msg
         assert "tools=1 [memory_read]" in msg
+
+    def test_handle_repl_command_permissions_can_set_mode(self):
+        agent = self._make_local_command_agent()
+
+        action, msg = _handle_repl_command(agent, "/permissions accept_reads")
+
+        assert action == "permissions"
+        assert msg == (
+            "Permissions: permission_mode=accept_reads | profile=safe | mode=review | tools=2 [read_file,shell]"
+        )
+        assert agent.config.safety.permission_mode == "accept_reads"
 
     def test_handle_repl_command_invalid_profile_is_reported_consistently(self):
         cfg = Config()
@@ -1196,6 +1244,7 @@ class TestCliCommands:
         assert doctor_action == "doctor"
         assert "profile=missing-profile->default" in doctor_msg
         assert permissions_action == "permissions"
+        assert "permission_mode=confirm_all" in permissions_msg
         assert "profile=missing-profile->default" in permissions_msg
 
     def test_handle_repl_command_skills_lists_available_and_active_skill(self):
@@ -1245,7 +1294,7 @@ class TestCliCommands:
         permissions_action, permissions_msg = _handle_repl_command(agent, "/permissions")
         assert permissions_action == "permissions"
         assert permissions_msg == (
-            "Permissions: profile=safe | skill=coder | mode=review | tools=2 [read_file,shell]"
+            "Permissions: permission_mode=confirm_all | profile=safe | skill=coder | mode=review | tools=2 [read_file,shell]"
         )
 
     def test_handle_repl_command_skills_clear_restores_base_profile(self):
@@ -1435,6 +1484,71 @@ class TestCliCommands:
         plain = [re.sub(r"\x1b\[[0-9;]*m", "", text) for text, _err in outputs]
         assert "you> /status" in plain
         assert any(text.startswith("Status:") for text in plain)
+
+    def test_chat_cmd_uses_filtered_picker_for_partial_slash_input(self):
+        class _FailIfRunAgent:
+            def __init__(self):
+                cfg = Config()
+                cfg.llm.provider = "openai"
+                cfg.llm.model = "gpt-5-mini"
+                cfg.llm.api_key = "test-key"
+                self.hooks = HookBus()
+                self.config = cfg
+                self.total_input_tokens = 0
+                self.total_output_tokens = 0
+                self.log_label = ""
+                self.policy_profile = "default"
+                self.on_thinking = None
+                self.on_tool_call = None
+
+            def run(self, _text):
+                raise AssertionError("agent.run should not be called for partial slash picker resolution")
+
+            def reset(self):
+                return None
+
+        outputs = []
+        agent = _FailIfRunAgent()
+        inputs = iter(["/mo", "quit"])
+        session_ids = iter(["sess-1", "sess-2"])
+        picked_queries = []
+
+        def pick_fn(query=None):
+            picked_queries.append(query)
+            return "/model"
+
+        _chat_cmd(
+            make_agent_fn=lambda: agent,
+            make_telegram_adapter_fn=lambda _cfg: None,
+            new_session_id_fn=lambda: next(session_ids),
+            save_exchange_fn=lambda *_args: None,
+            slash_completer_fn=lambda *_args: None,
+            pick_slash_command_fn=pick_fn,
+            is_bracketed_paste_start_fn=lambda _text: False,
+            collect_bracketed_paste_fn=lambda *_args, **_kwargs: "",
+            is_paste_command_fn=lambda _text: False,
+            collect_paste_message_fn=lambda *_args, **_kwargs: "",
+            handle_repl_command_fn=_handle_repl_command,
+            is_model_runtime_error_fn=lambda _err: False,
+            format_session_summary_fn=_format_session_summary,
+            format_chat_response_fn=lambda text: text,
+            format_turn_stats_fn=_format_turn_stats,
+            make_readline_prompt_fn=lambda label, _ansi: label,
+            spinner_cls=_FakeSpinner,
+            ansi_prompt_user="",
+            ansi_error="",
+            ansi_reset="",
+            click_echo_fn=lambda text="", err=False: outputs.append((text, err)),
+            input_fn=lambda _prompt: next(inputs),
+            readline_module=_FakeReadline(),
+            time_time_fn=lambda: 0.0,
+            version="test",
+        )
+
+        plain = [re.sub(r"\x1b\[[0-9;]*m", "", text) for text, _err in outputs]
+        assert picked_queries == ["/mo"]
+        assert "you> /model" in plain
+        assert any(text.startswith("Current model:") for text in plain)
 
     def test_chat_cmd_refreshes_slash_subvalues_from_agent_config(self):
         import archon.cli as cli_module
@@ -2090,7 +2204,7 @@ class TestCliLocalInteractiveCommands:
             ("/status", "Status: model=openai/gpt-5-mini | profile=safe | calls=on | mcp=1/2 | tokens=150"),
             ("/cost", "Cost: total_tokens=150 | input=120 | output=30"),
             ("/doctor", "Doctor: llm=ok | profile=ok | calls=on | mcp=1/2"),
-            ("/permissions", "Permissions: profile=safe | mode=review | tools=2 [read_file,shell]"),
+            ("/permissions", "Permissions: permission_mode=confirm_all | profile=safe | mode=review | tools=2 [read_file,shell]"),
             ("/approvals", "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0"),
             ("/approvals status", "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0"),
             ("/approvals on", "Approvals: dangerous_mode=on | pending=none | approve_next_tokens=0"),
@@ -2339,9 +2453,7 @@ class TestCliPendingApprovalInteractiveChat:
 class TestSlashCompleter:
     def test_matches_prefix(self):
         assert _slash_completer("/mo", 0) == "/model"
-        assert _slash_completer("/mo", 1) == "/model-list"
-        assert _slash_completer("/mo", 2) == "/model-set"
-        assert _slash_completer("/mo", 3) is None
+        assert _slash_completer("/mo", 1) is None
 
     def test_job_prefix_matches_job_commands(self):
         assert _slash_completer("/jo", 0) == "/jobs"
@@ -2401,6 +2513,19 @@ class TestSlashCompleter:
         assert _slash_completer("", 0) == "default"
         assert _slash_completer("", 1) is None
 
+    def test_profile_set_value_completion_uses_live_profile_names(self, monkeypatch):
+        cfg = Config()
+        cfg.profiles = {
+            "default": ProfileConfig(),
+            "safe": ProfileConfig(allowed_tools=["memory_read"], max_mode="review"),
+        }
+        monkeypatch.setattr("archon.cli._SLASH_SUBVALUES", _build_slash_subvalues(cfg))
+        monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/profile set ")
+
+        assert _slash_completer("", 0) == "default"
+        assert _slash_completer("", 1) == "safe"
+        assert _slash_completer("", 2) is None
+
     def test_calls_subcommand_completion_from_line_buffer_prefix(self, monkeypatch):
         monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/calls o")
         assert _slash_completer("o", 0) == "on"
@@ -2418,7 +2543,22 @@ class TestSlashCompleter:
     def test_skills_show_value_completion_from_line_buffer(self, monkeypatch):
         monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/skills show ")
         assert _slash_completer("", 0) == "coder"
-        assert _slash_completer("", 1) is None
+        assert _slash_completer("", 1) == "general"
+        assert _slash_completer("", 2) == "memory_curator"
+        assert _slash_completer("", 3) == "operator"
+        assert _slash_completer("", 4) == "researcher"
+        assert _slash_completer("", 5) == "sales"
+        assert _slash_completer("", 6) is None
+
+    def test_skills_use_value_completion_from_line_buffer(self, monkeypatch):
+        monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/skills use ")
+        assert _slash_completer("", 0) == "coder"
+        assert _slash_completer("", 1) == "general"
+        assert _slash_completer("", 2) == "memory_curator"
+        assert _slash_completer("", 3) == "operator"
+        assert _slash_completer("", 4) == "researcher"
+        assert _slash_completer("", 5) == "sales"
+        assert _slash_completer("", 6) is None
 
     def test_plugins_subcommand_completion_from_line_buffer(self, monkeypatch):
         monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/plugins ")
@@ -2448,7 +2588,26 @@ class TestSlashCompleter:
         monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/jobs ")
         assert _slash_completer("", 0) == "active"
         assert _slash_completer("", 1) == "all"
-        assert _slash_completer("", 2) is None
+        assert _slash_completer("", 2) == "purge"
+        assert _slash_completer("", 3) is None
+
+    def test_permissions_subcommand_completion_from_line_buffer(self, monkeypatch):
+        monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/permissions ")
+        assert _slash_completer("", 0) == "auto"
+        assert _slash_completer("", 1) == "accept_reads"
+        assert _slash_completer("", 2) == "confirm_all"
+        assert _slash_completer("", 3) is None
+
+    def test_model_subcommand_completion_from_line_buffer(self, monkeypatch):
+        monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/model ")
+        assert _slash_completer("", 0) == "set"
+        assert _slash_completer("", 1) is None
+
+    def test_model_set_value_completion_from_line_buffer(self, monkeypatch):
+        monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/model set ")
+        assert _slash_completer("", 0) == "anthropic-claude-3-7-sonnet-20250219"
+        assert _slash_completer("", 1) == "anthropic-claude-opus-4-1-20250805"
+        assert _slash_completer("", 2) == "anthropic-claude-sonnet-4-20250514"
 
 
 class TestCliPhaseLabels:
@@ -2538,21 +2697,47 @@ class TestPickSlashCommand:
         assert _slash_completer("", 0) == "exa"
         assert _slash_completer("", 1) is None
 
+    def test_job_value_completion_uses_recent_runtime_job_ids(self, monkeypatch):
+        monkeypatch.setattr(
+            "archon.cli_commands.list_worker_job_summaries",
+            lambda limit=8: [SimpleNamespace(job_id="worker:abc", last_update_at="2026-03-07T10:00:00Z")],
+        )
+        monkeypatch.setattr(
+            "archon.cli_commands.list_call_job_summaries",
+            lambda limit=8: [SimpleNamespace(job_id="call:def", last_update_at="2026-03-07T09:00:00Z")],
+        )
+        monkeypatch.setattr(
+            "archon.cli_commands.list_research_job_summaries",
+            lambda limit=8: [SimpleNamespace(job_id="research:ghi", last_update_at="2026-03-07T11:00:00Z")],
+        )
+        monkeypatch.setattr("archon.cli._SLASH_SUBVALUES", _build_slash_subvalues(Config()))
+        monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/job ")
+
+        assert _slash_completer("", 0) == "research:ghi"
+        assert _slash_completer("", 1) == "worker:abc"
+        assert _slash_completer("", 2) == "call:def"
+        assert _slash_completer("", 3) is None
+
     def test_slash_subvalues_map(self):
-        assert "/model-set" in _SLASH_SUBVALUES
+        assert "/model" in _SLASH_SUBVALUES
         assert "/approvals" in _SLASH_SUBVALUES
         assert "/calls" in _SLASH_SUBVALUES
+        assert "/permissions" in _SLASH_SUBVALUES
         assert "/profile" in _SLASH_SUBVALUES
         assert "/skills" in _SLASH_SUBVALUES
         assert "/plugins" in _SLASH_SUBVALUES
+        model_values = [value for value, _desc in _SLASH_SUBVALUES["/model"]]
+        assert model_values[0] == "set"
         approval_values = [value for value, _desc in _SLASH_SUBVALUES["/approvals"]]
         assert approval_values == ["status", "on", "off"]
         call_values = [value for value, _desc in _SLASH_SUBVALUES["/calls"]]
         assert call_values == ["status", "on", "off"]
+        permission_values = [value for value, _desc in _SLASH_SUBVALUES["/permissions"]]
+        assert permission_values == ["auto", "accept_reads", "confirm_all"]
         profile_values = [value for value, _desc in _SLASH_SUBVALUES["/profile"]]
         assert profile_values == ["show", "set default"]
         skill_values = [value for value, _desc in _SLASH_SUBVALUES["/skills"]]
-        assert skill_values == ["list", "show coder", "use coder", "clear"]
+        assert skill_values[:3] == ["list", "show coder", "show general"]
         plugin_values = [value for value, _desc in _SLASH_SUBVALUES["/plugins"]]
         assert plugin_values == ["list", "show", "show calls", "show telegram", "show web"]
 
@@ -2560,6 +2745,36 @@ class TestPickSlashCommand:
         picks = iter(["/calls", "on"])
         monkeypatch.setattr("archon.cli._run_picker", lambda *_a, **_k: next(picks))
         assert _pick_slash_command() == "/calls on"
+
+    def test_pick_slash_command_filters_top_level_by_query(self, monkeypatch):
+        seen = []
+
+        def fake_run_picker(items, **_kwargs):
+            seen.append([name for name, _desc in items])
+            return "/model"
+
+        monkeypatch.setattr("archon.cli._run_picker", fake_run_picker)
+
+        assert _pick_slash_command("/mo") == "/model"
+        assert seen[0] == ["/model"]
+
+    def test_pick_slash_command_filters_subvalues_by_query(self, monkeypatch):
+        cfg = Config()
+        cfg.profiles = {
+            "default": ProfileConfig(),
+            "safe": ProfileConfig(allowed_tools=["memory_read"], max_mode="review"),
+        }
+        monkeypatch.setattr("archon.cli._SLASH_SUBVALUES", _build_slash_subvalues(cfg))
+        seen = []
+
+        def fake_run_picker(items, **_kwargs):
+            seen.append([name for name, _desc in items])
+            return "set safe"
+
+        monkeypatch.setattr("archon.cli._run_picker", fake_run_picker)
+
+        assert _pick_slash_command("/profile s") == "/profile set safe"
+        assert seen[0] == ["show", "set default", "set safe"]
 
     def test_pick_slash_command_mcp_default_omits_incomplete_generic_verbs(self, monkeypatch):
         monkeypatch.setattr("archon.cli._SLASH_SUBVALUES", _build_slash_subvalues(Config()))

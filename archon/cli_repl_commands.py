@@ -57,8 +57,10 @@ def handle_model_command(agent, text: str) -> tuple[bool, str]:
     raw = (text or "").strip()
     if raw.lower() != "/model":
         return False, ""
-    provider = str(getattr(agent.llm, "provider", "") or "").strip() or "unknown"
-    model = str(getattr(agent.llm, "model", "") or "").strip() or "unknown"
+    llm = getattr(agent, "llm", None)
+    cfg_llm = getattr(getattr(agent, "config", None), "llm", None)
+    provider = str(getattr(llm, "provider", "") or getattr(cfg_llm, "provider", "") or "").strip() or "unknown"
+    model = str(getattr(llm, "model", "") or getattr(cfg_llm, "model", "") or "").strip() or "unknown"
     return True, f"Current model: {provider}/{model}"
 
 
@@ -128,16 +130,27 @@ def handle_doctor_command(agent, text: str) -> tuple[bool, str]:
 
 def handle_permissions_command(agent, text: str) -> tuple[bool, str]:
     """Handle `/permissions` command with compact policy details."""
-    raw = (text or "").strip().lower()
-    if raw != "/permissions":
+    raw = (text or "").strip()
+    parts = raw.split()
+    if not parts or parts[0].lower() != "/permissions":
         return False, ""
+    mode = parts[1].strip().lower() if len(parts) > 1 else ""
+    if len(parts) > 2 or mode not in {"", "auto", "accept_reads", "confirm_all"}:
+        return True, "Usage: /permissions [auto|accept_reads|confirm_all]"
 
     cfg = getattr(agent, "config", None)
+    safety_cfg = getattr(cfg, "safety", None)
+    if mode:
+        if safety_cfg is None:
+            return True, "Permissions unavailable: missing config.safety"
+        safety_cfg.permission_mode = mode
     profile_display, _resolved_name, profile, _profile_missing = _resolve_profile_diagnostics(agent, cfg)
     allowed_tools = sorted(str(item).strip() for item in profile.allowed_tools if str(item).strip())
     skill_suffix = f" | skill={profile.skill_name}" if getattr(profile, "skill_name", "") else ""
+    permission_mode = str(getattr(safety_cfg, "permission_mode", "confirm_all") or "confirm_all").strip().lower()
     return True, (
         "Permissions: "
+        f"permission_mode={permission_mode} | "
         f"profile={profile_display}{skill_suffix} | "
         f"mode={profile.max_mode} | "
         f"tools={len(allowed_tools)} [{','.join(allowed_tools)}]"

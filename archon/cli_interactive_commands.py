@@ -245,6 +245,14 @@ def chat_cmd(
         finally:
             prompt_state["value"] = ""
 
+    def pick_slash_command(query: str | None = None) -> str | None:
+        if query is None:
+            return pick_slash_command_fn()
+        try:
+            return pick_slash_command_fn(query)
+        except TypeError:
+            return pick_slash_command_fn()
+
     def on_thinking():
         spinner.start("thinking")
 
@@ -314,7 +322,7 @@ def chat_cmd(
             if not user_input:
                 continue
             if user_input == "/":
-                picked = pick_slash_command_fn()
+                picked = pick_slash_command("/")
                 if picked is None:
                     continue
                 click_echo_fn(f"you> {picked}")
@@ -346,6 +354,12 @@ def chat_cmd(
                 break
             if user_input.startswith("/"):
                 action, msg = handle_repl_command_fn(agent, user_input)
+                if action is None:
+                    picked = pick_slash_command(raw_input.lstrip())
+                    if picked:
+                        click_echo_fn(f"you> {picked}")
+                        user_input = picked
+                        action, msg = handle_repl_command_fn(agent, user_input)
                 if action == "reset":
                     agent.reset()
                     session_id = new_session_id_fn()

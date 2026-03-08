@@ -8,6 +8,11 @@ import sys
 import termios
 import tty
 
+from archon.calls.store import list_call_job_summaries
+from archon.control.skills import list_builtin_skills
+from archon.research.store import list_research_job_summaries
+from archon.workers.session_store import list_worker_job_summaries
+
 
 SLASH_COMMAND_GROUPS = (
     (
@@ -22,7 +27,7 @@ SLASH_COMMAND_GROUPS = (
             ("/context", "context state"),
             ("/doctor", "health checks"),
             ("/permissions", "policy permissions"),
-            ("/approvals", "approval status"),
+            ("/approvals", "approvals status/on/off"),
             ("/approve", "approve pending request"),
             ("/deny", "deny pending request"),
             ("/approve_next", "approve next dangerous action"),
@@ -33,9 +38,7 @@ SLASH_COMMAND_GROUPS = (
     (
         "Model",
         (
-            ("/model", "current provider/model"),
-            ("/model-list", "list presets"),
-            ("/model-set", "set provider-model"),
+            ("/model", "current or set provider/model"),
         ),
     ),
     (
@@ -99,8 +102,8 @@ MODEL_CATALOG: dict[str, tuple[str, ...]] = {
 def build_model_set_subvalues(model_catalog: dict[str, tuple[str, ...]]) -> list[tuple[str, str]]:
     """Build sub-values for /model-set from a model catalog."""
     items: list[tuple[str, str]] = []
-    for provider, models in model_catalog.items():
-        for model in models:
+    for provider in sorted(model_catalog):
+        for model in sorted(model_catalog[provider]):
             items.append((f"{provider}-{model}", provider))
     return items
 
@@ -116,6 +119,44 @@ def _runtime_mcp_server_names(config) -> list[str]:
         if str(name).strip()
     }
     return sorted(names)
+
+
+def _runtime_profile_names(config) -> list[str]:
+    profiles = getattr(config, "profiles", None)
+    if isinstance(profiles, dict) and profiles:
+        names = {str(name).strip() for name in profiles if str(name).strip()}
+        if names:
+            return sorted(names)
+    return ["default"]
+
+
+def _builtin_skill_names() -> list[str]:
+    return sorted(skill.name for skill in list_builtin_skills())
+
+
+def _recent_job_refs(limit: int = 8) -> list[str]:
+    refs: list[str] = []
+    seen: set[str] = set()
+    try:
+        jobs = []
+        jobs.extend(list_worker_job_summaries(limit=limit))
+        jobs.extend(list_call_job_summaries(limit=limit))
+        jobs.extend(list_research_job_summaries(limit=limit))
+        jobs.sort(
+            key=lambda item: str(getattr(item, "last_update_at", "") or ""),
+            reverse=True,
+        )
+        for job in jobs:
+            job_id = str(getattr(job, "job_id", "") or "").strip()
+            if not job_id or job_id in seen:
+                continue
+            seen.add(job_id)
+            refs.append(job_id)
+            if len(refs) >= limit:
+                break
+    except OSError:
+        return []
+    return refs
 
 
 def _native_plugin_names() -> list[str]:
@@ -148,6 +189,9 @@ def build_slash_subvalues(
         (f"show mcp:{server}", "Show one MCP plugin")
         for server in mcp_servers
     )
+    profile_names = _runtime_profile_names(config)
+    skill_names = _builtin_skill_names()
+    job_refs = _recent_job_refs()
     mcp_values: list[tuple[str, str]] = [
         ("servers", "List configured MCP servers"),
         ("show", "Show one MCP server config"),
@@ -157,7 +201,10 @@ def build_slash_subvalues(
         mcp_values.append((f"show {server}", "Show one MCP server config"))
         mcp_values.append((f"tools {server}", "List advertised tools for one server"))
     return {
-        "/model-set": build_model_set_subvalues(model_catalog),
+        "/model": [
+            ("set", "Set provider-model"),
+            *( (f"set {value}", provider) for value, provider in build_model_set_subvalues(model_catalog) ),
+        ],
         "/approvals": [
             ("status", "Show current terminal approval status"),
             ("on", "Enable sticky dangerous-action approvals"),
@@ -170,16 +217,21 @@ def build_slash_subvalues(
         ],
         "/profile": [
             ("show", "Show active policy profile"),
-            ("set default", "Set session policy profile to default"),
+            *( (f"set {name}", f"Set session policy profile to {name}") for name in profile_names ),
         ],
         "/skills": [
             ("list", "List available built-in skills"),
-            ("show coder", "Show one skill profile"),
-            ("use coder", "Set session skill"),
+            *( (f"show {name}", "Show one skill profile") for name in skill_names ),
+            *( (f"use {name}", "Set session skill") for name in skill_names ),
             ("clear", "Clear active session skill"),
         ],
         "/plugins": [
             *plugin_values,
+        ],
+        "/permissions": [
+            ("auto", "Set permission mode to auto"),
+            ("accept_reads", "Set permission mode to accept_reads"),
+            ("confirm_all", "Set permission mode to confirm_all"),
         ],
         "/mcp": [
             *mcp_values,
@@ -187,6 +239,10 @@ def build_slash_subvalues(
         "/jobs": [
             ("active", "Show unresolved jobs"),
             ("all", "Show recent jobs"),
+            ("purge", "Purge local terminal job records"),
+        ],
+        "/job": [
+            *[(job_id, "Show one recent job") for job_id in job_refs],
         ],
     }
 
@@ -264,8 +320,17 @@ def _picker_leaf_subvalues(values: list[tuple[str, str]]) -> list[tuple[str, str
 def _picker_selectable_subvalues(
     command: str,
     values: list[tuple[str, str]],
+    *,
+    typed_remainder: str = "",
 ) -> list[tuple[str, str]]:
     picker_values = _picker_leaf_subvalues(values)
+    remainder = str(typed_remainder or "")
+    if remainder.strip():
+        picker_values = [
+            (value, desc)
+            for value, desc in picker_values
+            if _subvalue_matches_remainder(value, remainder)
+        ]
     blocked_by_command = {
         "/plugins": {"show"},
         "/mcp": {"show", "tools"},
@@ -274,6 +339,30 @@ def _picker_selectable_subvalues(
     if not blocked:
         return picker_values
     return [(value, desc) for value, desc in picker_values if value not in blocked]
+
+
+def _subvalue_matches_remainder(value: str, typed_remainder: str) -> bool:
+    remainder = str(typed_remainder or "")
+    ends_with_space = remainder.endswith(" ")
+    stripped = remainder.strip()
+    if not stripped:
+        return True
+    typed_tokens = stripped.split()
+    value_tokens = str(value or "").strip().split()
+    if not value_tokens:
+        return False
+    prefix_tokens = typed_tokens if ends_with_space else typed_tokens[:-1]
+    if len(value_tokens) < len(prefix_tokens):
+        return False
+    if value_tokens[: len(prefix_tokens)] != prefix_tokens:
+        return False
+    if ends_with_space:
+        return len(value_tokens) > len(prefix_tokens)
+    current_prefix = typed_tokens[-1]
+    token_index = len(prefix_tokens)
+    if len(value_tokens) <= token_index:
+        return False
+    return value_tokens[token_index].startswith(current_prefix)
 
 
 def run_picker(items: list[tuple[str, str]], label_width: int = 10) -> str | None:
@@ -347,15 +436,60 @@ def pick_slash_command(
     run_picker_fn,
     slash_commands: list[tuple[str, str]],
     slash_subvalues: dict[str, list[tuple[str, str]]],
+    query: str | None = None,
 ) -> str | None:
     """Interactive two-level command picker with optional sub-value selection."""
-    command = run_picker_fn(list(slash_commands), label_width=12)
-    if command is None:
+    query_text = str(query or "").strip()
+    command = None
+    typed_remainder = ""
+    command_from_partial_query = False
+
+    if not query_text or query_text == "/":
+        command = run_picker_fn(list(slash_commands), label_width=12)
+        if command is None:
+            return None
+    elif not query_text.startswith("/"):
         return None
+    elif " " not in query_text:
+        command_matches = [
+            (name, desc) for name, desc in slash_commands if name.startswith(query_text)
+        ]
+        if not command_matches:
+            return None
+        exact_command = next((name for name, _desc in command_matches if name == query_text), None)
+        if exact_command is not None:
+            command = exact_command
+        else:
+            command = run_picker_fn(command_matches, label_width=12)
+            if command is None:
+                return None
+            command_from_partial_query = True
+    else:
+        command_token, typed_remainder = query_text.split(" ", 1)
+        command_matches = [
+            (name, desc) for name, desc in slash_commands if name.startswith(command_token)
+        ]
+        if not command_matches:
+            return None
+        exact_command = next((name for name, _desc in command_matches if name == command_token), None)
+        if exact_command is not None:
+            command = exact_command
+        else:
+            command = run_picker_fn(command_matches, label_width=12)
+            if command is None:
+                return None
+
+    if command_from_partial_query and not typed_remainder:
+        return command
+
     subvalues = slash_subvalues.get(command)
     if not subvalues:
         return command
-    picker_values = _picker_selectable_subvalues(command, subvalues)
+    picker_values = _picker_selectable_subvalues(
+        command,
+        subvalues,
+        typed_remainder=typed_remainder,
+    )
     if not picker_values:
         return command
     max_len = max(len(v) for v, _ in picker_values)

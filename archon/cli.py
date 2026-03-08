@@ -135,12 +135,13 @@ def _run_picker(items: list[tuple[str, str]], label_width: int = 10) -> str | No
     return _run_picker_impl(items, label_width=label_width)
 
 
-def _pick_slash_command() -> str | None:
+def _pick_slash_command(query: str | None = None) -> str | None:
     """Interactive two-level command picker with optional sub-value selection."""
     return _pick_slash_command_impl(
         run_picker_fn=_run_picker,
         slash_commands=_SLASH_COMMANDS,
         slash_subvalues=_SLASH_SUBVALUES,
+        query=query,
     )
 
 
@@ -167,6 +168,12 @@ def _collect_bracketed_paste(first_line: str, read_line, prompt: str) -> str:
 
 
 def _handle_model_command(agent: Agent, text: str) -> tuple[bool, str]:
+    raw = (text or "").strip()
+    lowered = raw.lower()
+    if lowered.startswith("/model set"):
+        remainder = raw[len("/model") :].lstrip()
+        alias_text = f"/model-{remainder}" if remainder else "/model-set"
+        return _handle_model_set_command(agent, alias_text)
     return _handle_model_command_impl(agent, text)
 
 
