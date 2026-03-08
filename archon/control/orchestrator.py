@@ -1,4 +1,4 @@
-"""Feature-flagged orchestration wrapper with legacy-safe fallback."""
+"""Feature-flagged orchestration wrapper with shared-executor fallback."""
 
 from __future__ import annotations
 
@@ -118,7 +118,7 @@ def orchestrate_response(
             {
                 "turn_id": turn_id,
                 "mode": "hybrid",
-                "fallback": "legacy",
+                "fallback": "shared_executor",
                 "error_type": type(e).__name__,
                 "error": str(e),
             },
@@ -175,7 +175,7 @@ def orchestrate_stream_response(
             {
                 "turn_id": turn_id,
                 "mode": "hybrid",
-                "fallback": "legacy_stream",
+                "fallback": "shared_stream_executor",
                 "error_type": type(e).__name__,
                 "error": str(e),
             },

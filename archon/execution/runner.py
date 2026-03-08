@@ -34,8 +34,8 @@ def run_task(
 ) -> WorkerResult:
     """Run a worker task via the configured backend.
 
-    Phase 2 keeps all supported backends routed through the legacy router while the
-    execution plane boundary is introduced.
+    The host backend dispatches directly through the worker router. Other declared
+    backends are kept as truthful placeholders until real isolation backends land.
     """
     backend = (execution_backend or "host").strip().lower()
     if backend not in _SUPPORTED_BACKENDS:

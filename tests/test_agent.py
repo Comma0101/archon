@@ -1825,7 +1825,7 @@ class TestAgentLoop:
         assert result == "ok"
         assert agent.llm.chat.call_count == 1
         assert len(fallback_events) == 1
-        assert fallback_events[0].payload["fallback"] == "legacy"
+        assert fallback_events[0].payload["fallback"] == "shared_executor"
         assert fallback_events[0].payload["error_type"] == "RuntimeError"
 
     @pytest.mark.parametrize(
