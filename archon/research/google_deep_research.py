@@ -237,10 +237,14 @@ def _coerce_stream_event(event: object) -> DeepResearchStreamEvent:
     interaction_id = str(_field(interaction, "id") or _field(interaction, "name") or "").strip()
     status = str(_field(interaction, "status") or _field(interaction, "state") or "").strip().lower()
     delta_content = _field(delta, "content")
+    response = _field(event, "response")
     text = str(
         _field(event, "text")
         or _field(delta, "text")
         or _field(delta_content, "text")
+        or _field(response, "output_text")
+        or _field(response, "text")
+        or _extract_output_text_from_outputs(_field(interaction, "outputs"))
         or ""
     ).strip()
     delta_type = str(_field(delta, "type") or "").strip().lower()

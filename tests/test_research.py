@@ -282,6 +282,40 @@ def test_google_deep_research_client_can_resume_stream_from_last_event_id():
     ]
 
 
+def test_google_deep_research_client_stream_reads_final_output_from_completion_payload():
+    class _StreamInteractionsClient:
+        def create(self, **kwargs):
+            return iter(
+                [
+                    {
+                        "event_type": "interaction.start",
+                        "interaction": {"id": "int-stream-123", "status": "in_progress"},
+                        "event_id": "evt-1",
+                    },
+                    {
+                        "event_type": "interaction.complete",
+                        "event_id": "evt-2",
+                        "interaction": {
+                            "id": "int-stream-123",
+                            "status": "completed",
+                            "outputs": [{"text": "Final report body"}],
+                        },
+                    },
+                ]
+            )
+
+    client = GoogleDeepResearchClient(
+        _StreamInteractionsClient(),
+        agent="deep-research-pro-preview-12-2025",
+    )
+
+    stream = client.start_research_stream("Research LA restaurant market")
+    events = list(stream.events)
+
+    assert events[1].event_type == "interaction.complete"
+    assert events[1].text == "Final report body"
+
+
 def test_research_job_summary_round_trips_from_store(tmp_path, monkeypatch):
     jobs_dir = tmp_path / "research" / "jobs"
     monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", jobs_dir)
