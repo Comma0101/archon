@@ -46,19 +46,24 @@ def filter_palette_items(
     value = str(query or "")
     if not value.startswith("/"):
         return []
-    if value in {"", "/"}:
-        return list(items)
 
     ends_with_space = value.endswith(" ")
     query_tokens = value.split()
     if not query_tokens:
-        return list(items)
+        return [i for i in items if len(str(i[0]).split()) == 1]
+
+    # If the user hasn't typed a space yet, only show top-level commands
+    is_top_level = not ends_with_space and len(query_tokens) == 1
 
     matches: list[tuple[str, str]] = []
     for item, desc in items:
         item_tokens = str(item or "").split()
         if len(item_tokens) < len(query_tokens):
             continue
+            
+        if is_top_level and len(item_tokens) > 1:
+            continue
+            
         prefix_tokens = query_tokens if ends_with_space else query_tokens[:-1]
         if item_tokens[: len(prefix_tokens)] != prefix_tokens:
             continue
