@@ -191,12 +191,32 @@ def run_live_slash_palette(
         matches = filter_palette_items(items, query)
         visible = matches[:MAX_VISIBLE_MATCHES]
         _clear()
+
+        try:
+            columns = os.get_terminal_size(fd).columns
+        except OSError:
+            columns = 80
+
         output_stream.write("\r\033[2K")
         output_stream.write(f"{prompt}{query}")
         if visible:
             for idx, (value, desc) in enumerate(visible):
                 marker = ">" if idx == selected else " "
-                line = f"\n {'\033[96;1m' if idx == selected else ''}{marker} {value:<26} {desc}{'\033[0m' if idx == selected else ''}"
+                
+                # Prefix visible length: space (1) + marker (1) + space (1) + value (max 26) + space (1) = 30
+                prefix_len = 30
+                max_desc_len = columns - prefix_len
+                
+                display_desc = desc
+                if max_desc_len > 0 and len(desc) > max_desc_len:
+                    if max_desc_len > 1:
+                        display_desc = desc[:max_desc_len - 1] + "…"
+                    else:
+                        display_desc = ""
+                elif max_desc_len <= 0:
+                    display_desc = ""
+
+                line = f"\n {'\033[96;1m' if idx == selected else ''}{marker} {value:<26} {display_desc}{'\033[0m' if idx == selected else ''}"
                 output_stream.write(line)
             rendered_lines = 1 + len(visible)
         else:
