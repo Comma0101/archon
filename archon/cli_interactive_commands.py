@@ -6,6 +6,7 @@ from archon.cli_ui import _format_terminal_approval_required
 from archon.cli_repl_commands import _maybe_auto_activate_skill
 from archon.control.contracts import HookEvent
 from archon.safety import Level
+from archon.ux.events import UXEvent
 from archon.ux.terminal_feed import TerminalActivityFeed
 
 
@@ -87,12 +88,23 @@ def chat_cmd(
     )
     agent.terminal_activity_feed = terminal_activity_feed
 
+    def _handle_terminal_ux_event(hook_event: HookEvent) -> None:
+        payload = getattr(hook_event, "payload", None) or {}
+        event = payload.get("event")
+        if isinstance(event, UXEvent):
+            terminal_activity_feed.emit_ux_event(event)
+
+    agent.hooks.register("ux.job_progress", _handle_terminal_ux_event)
+    agent.hooks.register("ux.job_completed", _handle_terminal_ux_event)
+
     tg = agent.config.telegram
     if tg.enabled and tg.connect_on_chat:
         try:
             telegram_adapter = make_telegram_adapter_fn(agent.config)
             if hasattr(telegram_adapter, "set_activity_sink"):
                 telegram_adapter.set_activity_sink(terminal_activity_feed.emit)
+            if hasattr(telegram_adapter, "wire_hook_bus"):
+                telegram_adapter.wire_hook_bus(agent.hooks)
             telegram_adapter.start()
             click_echo_fn(
                 f"[telegram] connected (users={len(tg.allowed_user_ids)}, poll={tg.poll_timeout_sec}s)"

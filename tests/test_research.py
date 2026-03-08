@@ -4,9 +4,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from archon.control.hooks import HookBus
+from archon.research import store as research_store
 from archon.research.google_deep_research import GoogleDeepResearchClient
 from archon.research.models import ResearchJobRecord
 from archon.research.store import (
+    load_research_job,
     load_research_job_summary,
     save_research_job,
 )
@@ -173,3 +176,79 @@ def test_load_research_job_summary_refreshes_and_persists_latest_interaction_sta
     assert reloaded is not None
     assert reloaded.status == "completed"
     assert reloaded.summary == "Final report body"
+
+
+def test_load_research_job_refresh_tracks_poll_metadata_and_provider_status(tmp_path, monkeypatch):
+    jobs_dir = tmp_path / "research" / "jobs"
+    monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", jobs_dir)
+
+    save_research_job(
+        ResearchJobRecord(
+            interaction_id="abc",
+            status="running",
+            prompt="Research LA restaurant market",
+            agent="deep-research-pro-preview-12-2025",
+            created_at="2026-03-06T22:00:00Z",
+            updated_at="2026-03-06T22:05:00Z",
+            summary="Research job started",
+            output_text="",
+            error="",
+        )
+    )
+
+    class _RefreshClient:
+        def get_research(self, interaction_id: str):
+            return SimpleNamespace(
+                interaction_id=interaction_id,
+                status="in_progress",
+                output_text="",
+            )
+
+    record = load_research_job("abc", refresh_client=_RefreshClient())
+
+    assert record is not None
+    assert record.provider_status == "in_progress"
+    assert record.last_polled_at
+    assert record.poll_count == 1
+    assert record.summary == "Research in progress"
+
+
+def test_load_research_job_emits_progress_event_on_nonterminal_refresh(tmp_path, monkeypatch):
+    jobs_dir = tmp_path / "research" / "jobs"
+    monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", jobs_dir)
+
+    save_research_job(
+        ResearchJobRecord(
+            interaction_id="abc",
+            status="running",
+            prompt="Research LA restaurant market",
+            agent="deep-research-pro-preview-12-2025",
+            created_at="2026-03-06T22:00:00Z",
+            updated_at="2026-03-06T22:05:00Z",
+            summary="Research job started",
+            output_text="",
+            error="",
+        )
+    )
+
+    events = []
+    hook_bus = HookBus()
+    hook_bus.register("ux.job_progress", lambda event: events.append(event))
+    monkeypatch.setattr(research_store._emit_job_progress_event, "_hook_bus", hook_bus, raising=False)
+
+    class _RefreshClient:
+        def get_research(self, interaction_id: str):
+            return SimpleNamespace(
+                interaction_id=interaction_id,
+                status="in_progress",
+                output_text="",
+            )
+
+    record = load_research_job("abc", refresh_client=_RefreshClient())
+
+    assert record is not None
+    assert events
+    payload = events[0].payload
+    rendered = payload["event"].render_text()
+    assert "research:abc" in rendered
+    assert "in progress" in rendered.lower()

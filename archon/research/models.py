@@ -16,6 +16,9 @@ class ResearchJobRecord:
     summary: str = ""
     output_text: str = ""
     error: str = ""
+    provider_status: str = ""
+    last_polled_at: str = ""
+    poll_count: int = 0
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -28,6 +31,9 @@ class ResearchJobRecord:
             "summary": self.summary,
             "output_text": self.output_text,
             "error": self.error,
+            "provider_status": self.provider_status,
+            "last_polled_at": self.last_polled_at,
+            "poll_count": int(self.poll_count or 0),
         }
 
     @classmethod
@@ -42,4 +48,7 @@ class ResearchJobRecord:
             summary=str(data.get("summary", "") or ""),
             output_text=str(data.get("output_text", "") or ""),
             error=str(data.get("error", "") or ""),
+            provider_status=str(data.get("provider_status", "") or ""),
+            last_polled_at=str(data.get("last_polled_at", "") or ""),
+            poll_count=int(data.get("poll_count", 0) or 0),
         )

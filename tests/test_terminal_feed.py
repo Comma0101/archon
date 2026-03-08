@@ -1,6 +1,7 @@
 """Terminal activity feed tests."""
 
 from archon.ux.events import ActivityEvent
+from archon.ux.events import UXEvent
 from archon.ux.terminal_feed import TerminalActivityFeed
 
 
@@ -82,4 +83,31 @@ def test_terminal_activity_feed_strips_readline_prompt_markers_when_restoring():
     assert buf.render() == (
         "\r\033[K[telegram] message received\n"
         "you> draft"
+    )
+
+
+def test_terminal_activity_feed_renders_ux_event_and_restores_prompt():
+    buf = _Buffer()
+    feed = TerminalActivityFeed(
+        prompt_fn=lambda: "you> ",
+        input_fn=lambda: "/job research:abc",
+        write_fn=buf.write,
+        flush_fn=buf.flush,
+    )
+
+    feed.emit_ux_event(
+        UXEvent(
+            kind="job_progress",
+            data={
+                "job_kind": "research",
+                "job_id": "research:abc",
+                "status": "in_progress",
+                "summary": "Research in progress",
+            },
+        )
+    )
+
+    assert buf.render() == (
+        "\r\033[K[research] research:abc in progress: Research in progress\n"
+        "you> /job research:abc"
     )

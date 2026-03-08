@@ -6,7 +6,7 @@ import sys
 from collections.abc import Callable
 
 from archon.security.redaction import sanitize_terminal_notice_text, strip_readline_prompt_markers
-from archon.ux.events import ActivityEvent
+from archon.ux.events import ActivityEvent, UXEvent
 
 
 class TerminalActivityFeed:
@@ -30,8 +30,14 @@ class TerminalActivityFeed:
         return strip_readline_prompt_markers(self._safe_text(self._prompt_fn))
 
     def emit(self, event: ActivityEvent) -> None:
+        self.emit_text(event.render_text())
+
+    def emit_ux_event(self, event: UXEvent) -> None:
+        self.emit_text(event.render_text())
+
+    def emit_text(self, text: str) -> None:
         self._write_fn("\r\033[K")
-        self._write_fn(sanitize_terminal_notice_text(event.render_text()))
+        self._write_fn(sanitize_terminal_notice_text(text))
         self._write_fn("\n")
         prompt = self.current_prompt
         buffer_text = strip_readline_prompt_markers(self._safe_text(self._input_fn))

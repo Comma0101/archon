@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import datetime, timezone
 from typing import Callable
 
 from archon.calls.store import list_call_job_summaries, load_call_job_summary
@@ -16,7 +17,14 @@ from archon.control.skills import (
     list_builtin_skills,
 )
 from archon.mcp import MCPClient
-from archon.research.store import cancel_research_job, list_research_job_summaries, load_research_job_summary, purge_completed_jobs
+from archon.research.store import (
+    cancel_research_job,
+    list_research_job_summaries,
+    load_research_job,
+    load_research_job_summary,
+    purge_completed_jobs,
+    start_research_job_monitor,
+)
 from archon.workers.session_store import list_worker_job_summaries, load_worker_job_summary, purge_stale_sessions
 
 _NATIVE_PLUGIN_SPECS = (
@@ -940,13 +948,34 @@ def handle_job_command(agent, text: str) -> tuple[bool, str]:
         if job_ref.startswith("research:"):
             interaction_id = job_ref.split(":", 1)[1]
             refresh_client = _make_deep_research_refresh_client(agent)
-            job = load_research_job_summary(interaction_id, refresh_client=refresh_client)
+            job = load_research_job(
+                interaction_id,
+                refresh_client=refresh_client,
+                hook_bus=getattr(agent, "hooks", None),
+            )
+            if job is not None and not _research_status_terminal(getattr(job, "status", "")) and refresh_client is not None:
+                poll_interval = int(
+                    getattr(
+                        getattr(getattr(getattr(agent, "config", None), "research", None), "google_deep_research", None),
+                        "poll_interval_sec",
+                        10,
+                    )
+                    or 10
+                )
+                start_research_job_monitor(
+                    interaction_id,
+                    refresh_client=refresh_client,
+                    poll_interval_sec=poll_interval,
+                    hook_bus=getattr(agent, "hooks", None),
+                )
         else:
             job = _load_job_summary(job_ref)
     except OSError as e:
         return True, f"Job unavailable: {e}"
     if job is None:
         return True, f"Job not found: {job_ref}"
+    if job_ref.startswith("research:"):
+        return True, _format_research_job_record(job)
     return True, format_job_summary(job)
 
 
@@ -972,6 +1001,65 @@ def _format_mcp_counts(cfg) -> str:
     servers = getattr(getattr(cfg, "mcp", None), "servers", {}) or {}
     enabled = _count_enabled_mcp_servers(cfg)
     return f"{enabled}/{len(servers)}"
+
+
+def _format_research_job_record(record) -> str:
+    interaction_id = str(getattr(record, "interaction_id", "") or "").strip()
+    status = str(getattr(record, "status", "") or "unknown").strip() or "unknown"
+    summary = str(getattr(record, "summary", "") or "").strip() or "unknown"
+    updated_at = str(getattr(record, "updated_at", "") or "").strip()
+    provider_status = str(getattr(record, "provider_status", "") or status).strip() or status
+    last_polled_at = str(getattr(record, "last_polled_at", "") or "").strip() or "(not yet refreshed)"
+    poll_count = max(0, int(getattr(record, "poll_count", 0) or 0))
+    created_at = str(getattr(record, "created_at", "") or "").strip()
+    lines = [
+        f"job_id: research:{interaction_id}",
+        "job_kind: deep_research",
+        f"job_status: {status}",
+        f"job_summary: {summary}",
+        f"job_last_update_at: {updated_at}",
+        f"job_provider_status: {provider_status}",
+        f"job_last_polled_at: {last_polled_at}",
+        f"job_elapsed: {_format_elapsed(created_at)}",
+        f"job_poll_count: {poll_count}",
+    ]
+    output_text = str(getattr(record, "output_text", "") or "").strip()
+    if output_text:
+        lines.append("job_output_preview:")
+        lines.extend(output_text[:1000].splitlines()[:10] or [output_text[:1000]])
+    error = str(getattr(record, "error", "") or "").strip()
+    if error:
+        lines.append(f"job_error: {error}")
+    return "\n".join(lines)
+
+
+def _format_elapsed(started_at: str) -> str:
+    started = _parse_iso_datetime(started_at)
+    if started is None:
+        return "unknown"
+    delta = max(0, int((datetime.now(timezone.utc) - started).total_seconds()))
+    if delta < 60:
+        return f"{delta}s"
+    if delta < 3600:
+        minutes, seconds = divmod(delta, 60)
+        return f"{minutes}m {seconds}s"
+    hours, rem = divmod(delta, 3600)
+    minutes = rem // 60
+    return f"{hours}h {minutes}m"
+
+
+def _parse_iso_datetime(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _research_status_terminal(status: str) -> bool:
+    return str(status or "").strip().lower() in {"completed", "done", "failed", "error", "cancelled"}
 
 
 def _plugin_rows(cfg) -> list[dict[str, object]]:

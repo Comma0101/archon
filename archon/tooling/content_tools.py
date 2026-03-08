@@ -232,8 +232,21 @@ def register_content_tools(registry) -> None:
                 summary="Research job started",
                 output_text=str(getattr(interaction, "output_text", "") or ""),
                 error="",
+                provider_status=str(getattr(interaction, "status", "") or "running").strip() or "running",
             )
         )
+        try:
+            from archon.research.store import start_research_job_monitor
+
+            poll_interval = int(getattr(deep_cfg, "poll_interval_sec", 10) or 10)
+            start_research_job_monitor(
+                record.interaction_id,
+                refresh_client=client,
+                poll_interval_sec=poll_interval,
+                hook_bus=getattr(registry, "hook_bus", None),
+            )
+        except Exception:
+            pass
         job_id = f"research:{record.interaction_id}"
         return (
             f"Research job started: {job_id}\n"

@@ -28,7 +28,7 @@ class ActivityEvent:
 class UXEvent:
     """Typed event that any UX surface (terminal, Telegram, web) can render."""
 
-    kind: str  # tool_start, tool_end, iteration_progress, compaction_triggered, job_completed
+    kind: str  # tool_start, tool_end, iteration_progress, compaction_triggered, job_progress, job_completed
     data: dict[str, Any] = field(default_factory=dict)
 
     def render_text(self) -> str:
@@ -47,6 +47,15 @@ class UXEvent:
             return f"[progress] iteration {d.get('current', '?')}/{d.get('max', '?')}"
         if k == "compaction_triggered":
             return f"[compact] {d.get('before', '?')} -> {d.get('after', '?')} messages"
+        if k == "job_progress":
+            job_kind = d.get("job_kind", "job")
+            job_id = d.get("job_id", "?")
+            status = str(d.get("status", "running") or "running").replace("_", " ")
+            summary = d.get("summary", "")
+            text = f"[{job_kind}] {job_id} {status}"
+            if summary:
+                text += f": {summary}"
+            return text
         if k == "job_completed":
             job_kind = d.get("job_kind", "job")
             job_id = d.get("job_id", "?")
@@ -78,6 +87,24 @@ def iteration_progress(current: int, max_iter: int) -> UXEvent:
 
 def compaction_triggered(before: int, after: int) -> UXEvent:
     return UXEvent(kind="compaction_triggered", data={"before": before, "after": after})
+
+
+def job_progress(
+    *,
+    job_kind: str,
+    job_id: str,
+    status: str,
+    summary: str = "",
+) -> UXEvent:
+    return UXEvent(
+        kind="job_progress",
+        data={
+            "job_kind": job_kind,
+            "job_id": job_id,
+            "status": status,
+            "summary": summary,
+        },
+    )
 
 
 def job_completed(

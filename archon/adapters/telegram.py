@@ -1042,16 +1042,20 @@ class TelegramAdapter:
                 pass
 
     def wire_hook_bus(self, hook_bus) -> None:
-        """Subscribe to ux.job_completed events on a HookBus for cross-surface visibility."""
+        """Subscribe to research/job UX events on a HookBus for cross-surface visibility."""
         if hook_bus is None or not hasattr(hook_bus, "register"):
             return
+        hook_bus.register("ux.job_progress", self._on_hook_job_event)
         hook_bus.register("ux.job_completed", self._on_hook_job_completed)
 
-    def _on_hook_job_completed(self, hook_event) -> None:
+    def _on_hook_job_event(self, hook_event) -> None:
         payload = getattr(hook_event, "payload", None) or {}
         event = payload.get("event")
         if isinstance(event, UXEvent):
             self.handle_ux_event(event)
+
+    def _on_hook_job_completed(self, hook_event) -> None:
+        self._on_hook_job_event(hook_event)
 
     def _preview_text(self, text: str, limit: int = 80) -> str:
         compact = sanitize_terminal_notice_text(text)

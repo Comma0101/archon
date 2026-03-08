@@ -785,6 +785,41 @@ class TestCliCommands:
         assert "job_status: completed" in msg
         assert "job_summary: Final report body" in msg
 
+    def test_handle_repl_command_job_formats_live_research_workflow_details(self, monkeypatch):
+        record = SimpleNamespace(
+            interaction_id="abc",
+            status="in_progress",
+            summary="Research in progress",
+            updated_at="2026-03-06T22:10:00Z",
+            created_at="2026-03-06T22:00:00Z",
+            output_text="",
+            error="",
+            provider_status="in_progress",
+            last_polled_at="2026-03-06T22:10:05Z",
+            poll_count=3,
+        )
+        monkeypatch.setattr(
+            "archon.cli_repl_commands.load_research_job",
+            lambda interaction_id, refresh_client=None, hook_bus=None: record,
+        )
+        monkeypatch.setattr("archon.cli_repl_commands.load_worker_job_summary", lambda _ref: None)
+        monkeypatch.setattr("archon.cli_repl_commands.load_call_job_summary", lambda _ref: None)
+
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+        )
+
+        action, msg = _handle_repl_command(agent, "/job research:abc")
+
+        assert action == "job"
+        assert "job_id: research:abc" in msg
+        assert "job_status: in_progress" in msg
+        assert "job_provider_status: in_progress" in msg
+        assert "job_last_polled_at: 2026-03-06T22:10:05Z" in msg
+        assert "job_poll_count: 3" in msg
+        assert "job_elapsed:" in msg
+
     def test_handle_repl_command_job_builds_refresh_client_from_config_when_agent_has_no_creator(self, monkeypatch, tmp_path):
         from archon.research.models import ResearchJobRecord
         from archon.research.store import save_research_job
@@ -818,17 +853,22 @@ class TestCliCommands:
             lambda api_key, agent=None: client if api_key == "cfg-google-key" else None,
         )
 
-        def fake_load(interaction_id: str, refresh_client=None):
-            load_calls.append((interaction_id, refresh_client))
+        def fake_load(interaction_id: str, refresh_client=None, hook_bus=None):
+            load_calls.append((interaction_id, refresh_client, hook_bus))
             return SimpleNamespace(
-                job_id="research:abc",
-                kind="deep_research",
+                interaction_id="abc",
                 status="completed",
                 summary="Final report body",
-                last_update_at="2026-03-06T22:10:00Z",
+                updated_at="2026-03-06T22:10:00Z",
+                created_at="2026-03-06T22:00:00Z",
+                output_text="",
+                error="",
+                provider_status="completed",
+                last_polled_at="2026-03-06T22:10:00Z",
+                poll_count=1,
             )
 
-        monkeypatch.setattr("archon.cli_repl_commands.load_research_job_summary", fake_load)
+        monkeypatch.setattr("archon.cli_repl_commands.load_research_job", fake_load)
         agent = SimpleNamespace(
             llm=SimpleNamespace(model="test"),
             config=cfg,
@@ -837,7 +877,9 @@ class TestCliCommands:
         action, msg = _handle_repl_command(agent, "/job research:abc")
 
         assert action == "job"
-        assert load_calls == [("abc", client)]
+        assert len(load_calls) == 1
+        assert load_calls[0][0] == "abc"
+        assert load_calls[0][1] is client
         assert "job_status: completed" in msg
         assert "job_summary: Final report body" in msg
 
