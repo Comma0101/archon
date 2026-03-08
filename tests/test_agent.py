@@ -211,6 +211,66 @@ def assert_non_stream_fixture(
     )
 
 
+def capture_stream_trace(agent: Agent, user_message: str, policy_profile: str | None = None) -> dict:
+    chunks = list(agent.run_stream(user_message, policy_profile=policy_profile))
+    history = list(agent.history)
+    tool_results: list[str] = []
+    for msg in history:
+        content = msg.get("content")
+        if msg.get("role") != "user" or not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                tool_results.append(str(block.get("content", "") or ""))
+    return {
+        "chunks": chunks,
+        "turn_id": agent.last_turn_id,
+        "history": history,
+        "history_roles": [str(msg.get("role", "")) for msg in history],
+        "tool_results": tool_results,
+        "chat_stream_calls": int(getattr(agent.llm.chat_stream, "call_count", 0)),
+        "input_tokens": agent.total_input_tokens,
+        "output_tokens": agent.total_output_tokens,
+    }
+
+
+@dataclass
+class StreamParityFixture:
+    chunks: list[str]
+    history: list[dict]
+    history_roles: list[str]
+    chat_stream_calls: int
+    tool_results: list[str]
+
+    @property
+    def tool_result_text(self) -> str:
+        return self.tool_results[-1].rstrip("\n") if self.tool_results else ""
+
+
+def assert_stream_fixture(
+    agent: Agent,
+    user_message: str,
+    *,
+    expected_chunks: list[str],
+    expected_history_roles: list[str],
+    expected_chat_stream_calls: int,
+    policy_profile: str | None = None,
+) -> StreamParityFixture:
+    trace = capture_stream_trace(agent, user_message, policy_profile=policy_profile)
+
+    assert trace["chunks"] == expected_chunks
+    assert trace["history_roles"] == expected_history_roles
+    assert trace["chat_stream_calls"] == expected_chat_stream_calls
+
+    return StreamParityFixture(
+        chunks=trace["chunks"],
+        history=trace["history"],
+        history_roles=trace["history_roles"],
+        chat_stream_calls=trace["chat_stream_calls"],
+        tool_results=trace["tool_results"],
+    )
+
+
 class TestAgentLoop:
     def test_turn_executor_non_stream_matches_text_only_run_path(self, monkeypatch):
         responses = [
@@ -566,6 +626,143 @@ class TestAgentLoop:
             expected_text="I notice I'm repeating the same actions. Let me stop and reassess.",
             expected_history_roles=["user", "assistant", "user", "assistant", "user", "assistant", "assistant"],
             expected_llm_calls=3,
+        )
+
+        assert fixture.tool_result_text == "loop"
+
+    def test_stream_parity_fixture_text_only_response(self):
+        final_resp = LLMResponse(
+            text="Hello world",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "Hello world"}],
+            input_tokens=6,
+            output_tokens=3,
+        )
+        agent = make_agent([], stream_chunks=[["Hello", " ", "world", final_resp]])
+
+        assert_stream_fixture(
+            agent,
+            "hi",
+            expected_chunks=["Hello", " ", "world"],
+            expected_history_roles=["user", "assistant"],
+            expected_chat_stream_calls=1,
+        )
+
+    def test_stream_parity_fixture_single_tool_round_trip(self):
+        tool_resp = LLMResponse(
+            text=None,
+            tool_calls=[ToolCall(id="tc_stream_tool", name="shell", arguments={"command": "echo hi"})],
+            raw_content=[{"type": "tool_use", "id": "tc_stream_tool", "name": "shell", "input": {"command": "echo hi"}}],
+            input_tokens=6,
+            output_tokens=3,
+        )
+        final_resp = LLMResponse(
+            text="done",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "done"}],
+            input_tokens=4,
+            output_tokens=2,
+        )
+        agent = make_agent([], stream_chunks=[[tool_resp], ["done", final_resp]])
+
+        fixture = assert_stream_fixture(
+            agent,
+            "run echo hi",
+            expected_chunks=["done"],
+            expected_history_roles=["user", "assistant", "user", "assistant"],
+            expected_chat_stream_calls=2,
+        )
+
+        assert fixture.tool_result_text == "hi"
+
+    def test_stream_parity_fixture_mcp_denied_round_trip(self, monkeypatch):
+        tool_resp = LLMResponse(
+            text=None,
+            tool_calls=[
+                ToolCall(
+                    id="tc_stream_mcp_deny",
+                    name="mcp_call",
+                    arguments={
+                        "server": "docs",
+                        "tool": "search_docs",
+                        "arguments": {"query": "archon"},
+                    },
+                )
+            ],
+            raw_content=[
+                {
+                    "type": "tool_use",
+                    "id": "tc_stream_mcp_deny",
+                    "name": "mcp_call",
+                    "input": {
+                        "server": "docs",
+                        "tool": "search_docs",
+                        "arguments": {"query": "archon"},
+                    },
+                }
+            ],
+            input_tokens=8,
+            output_tokens=3,
+        )
+        final_resp = LLMResponse(
+            text="done",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "done"}],
+            input_tokens=10,
+            output_tokens=2,
+        )
+        agent = make_agent([], stream_chunks=[[tool_resp], ["done", final_resp]])
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        agent.tools.config = agent.config
+        agent.config.orchestrator.enabled = True
+        agent.config.orchestrator.mode = "hybrid"
+        agent.config.orchestrator.shadow_eval = False
+        agent.config.profiles["default"] = ProfileConfig(allowed_tools=["mcp_call"])
+        agent.config.mcp.servers["docs"] = MCPServerConfig(
+            enabled=True,
+            mode="read_only",
+            transport="stdio",
+            command=["python", "server.py"],
+        )
+
+        fixture = assert_stream_fixture(
+            agent,
+            "try mcp",
+            expected_chunks=["done"],
+            expected_history_roles=["user", "assistant", "user", "assistant"],
+            expected_chat_stream_calls=2,
+        )
+
+        assert "Policy denied MCP server 'docs'" in fixture.tool_result_text
+
+    def test_stream_parity_fixture_loop_detection_stop(self):
+        tool_resp = LLMResponse(
+            text=None,
+            tool_calls=[ToolCall(id="tc_stream_loop", name="shell", arguments={"command": "echo loop"})],
+            raw_content=[{"type": "tool_use", "id": "tc_stream_loop", "name": "shell", "input": {"command": "echo loop"}}],
+            input_tokens=10,
+            output_tokens=10,
+        )
+        config = Config()
+        config.agent.max_iterations = 10
+        llm = MagicMock()
+
+        def _stream_side_effect(*_args, **_kwargs):
+            yield tool_resp
+
+        llm.chat = MagicMock()
+        llm.chat_stream = MagicMock(side_effect=_stream_side_effect)
+        tools = ToolRegistry(archon_source_dir=None)
+        agent = Agent(llm, tools, config)
+        agent._system_prompt = "test"
+
+        fixture = assert_stream_fixture(
+            agent,
+            "do something",
+            expected_chunks=["I notice I'm repeating the same actions. Let me stop and reassess."],
+            expected_history_roles=["user", "assistant", "user", "assistant", "user", "assistant", "assistant"],
+            expected_chat_stream_calls=3,
         )
 
         assert fixture.tool_result_text == "loop"
