@@ -141,7 +141,8 @@ def read_interactive_input(
             if callable(redisplay):
                 redisplay()
             try:
-                hook_clear(None)
+                if callable(hook_clear):
+                    hook_clear(None)
             except Exception:
                 return None
 
@@ -216,11 +217,11 @@ def run_live_slash_palette(
                 elif max_desc_len <= 0:
                     display_desc = ""
 
-                line = f"\n {'\033[96;1m' if idx == selected else ''}{marker} {value:<26} {display_desc}{'\033[0m' if idx == selected else ''}"
+                line = f"\r\n {'\033[96;1m' if idx == selected else ''}{marker} {value:<26} {display_desc}{'\033[0m' if idx == selected else ''}"
                 output_stream.write(line)
             rendered_lines = 1 + len(visible)
         else:
-            output_stream.write("\n   (no matches)")
+            output_stream.write("\r\n   (no matches)")
             rendered_lines = 2
         output_stream.flush()
         return visible
