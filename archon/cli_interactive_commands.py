@@ -61,6 +61,7 @@ def chat_cmd(
     time_time_fn,
     version: str,
     make_terminal_activity_feed_fn=None,
+    read_interactive_input_fn=None,
 ) -> None:
     """Interactive chat REPL body."""
     agent = make_agent_fn()
@@ -257,6 +258,18 @@ def chat_cmd(
         finally:
             prompt_state["value"] = ""
 
+    def read_interactive_input(prompt: str) -> tuple[str, bool]:
+        prompt_state["value"] = prompt or ""
+        try:
+            if callable(read_interactive_input_fn):
+                return read_interactive_input_fn(
+                    prompt=prompt,
+                    fallback_read_fn=input_fn,
+                )
+            return input_fn(prompt), False
+        finally:
+            prompt_state["value"] = ""
+
     def pick_slash_command(query: str | None = None) -> str | None:
         if query is None:
             return pick_slash_command_fn()
@@ -304,7 +317,9 @@ def chat_cmd(
     try:
         while True:
             try:
-                raw_input = read_input_with_feed(make_readline_prompt_fn("you>", ansi_prompt_user))
+                raw_input, used_live_slash_palette = read_interactive_input(
+                    make_readline_prompt_fn("you>", ansi_prompt_user)
+                )
             except (EOFError, KeyboardInterrupt):
                 if turn_count > 0:
                     click_echo_fn(
@@ -333,6 +348,8 @@ def chat_cmd(
 
             if not user_input:
                 continue
+            if used_live_slash_palette and user_input.startswith("/"):
+                click_echo_fn(f"you> {user_input}")
             if user_input == "/":
                 picked = pick_slash_command("/")
                 if picked is None:

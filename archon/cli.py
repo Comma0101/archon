@@ -66,6 +66,7 @@ from archon.cli_input import (
     is_bracketed_paste_start as _is_bracketed_paste_start_impl,
     is_paste_command as _is_paste_command_impl,
 )
+from archon.slash_palette import read_interactive_input as _read_interactive_input_impl
 from archon.cli_repl_commands import (
     handle_calls_command as _handle_calls_command_impl,
     handle_model_command as _handle_model_command_impl,
@@ -164,6 +165,16 @@ def _collect_bracketed_paste(first_line: str, read_line, prompt: str) -> str:
         prompt,
         start_marker=BRACKETED_PASTE_START,
         end_marker=BRACKETED_PASTE_END,
+    )
+
+
+def _read_interactive_input(prompt: str, fallback_read_fn) -> tuple[str, bool]:
+    return _read_interactive_input_impl(
+        prompt=prompt,
+        fallback_read_fn=fallback_read_fn,
+        readline_module=readline,
+        slash_commands=_SLASH_COMMANDS,
+        slash_subvalues=_SLASH_SUBVALUES,
     )
 
 
@@ -306,6 +317,7 @@ def chat():
         readline_module=readline,
         time_time_fn=time.time,
         version=__version__,
+        read_interactive_input_fn=_read_interactive_input,
     )
 
 
