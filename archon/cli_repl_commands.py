@@ -23,7 +23,6 @@ from archon.research.store import (
     load_research_job,
     load_research_job_summary,
     purge_completed_jobs,
-    start_research_job_monitor,
 )
 from archon.workers.session_store import list_worker_job_summaries, load_worker_job_summary, purge_stale_sessions
 
@@ -787,57 +786,6 @@ def _job_is_active(job) -> bool:
     return str(getattr(job, "status", "") or "").strip().lower() in _ACTIVE_JOB_STATUSES
 
 
-def _make_deep_research_refresh_client(agent):
-    creator = getattr(agent, "_create_google_deep_research_client", None)
-    if callable(creator):
-        try:
-            return creator()
-        except Exception:
-            return None
-
-    cfg = getattr(agent, "config", None)
-    if cfg is None:
-        return None
-    deep_cfg = getattr(getattr(cfg, "research", None), "google_deep_research", None)
-    if deep_cfg is None or not bool(getattr(deep_cfg, "enabled", False)):
-        return None
-
-    llm_cfg = getattr(cfg, "llm", None)
-    api_key = ""
-    if str(getattr(llm_cfg, "provider", "") or "").strip().lower() == "google":
-        api_key = str(getattr(llm_cfg, "api_key", "") or "").strip()
-    if not api_key and str(getattr(llm_cfg, "fallback_provider", "") or "").strip().lower() == "google":
-        api_key = str(getattr(llm_cfg, "fallback_api_key", "") or "").strip()
-    if not api_key:
-        api_key = str(os.environ.get("GEMINI_API_KEY", "")).strip()
-    if not api_key:
-        api_key = str(os.environ.get("GOOGLE_API_KEY", "")).strip()
-    if not api_key:
-        return None
-
-    try:
-        from archon.research.google_deep_research import GoogleDeepResearchClient
-
-        return GoogleDeepResearchClient.from_api_key(
-            api_key,
-            agent=str(getattr(deep_cfg, "agent", "") or "").strip(),
-        )
-    except Exception:
-        return None
-
-
-def _refresh_job_summary(job, refresh_client):
-    if refresh_client is None:
-        return job
-    if str(getattr(job, "kind", "") or "").strip().lower() != "deep_research":
-        return job
-    job_id = str(getattr(job, "job_id", "") or "").strip()
-    if not job_id.startswith("research:"):
-        return job
-    refreshed = load_research_job_summary(job_id.split(":", 1)[1], refresh_client=refresh_client)
-    return refreshed or job
-
-
 def _parse_jobs_args(parts: list[str]) -> tuple[str, int] | None:
     view = "all"
     limit = 10
@@ -904,14 +852,6 @@ def handle_jobs_command(agent, text: str) -> tuple[bool, str]:
     scan_limit = max(limit, 100) if view == "active" else limit
     try:
         jobs = _collect_job_summaries(limit=scan_limit)
-        refresh_client = None
-        if any(
-            str(getattr(job, "kind", "") or "").strip().lower() == "deep_research"
-            for job in jobs
-        ):
-            refresh_client = _make_deep_research_refresh_client(agent)
-        if refresh_client is not None:
-            jobs = [_refresh_job_summary(job, refresh_client) for job in jobs]
     except OSError as e:
         return True, f"Jobs unavailable: {e}"
     return True, _format_jobs_list(jobs, view=view, limit=limit)
@@ -936,7 +876,13 @@ def handle_job_command(agent, text: str) -> tuple[bool, str]:
         interaction_id = cancel_ref.split(":", 1)[1]
         remote_error = ""
         remote_cancelled = False
-        refresh_client = _make_deep_research_refresh_client(agent)
+        creator = getattr(agent, "_create_google_deep_research_client", None)
+        refresh_client = None
+        if callable(creator):
+            try:
+                refresh_client = creator()
+            except Exception:
+                refresh_client = None
         if refresh_client is not None:
             cancel_fn = getattr(refresh_client, "cancel_research", None)
             if callable(cancel_fn):
@@ -969,27 +915,11 @@ def handle_job_command(agent, text: str) -> tuple[bool, str]:
     try:
         if job_ref.startswith("research:"):
             interaction_id = job_ref.split(":", 1)[1]
-            refresh_client = _make_deep_research_refresh_client(agent)
             job = load_research_job(
                 interaction_id,
-                refresh_client=refresh_client,
+                refresh_client=None,
                 hook_bus=getattr(agent, "hooks", None),
             )
-            if job is not None and not research_status_terminal(getattr(job, "status", "")) and refresh_client is not None:
-                poll_interval = int(
-                    getattr(
-                        getattr(getattr(getattr(agent, "config", None), "research", None), "google_deep_research", None),
-                        "poll_interval_sec",
-                        10,
-                    )
-                    or 10
-                )
-                start_research_job_monitor(
-                    interaction_id,
-                    refresh_client=refresh_client,
-                    poll_interval_sec=poll_interval,
-                    hook_bus=getattr(agent, "hooks", None),
-                )
         else:
             job = _load_job_summary(job_ref)
     except OSError as e:

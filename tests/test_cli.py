@@ -748,7 +748,7 @@ class TestCliCommands:
         assert "job_kind: deep_research" in msg
         assert "job_summary: Completed" in msg
 
-    def test_handle_repl_command_job_refreshes_research_job_from_client(self, monkeypatch, tmp_path):
+    def test_handle_repl_command_job_reads_local_research_record_without_refresh(self, monkeypatch, tmp_path):
         from archon.research.models import ResearchJobRecord
         from archon.research.store import save_research_job
 
@@ -758,40 +758,27 @@ class TestCliCommands:
         save_research_job(
             ResearchJobRecord(
                 interaction_id="abc",
-                status="running",
+                status="completed",
                 prompt="Research LA restaurant market",
                 agent="deep-research-pro-preview-12-2025",
                 created_at="2026-03-06T22:00:00Z",
-                updated_at="2026-03-06T22:05:00Z",
-                summary="Research job started",
-                output_text="",
+                updated_at="2026-03-06T22:10:00Z",
+                summary="Final report body",
+                output_text="Final report body",
                 error="",
+                provider_status="completed",
+                last_event_at="2026-03-06T22:10:00Z",
+                stream_status="interaction.complete",
             )
         )
-
-        class _FakeDeepResearchClient:
-            def __init__(self):
-                self.calls = []
-
-            def get_research(self, interaction_id: str):
-                self.calls.append(interaction_id)
-                return SimpleNamespace(
-                    interaction_id=interaction_id,
-                    status="completed",
-                    output_text="Final report body",
-                )
-
-        client = _FakeDeepResearchClient()
         agent = SimpleNamespace(
             llm=SimpleNamespace(model="test"),
             config=SimpleNamespace(llm=SimpleNamespace(model="test")),
-            _create_google_deep_research_client=lambda: client,
         )
 
         action, msg = _handle_repl_command(agent, "/job research:abc")
 
         assert action == "job"
-        assert client.calls == ["abc"]
         assert "job_status: completed" in msg
         assert "job_summary: Final report body" in msg
 
@@ -806,10 +793,10 @@ class TestCliCommands:
             error="",
             provider_status="in_progress",
             last_polled_at="2026-03-06T22:10:05Z",
+            last_event_at="2026-03-06T22:10:06Z",
+            stream_status="content.delta",
+            latest_thought_summary="Checking sources",
             poll_count=3,
-            _refresh_attempted=True,
-            _refresh_ok=True,
-            _refresh_error="",
         )
         monkeypatch.setattr(
             "archon.cli_repl_commands.load_research_job",
@@ -832,11 +819,10 @@ class TestCliCommands:
         assert "job_status: in_progress" in msg
         assert "job_provider_status: in_progress" in msg
         assert "job_last_polled_at: 2026-03-06T22:10:05Z" in msg
-        assert "job_poll_count: 3" in msg
+        assert "job_event_count: 3" in msg
         assert "job_elapsed:" in msg
-        assert "job_live_status: remote reachable | running normally" in msg
-        assert "job_refresh_age:" in msg
-        assert "job_next_poll_due_in:" in msg
+        assert "job_live_status: stream active | receiving progress" in msg
+        assert "job_stream_age:" in msg
 
     def test_handle_repl_command_job_marks_overdue_research_as_not_running_normally(self, monkeypatch):
         cfg = Config()
@@ -851,10 +837,10 @@ class TestCliCommands:
             error="",
             provider_status="in_progress",
             last_polled_at="2026-03-06T22:10:05Z",
+            last_event_at="2026-03-06T22:10:06Z",
+            stream_status="content.delta",
+            latest_thought_summary="Checking sources",
             poll_count=3,
-            _refresh_attempted=True,
-            _refresh_ok=True,
-            _refresh_error="",
         )
         monkeypatch.setattr(
             "archon.cli_repl_commands.load_research_job",
@@ -871,70 +857,7 @@ class TestCliCommands:
         action, msg = _handle_repl_command(agent, "/job research:abc")
 
         assert action == "job"
-        assert "job_live_status: remote reachable | running longer than configured 20m timeout" in msg
-
-    def test_handle_repl_command_job_builds_refresh_client_from_config_when_agent_has_no_creator(self, monkeypatch, tmp_path):
-        from archon.research.models import ResearchJobRecord
-        from archon.research.store import save_research_job
-
-        monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path / "research" / "jobs")
-        monkeypatch.setattr("archon.cli_repl_commands.load_worker_job_summary", lambda _ref: None)
-        monkeypatch.setattr("archon.cli_repl_commands.load_call_job_summary", lambda _ref: None)
-        save_research_job(
-            ResearchJobRecord(
-                interaction_id="abc",
-                status="running",
-                prompt="Research LA restaurant market",
-                agent="deep-research-pro-preview-12-2025",
-                created_at="2026-03-06T22:00:00Z",
-                updated_at="2026-03-06T22:05:00Z",
-                summary="Research job started",
-                output_text="",
-                error="",
-            )
-        )
-
-        cfg = Config()
-        cfg.llm.provider = "google"
-        cfg.llm.api_key = "cfg-google-key"
-        cfg.research.google_deep_research.enabled = True
-        client = object()
-        load_calls = []
-
-        monkeypatch.setattr(
-            "archon.research.google_deep_research.GoogleDeepResearchClient.from_api_key",
-            lambda api_key, agent=None: client if api_key == "cfg-google-key" else None,
-        )
-
-        def fake_load(interaction_id: str, refresh_client=None, hook_bus=None):
-            load_calls.append((interaction_id, refresh_client, hook_bus))
-            return SimpleNamespace(
-                interaction_id="abc",
-                status="completed",
-                summary="Final report body",
-                updated_at="2026-03-06T22:10:00Z",
-                created_at="2026-03-06T22:00:00Z",
-                output_text="",
-                error="",
-                provider_status="completed",
-                last_polled_at="2026-03-06T22:10:00Z",
-                poll_count=1,
-            )
-
-        monkeypatch.setattr("archon.cli_repl_commands.load_research_job", fake_load)
-        agent = SimpleNamespace(
-            llm=SimpleNamespace(model="test"),
-            config=cfg,
-        )
-
-        action, msg = _handle_repl_command(agent, "/job research:abc")
-
-        assert action == "job"
-        assert len(load_calls) == 1
-        assert load_calls[0][0] == "abc"
-        assert load_calls[0][1] is client
-        assert "job_status: completed" in msg
-        assert "job_summary: Final report body" in msg
+        assert "job_live_status: stream active | running longer than configured 20m timeout" in msg
 
     def test_handle_repl_command_job_degrades_gracefully_on_lookup_error(self, monkeypatch):
         agent = SimpleNamespace(
@@ -958,16 +881,13 @@ class TestCliCommands:
                 raise RuntimeError("provider cancel failed")
 
         monkeypatch.setattr(
-            "archon.cli_repl_commands._make_deep_research_refresh_client",
-            lambda agent: _CancelClient(),
-        )
-        monkeypatch.setattr(
             "archon.cli_repl_commands.cancel_research_job",
             lambda interaction_id, reason="": SimpleNamespace(status="cancelled"),
         )
         agent = SimpleNamespace(
             llm=SimpleNamespace(model="test"),
             config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+            _create_google_deep_research_client=lambda: _CancelClient(),
         )
 
         action, msg = _handle_repl_command(agent, "/job cancel research:abc")
@@ -983,16 +903,13 @@ class TestCliCommands:
                 return SimpleNamespace(status="cancelled")
 
         monkeypatch.setattr(
-            "archon.cli_repl_commands._make_deep_research_refresh_client",
-            lambda agent: _CancelClient(),
-        )
-        monkeypatch.setattr(
             "archon.cli_repl_commands.cancel_research_job",
             lambda interaction_id, reason="": SimpleNamespace(status="cancelled"),
         )
         agent = SimpleNamespace(
             llm=SimpleNamespace(model="test"),
             config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+            _create_google_deep_research_client=lambda: _CancelClient(),
         )
 
         action, msg = _handle_repl_command(agent, "/job cancel research:abc")
@@ -1000,41 +917,23 @@ class TestCliCommands:
         assert action == "job"
         assert msg == "Cancelled research:abc remotely and locally."
 
-    def test_handle_repl_command_jobs_refreshes_research_job_from_client(self, monkeypatch):
-        stale_job = SimpleNamespace(
+    def test_handle_repl_command_jobs_reads_local_research_job_state(self, monkeypatch):
+        fresh_job = SimpleNamespace(
             job_id="research:abc",
             kind="deep_research",
-            status="running",
-            summary="Research job started",
-            last_update_at="2026-03-06T22:05:00Z",
+            status="completed",
+            summary="Final report body",
+            last_update_at="2026-03-06T22:10:00Z",
         )
-        monkeypatch.setattr("archon.cli_repl_commands._collect_job_summaries", lambda limit=10: [stale_job])
-
-        client = object()
-        load_calls = []
-
-        def fake_load(interaction_id: str, refresh_client=None):
-            load_calls.append((interaction_id, refresh_client))
-            assert refresh_client is client
-            return SimpleNamespace(
-                job_id="research:abc",
-                kind="deep_research",
-                status="completed",
-                summary="Final report body",
-                last_update_at="2026-03-06T22:10:00Z",
-            )
-
-        monkeypatch.setattr("archon.cli_repl_commands.load_research_job_summary", fake_load)
+        monkeypatch.setattr("archon.cli_repl_commands._collect_job_summaries", lambda limit=10: [fresh_job])
         agent = SimpleNamespace(
             llm=SimpleNamespace(model="test"),
             config=SimpleNamespace(llm=SimpleNamespace(model="test")),
-            _create_google_deep_research_client=lambda: client,
         )
 
         action, msg = _handle_repl_command(agent, "/jobs")
 
         assert action == "jobs"
-        assert load_calls == [("abc", client)]
         assert "completed" in msg
         assert "Final report body" in msg
 

@@ -12,13 +12,16 @@ def format_research_job_record(record, *, cfg=None) -> str:
     updated_at = str(getattr(record, "updated_at", "") or "").strip()
     provider_status = str(getattr(record, "provider_status", "") or status).strip() or status
     last_polled_at = str(getattr(record, "last_polled_at", "") or "").strip() or "(not yet refreshed)"
+    last_event_at = str(getattr(record, "last_event_at", "") or "").strip() or "(not yet streamed)"
+    stream_status = str(getattr(record, "stream_status", "") or "").strip() or "(not yet started)"
+    latest_thought_summary = str(getattr(record, "latest_thought_summary", "") or "").strip()
     poll_count = max(0, int(getattr(record, "poll_count", 0) or 0))
     created_at = str(getattr(record, "created_at", "") or "").strip()
     created_at_dt = _parse_iso_datetime(created_at)
     last_polled_dt = _parse_iso_datetime(last_polled_at if last_polled_at != "(not yet refreshed)" else "")
-    refresh_attempted = bool(getattr(record, "_refresh_attempted", False))
-    refresh_ok = bool(getattr(record, "_refresh_ok", False))
-    refresh_error = str(getattr(record, "_refresh_error", "") or "").strip()
+    last_event_dt = _parse_iso_datetime(last_event_at if last_event_at != "(not yet streamed)" else "")
+    if last_event_dt is None:
+        last_event_dt = last_polled_dt
     timeout_minutes = max(
         1,
         int(
@@ -31,17 +34,6 @@ def format_research_job_record(record, *, cfg=None) -> str:
             or 20
         ),
     )
-    poll_interval = max(
-        1,
-        int(
-            getattr(
-                getattr(getattr(cfg, "research", None), "google_deep_research", None),
-                "poll_interval_sec",
-                10,
-            )
-            or 10
-        ),
-    )
     lines = [
         f"job_id: research:{interaction_id}",
         "job_kind: deep_research",
@@ -50,14 +42,16 @@ def format_research_job_record(record, *, cfg=None) -> str:
         f"job_last_update_at: {updated_at}",
         f"job_provider_status: {provider_status}",
         f"job_last_polled_at: {last_polled_at}",
+        f"job_last_event_at: {last_event_at}",
+        f"job_stream_status: {stream_status}",
         f"job_elapsed: {_format_elapsed(created_at)}",
+        f"job_event_count: {poll_count}",
         f"job_poll_count: {poll_count}",
-        f"job_live_status: {_format_research_live_status(status, refresh_attempted, refresh_ok, refresh_error, last_polled_dt, created_at_dt, timeout_minutes)}",
-        f"job_refresh_age: {_format_refresh_age(last_polled_dt)}",
-        f"job_next_poll_due_in: {_format_next_poll_due(status, last_polled_dt, poll_interval)}",
+        f"job_live_status: {_format_research_live_status(status, stream_status, last_event_dt, created_at_dt, timeout_minutes)}",
+        f"job_stream_age: {_format_refresh_age(last_event_dt)}",
     ]
-    if refresh_attempted and not refresh_ok and refresh_error:
-        lines.append(f"job_last_refresh_error: {refresh_error}")
+    if latest_thought_summary:
+        lines.append(f"job_latest_thought_summary: {latest_thought_summary}")
     output_text = str(getattr(record, "output_text", "") or "").strip()
     if output_text:
         lines.append("job_output_preview:")
@@ -72,7 +66,7 @@ def format_research_job_compact_line(record, *, cfg=None) -> str:
     interaction_id = str(getattr(record, "interaction_id", "") or "").strip()
     status = str(getattr(record, "status", "") or "unknown").strip() or "unknown"
     provider_status = str(getattr(record, "provider_status", "") or status).strip() or status
-    poll_count = max(0, int(getattr(record, "poll_count", 0) or 0))
+    event_count = max(0, int(getattr(record, "poll_count", 0) or 0))
     summary = str(getattr(record, "summary", "") or "").strip()
     if not summary:
         summary = str(getattr(record, "prompt", "") or "").strip()
@@ -80,7 +74,7 @@ def format_research_job_compact_line(record, *, cfg=None) -> str:
         summary = "No summary"
     return (
         f"research:{interaction_id} | {status} | provider={provider_status} | "
-        f"polls={poll_count} | {summary}"
+        f"events={event_count} | {summary}"
     )
 
 
@@ -117,43 +111,25 @@ def _format_refresh_age(last_polled_at: datetime | None) -> str:
     return f"{hours}h {minutes}m"
 
 
-def _format_next_poll_due(status: str, last_polled_at: datetime | None, poll_interval: int) -> str:
-    if research_status_terminal(status):
-        return "n/a"
-    if last_polled_at is None:
-        return "now"
-    age = max(0, int((datetime.now(timezone.utc) - last_polled_at).total_seconds()))
-    remaining = max(0, int(poll_interval) - age)
-    return f"{remaining}s"
-
-
 def _format_research_live_status(
     status: str,
-    refresh_attempted: bool,
-    refresh_ok: bool,
-    refresh_error: str,
-    last_polled_at: datetime | None,
+    stream_status: str,
+    last_event_at: datetime | None,
     created_at: datetime | None,
     timeout_minutes: int,
 ) -> str:
     normalized = str(status or "").strip().lower()
-    if refresh_attempted:
-        if refresh_ok:
-            if normalized in {"in_progress", "running", "queued", "starting"}:
-                if _research_runtime_exceeds_timeout(created_at, timeout_minutes):
-                    return f"remote reachable | running longer than configured {timeout_minutes}m timeout"
-                return "remote reachable | running normally"
-            if normalized == "requires_action":
-                return "remote reachable | action required"
-            if research_status_terminal(normalized):
-                return "remote reachable | terminal state confirmed"
-            return f"remote reachable | {normalized or 'unknown'}"
-        if last_polled_at is not None:
-            return "cached status | last remote check failed"
-        return f"last remote check failed | {refresh_error or 'unknown error'}"
-    if last_polled_at is not None:
-        return "using cached status"
-    return "waiting for first successful poll"
+    if normalized in {"in_progress", "running", "queued", "starting"}:
+        if _research_runtime_exceeds_timeout(created_at, timeout_minutes):
+            return f"stream active | running longer than configured {timeout_minutes}m timeout"
+        if last_event_at is not None:
+            return "stream active | receiving progress"
+        return "stream started | waiting for first event"
+    if normalized == "requires_action":
+        return "stream active | action required"
+    if research_status_terminal(normalized):
+        return f"terminal | {stream_status or normalized}"
+    return f"stream state | {stream_status or normalized or 'unknown'}"
 
 
 def _research_runtime_exceeds_timeout(created_at: datetime | None, timeout_minutes: int) -> bool:

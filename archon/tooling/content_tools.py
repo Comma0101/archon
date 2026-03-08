@@ -207,9 +207,7 @@ def register_content_tools(registry) -> None:
                 "Enable [research.google_deep_research].enabled to use."
             )
 
-        from archon.research.models import ResearchJobRecord
-        from archon.research.store import save_research_job
-        from datetime import datetime, timezone
+        from archon.research.store import start_research_stream_job
 
         client = _build_deep_research_client(cfg)
         if client is None:
@@ -217,38 +215,15 @@ def register_content_tools(registry) -> None:
 
         agent_name = str(getattr(deep_cfg, "agent", "") or "").strip()
         try:
-            interaction = client.start_research(query)
-        except Exception as e:
-            return f"Deep Research failed to start: {type(e).__name__}: {e}"
-
-        timestamp = datetime.now(timezone.utc).isoformat()
-        record = save_research_job(
-            ResearchJobRecord(
-                interaction_id=str(getattr(interaction, "interaction_id", "") or "").strip(),
-                status=str(getattr(interaction, "status", "") or "running").strip() or "running",
-                prompt=query,
-                agent=agent_name,
-                created_at=timestamp,
-                updated_at=timestamp,
-                summary="Research job started",
-                output_text=str(getattr(interaction, "output_text", "") or ""),
-                error="",
-                provider_status=str(getattr(interaction, "status", "") or "running").strip() or "running",
+            record = start_research_stream_job(
+                query,
+                client=client,
+                agent_name=agent_name,
                 timeout_minutes=max(1, int(getattr(deep_cfg, "timeout_minutes", 20) or 20)),
-            )
-        )
-        try:
-            from archon.research.store import start_research_job_monitor
-
-            poll_interval = int(getattr(deep_cfg, "poll_interval_sec", 10) or 10)
-            start_research_job_monitor(
-                record.interaction_id,
-                refresh_client=client,
-                poll_interval_sec=poll_interval,
                 hook_bus=getattr(registry, "hook_bus", None),
             )
-        except Exception:
-            pass
+        except Exception as e:
+            return f"Deep Research failed to start: {type(e).__name__}: {e}"
         job_id = f"research:{record.interaction_id}"
         return (
             f"Research job started: {job_id}\n"
@@ -285,8 +260,7 @@ def register_content_tools(registry) -> None:
         if interaction_id.startswith("research:"):
             interaction_id = interaction_id[9:]
 
-        refresh_client = _build_deep_research_client(cfg)
-        record = load_research_job(interaction_id, refresh_client=refresh_client)
+        record = load_research_job(interaction_id)
         if record is None:
             return f"Research job '{job_id}' not found."
 
@@ -315,8 +289,7 @@ def register_content_tools(registry) -> None:
         cfg = load_config()
         from archon.research.store import list_research_jobs
 
-        refresh_client = _build_deep_research_client(cfg)
-        records = list_research_jobs(limit=max(1, int(limit)), refresh_client=refresh_client)
+        records = list_research_jobs(limit=max(1, int(limit)))
         lines = [f"Research jobs: {len(records)}"]
         if not records:
             lines.append("No research jobs found.")

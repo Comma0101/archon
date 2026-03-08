@@ -150,6 +150,54 @@ def test_google_deep_research_client_rejects_custom_tools():
         )
 
 
+def test_google_deep_research_client_starts_streaming_interaction():
+    class _StreamInteractionsClient:
+        def __init__(self):
+            self.create_calls = []
+
+        def create(self, **kwargs):
+            self.create_calls.append(kwargs)
+            return iter(
+                [
+                    {
+                        "event_type": "interaction.start",
+                        "interaction": {"id": "int-stream-123", "status": "in_progress"},
+                    },
+                    {
+                        "event_type": "content.delta",
+                        "delta": {"type": "thought_summary", "text": "Looking at sources"},
+                    },
+                    {
+                        "event_type": "interaction.complete",
+                        "interaction": {"id": "int-stream-123", "status": "completed"},
+                    },
+                ]
+            )
+
+    fake = _StreamInteractionsClient()
+    client = GoogleDeepResearchClient(fake, agent="deep-research-pro-preview-12-2025")
+
+    stream = client.start_research_stream("Research LA restaurant market")
+
+    assert stream.interaction_id == "int-stream-123"
+    events = list(stream.events)
+    assert [event.event_type for event in events] == [
+        "interaction.start",
+        "content.delta",
+        "interaction.complete",
+    ]
+    assert fake.create_calls == [
+        {
+            "agent": "deep-research-pro-preview-12-2025",
+            "input": "Research LA restaurant market",
+            "background": True,
+            "store": True,
+            "stream": True,
+            "tools": None,
+        }
+    ]
+
+
 def test_research_job_summary_round_trips_from_store(tmp_path, monkeypatch):
     jobs_dir = tmp_path / "research" / "jobs"
     monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", jobs_dir)

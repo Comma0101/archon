@@ -124,7 +124,7 @@ class TestWebTools:
 
 
 class TestDeepResearchTools:
-    def test_check_research_job_uses_config_backed_refresh_client(self, monkeypatch):
+    def test_check_research_job_reads_local_stream_state(self, monkeypatch):
         reg = make_registry()
         cfg = Config()
         cfg.llm.provider = "google"
@@ -142,32 +142,24 @@ class TestDeepResearchTools:
             error = ""
             provider_status = "completed"
             last_polled_at = "2026-03-07T00:01:00Z"
+            last_event_at = "2026-03-07T00:01:05Z"
+            stream_status = "interaction.complete"
+            latest_thought_summary = "Checking sources"
             poll_count = 3
             timeout_minutes = 20
             _refresh_attempted = True
             _refresh_ok = True
             _refresh_error = ""
 
-        captured = {}
-
         monkeypatch.setattr("archon.tooling.content_tools.ensure_dirs", lambda: None)
         monkeypatch.setattr("archon.tooling.content_tools.load_config", lambda: cfg)
         monkeypatch.setattr(
-            "archon.research.google_deep_research.GoogleDeepResearchClient.from_api_key",
-            lambda api_key, agent=None: captured.update({"api_key": api_key, "agent": agent}) or object(),
-        )
-        monkeypatch.setattr(
             "archon.research.store.load_research_job",
-            lambda interaction_id, refresh_client=None: captured.update(
-                {"interaction_id": interaction_id, "refresh_client": refresh_client}
-            ) or _Record(),
+            lambda interaction_id, refresh_client=None: _Record(),
         )
 
         result = reg.execute("check_research_job", {"job_id": "research:abc123"})
 
-        assert captured["api_key"] == "cfg-google-key"
-        assert captured["interaction_id"] == "abc123"
-        assert captured["refresh_client"] is not None
         assert "job_id: research:abc123" in result
         assert "job_status: completed" in result
         assert "job_provider_status: completed" in result
@@ -194,25 +186,20 @@ class TestDeepResearchTools:
                 self.error = ""
                 self.provider_status = status
                 self.last_polled_at = "2026-03-07T00:01:00Z"
+                self.last_event_at = "2026-03-07T00:01:05Z"
+                self.stream_status = "content.delta"
+                self.latest_thought_summary = "Running"
                 self.poll_count = 2
                 self.timeout_minutes = 20
                 self._refresh_attempted = True
                 self._refresh_ok = True
                 self._refresh_error = ""
 
-        captured = {}
-
         monkeypatch.setattr("archon.tooling.content_tools.ensure_dirs", lambda: None)
         monkeypatch.setattr("archon.tooling.content_tools.load_config", lambda: cfg)
         monkeypatch.setattr(
-            "archon.research.google_deep_research.GoogleDeepResearchClient.from_api_key",
-            lambda api_key, agent=None: captured.update({"api_key": api_key}) or object(),
-        )
-        monkeypatch.setattr(
             "archon.research.store.list_research_jobs",
-            lambda limit=20, refresh_client=None: captured.update(
-                {"limit": limit, "refresh_client": refresh_client}
-            ) or [
+            lambda limit=20, refresh_client=None: [
                 _Record("job-1", "in_progress", "Running"),
                 _Record("job-2", "completed", "Finished"),
             ],
@@ -220,9 +207,6 @@ class TestDeepResearchTools:
 
         result = reg.execute("list_research_jobs", {"limit": 2})
 
-        assert captured["api_key"] == "cfg-google-key"
-        assert captured["limit"] == 2
-        assert captured["refresh_client"] is not None
         assert "Research jobs: 2" in result
-        assert "research:job-1 | in_progress | provider=in_progress | polls=2" in result
-        assert "research:job-2 | completed | provider=completed | polls=2" in result
+        assert "research:job-1 | in_progress | provider=in_progress | events=2" in result
+        assert "research:job-2 | completed | provider=completed | events=2" in result

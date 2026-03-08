@@ -1,11 +1,14 @@
 """Tests for research job cancellation and polling."""
 
 import json
+import time
 from pathlib import Path
 
 from archon.config import Config
 from archon.research.models import ResearchJobRecord
 from archon.research.store import (
+    consume_research_stream,
+    start_research_stream_job,
     save_research_job,
     cancel_research_job,
     load_research_job,
@@ -132,3 +135,104 @@ def test_poll_research_job_uses_config_backed_google_client(tmp_path, monkeypatc
         "api_key": "cfg-google-key",
         "agent": "deep-research-pro-preview-12-2025",
     }
+
+
+def test_consume_research_stream_persists_progress_and_completion(tmp_path, monkeypatch):
+    monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path)
+
+    save_research_job(
+        ResearchJobRecord(
+            interaction_id="stream-123",
+            status="in_progress",
+            prompt="test query",
+            agent="deep-research-pro-preview-12-2025",
+            created_at="2099-01-01T00:00:00Z",
+            updated_at="2099-01-01T00:00:00Z",
+            summary="Research job started",
+            output_text="",
+            error="",
+        )
+    )
+
+    class _Event:
+        def __init__(self, event_type: str, **fields):
+            self.event_type = event_type
+            for key, value in fields.items():
+                setattr(self, key, value)
+
+    events = iter(
+        [
+            _Event(
+                "content.delta",
+                delta={"type": "thought_summary", "text": "Checking sources"},
+            ),
+            _Event(
+                "interaction.complete",
+                interaction={"id": "stream-123", "status": "completed"},
+                text="Final answer",
+            ),
+        ]
+    )
+
+    consume_research_stream("stream-123", events)
+
+    record = load_research_job("stream-123")
+    assert record is not None
+    assert record.status == "completed"
+    assert record.summary == "Final answer"
+    assert record.output_text == "Final answer"
+    assert record.poll_count == 2
+
+
+def test_start_research_stream_job_starts_stream_in_worker_and_persists_updates(tmp_path, monkeypatch):
+    monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path)
+
+    class _Stream:
+        interaction_id = "stream-job-123"
+        status = "in_progress"
+
+        def __init__(self):
+            class _Event:
+                def __init__(self, event_type: str, **fields):
+                    self.event_type = event_type
+                    for key, value in fields.items():
+                        setattr(self, key, value)
+
+            self.events = iter(
+                [
+                    _Event("content.delta", delta_type="thought_summary", text="Checking sources"),
+                    _Event("interaction.complete", status="completed", text="Final answer"),
+                ]
+            )
+
+    class _Client:
+        def __init__(self):
+            self.prompts = []
+
+        def start_research_stream(self, prompt: str):
+            self.prompts.append(prompt)
+            return _Stream()
+
+    client = _Client()
+
+    record = start_research_stream_job(
+        "test query",
+        client=client,
+        agent_name="deep-research-pro-preview-12-2025",
+        timeout_minutes=20,
+    )
+
+    assert record is not None
+    assert record.interaction_id == "stream-job-123"
+    assert client.prompts == ["test query"]
+
+    reloaded = None
+    for _ in range(20):
+        reloaded = load_research_job("stream-job-123")
+        if reloaded is not None and reloaded.status == "completed":
+            break
+        time.sleep(0.01)
+
+    assert reloaded is not None
+    assert reloaded.status == "completed"
+    assert reloaded.output_text == "Final answer"

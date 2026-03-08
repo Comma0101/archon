@@ -18,6 +18,9 @@ class ResearchJobRecord:
     error: str = ""
     provider_status: str = ""
     last_polled_at: str = ""
+    last_event_at: str = ""
+    stream_status: str = ""
+    latest_thought_summary: str = ""
     poll_count: int = 0
     timeout_minutes: int = 20
 
@@ -34,6 +37,9 @@ class ResearchJobRecord:
             "error": self.error,
             "provider_status": self.provider_status,
             "last_polled_at": self.last_polled_at,
+            "last_event_at": self.last_event_at,
+            "stream_status": self.stream_status,
+            "latest_thought_summary": self.latest_thought_summary,
             "poll_count": int(self.poll_count or 0),
             "timeout_minutes": int(self.timeout_minutes or 20),
         }
@@ -52,6 +58,9 @@ class ResearchJobRecord:
             error=str(data.get("error", "") or ""),
             provider_status=str(data.get("provider_status", "") or ""),
             last_polled_at=str(data.get("last_polled_at", "") or ""),
+            last_event_at=str(data.get("last_event_at", "") or ""),
+            stream_status=str(data.get("stream_status", "") or ""),
+            latest_thought_summary=str(data.get("latest_thought_summary", "") or ""),
             poll_count=int(data.get("poll_count", 0) or 0),
             timeout_minutes=int(data.get("timeout_minutes", 20) or 20),
         )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import threading
 import time
 from datetime import datetime, timezone
@@ -113,6 +114,140 @@ def poll_research_job(interaction_id: str) -> ResearchJobRecord | None:
         except Exception:
             pass  # Polling failure is non-fatal
     return record
+
+
+def consume_research_stream(interaction_id: str, events, *, hook_bus=None) -> ResearchJobRecord | None:
+    record = load_research_job(interaction_id)
+    if record is None:
+        return None
+    latest = record
+    for event in events:
+        now = _now_iso()
+        event_type = str(getattr(event, "event_type", "") or "").strip().lower()
+        text = str(getattr(event, "text", "") or "").strip()
+        delta_type = str(getattr(event, "delta_type", "") or "").strip().lower()
+        status = str(getattr(event, "status", "") or latest.status or "").strip().lower() or latest.status
+        summary = latest.summary
+        output_text = latest.output_text
+        latest_thought_summary = latest.latest_thought_summary
+        if delta_type == "thought_summary" and text:
+            latest_thought_summary = text
+            summary = text
+        if event_type == "interaction.complete":
+            status = "completed"
+            if text:
+                output_text = text
+                summary = text
+            elif latest.output_text:
+                summary = latest.output_text
+            else:
+                summary = "Research job completed"
+        latest = save_research_job(
+            ResearchJobRecord(
+                interaction_id=latest.interaction_id,
+                status=status,
+                prompt=latest.prompt,
+                agent=latest.agent,
+                created_at=latest.created_at,
+                updated_at=now,
+                summary=summary,
+                output_text=output_text,
+                error=latest.error,
+                provider_status=status,
+                last_polled_at=latest.last_polled_at,
+                last_event_at=now,
+                stream_status=event_type,
+                latest_thought_summary=latest_thought_summary,
+                poll_count=max(0, int(latest.poll_count or 0)) + 1,
+                timeout_minutes=max(1, int(latest.timeout_minutes or 20)),
+            )
+        )
+    return latest
+
+
+def start_research_stream_job(
+    prompt: str,
+    *,
+    client,
+    agent_name: str,
+    timeout_minutes: int,
+    hook_bus=None,
+    startup_timeout_sec: int = 15,
+) -> ResearchJobRecord:
+    startup_queue: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+
+    def _worker() -> None:
+        interaction_id = ""
+        try:
+            stream = client.start_research_stream(prompt)
+            timestamp = _now_iso()
+            interaction_id = str(getattr(stream, "interaction_id", "") or "").strip()
+            status = str(getattr(stream, "status", "") or "running").strip() or "running"
+            record = save_research_job(
+                ResearchJobRecord(
+                    interaction_id=interaction_id,
+                    status=status,
+                    prompt=prompt,
+                    agent=agent_name,
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                    summary="Research job started",
+                    output_text="",
+                    error="",
+                    provider_status=status,
+                    stream_status="started",
+                    timeout_minutes=max(1, int(timeout_minutes or 20)),
+                )
+            )
+            with _RESEARCH_MONITOR_LOCK:
+                _RESEARCH_MONITORS[interaction_id] = threading.current_thread()
+            startup_queue.put(("ok", record))
+            consume_research_stream(interaction_id, getattr(stream, "events", None), hook_bus=hook_bus)
+        except Exception as e:
+            if interaction_id:
+                existing = load_research_job(interaction_id)
+                if existing is not None and not _is_terminal_research_status(existing.status):
+                    save_research_job(
+                        ResearchJobRecord(
+                            interaction_id=existing.interaction_id,
+                            status="error",
+                            prompt=existing.prompt,
+                            agent=existing.agent,
+                            created_at=existing.created_at,
+                            updated_at=_now_iso(),
+                            summary="Research stream failed",
+                            output_text=existing.output_text,
+                            error=f"{type(e).__name__}: {e}",
+                            provider_status=existing.provider_status or existing.status,
+                            last_polled_at=existing.last_polled_at,
+                            last_event_at=existing.last_event_at,
+                            stream_status="error",
+                            latest_thought_summary=existing.latest_thought_summary,
+                            poll_count=max(0, int(existing.poll_count or 0)),
+                            timeout_minutes=max(1, int(existing.timeout_minutes or 20)),
+                        )
+                    )
+            try:
+                startup_queue.put(("error", e))
+            except Exception:
+                pass
+        finally:
+            if interaction_id:
+                with _RESEARCH_MONITOR_LOCK:
+                    current = _RESEARCH_MONITORS.get(interaction_id)
+                    if current is threading.current_thread():
+                        _RESEARCH_MONITORS.pop(interaction_id, None)
+
+    thread = threading.Thread(
+        target=_worker,
+        name="archon-research-stream-start",
+        daemon=True,
+    )
+    thread.start()
+    kind, payload = startup_queue.get(timeout=max(1, int(startup_timeout_sec or 15)))
+    if kind == "error":
+        raise payload
+    return payload
 
 
 def purge_completed_jobs(statuses: list[str] | None = None) -> int:

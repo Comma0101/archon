@@ -17,6 +17,22 @@ class DeepResearchInteraction:
     output_text: str = ""
 
 
+@dataclass(frozen=True)
+class DeepResearchStreamEvent:
+    event_type: str
+    interaction_id: str = ""
+    status: str = ""
+    text: str = ""
+    delta_type: str = ""
+
+
+@dataclass(frozen=True)
+class DeepResearchStream:
+    interaction_id: str
+    status: str
+    events: object
+
+
 class GoogleDeepResearchClient:
     """Start and inspect Deep Research interactions.
 
@@ -67,6 +83,30 @@ class GoogleDeepResearchClient:
             tools=_validate_supported_tools(tools),
         )
         return _coerce_interaction(interaction)
+
+    def start_research_stream(
+        self,
+        prompt: str,
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> DeepResearchStream:
+        stream = self._interactions.create(
+            agent=self.agent,
+            input=str(prompt or ""),
+            background=True,
+            store=True,
+            stream=True,
+            tools=_validate_supported_tools(tools),
+        )
+        events = _coerce_stream_events(stream)
+        first = next(events, None)
+        if first is None:
+            return DeepResearchStream(interaction_id="", status="unknown", events=iter(()))
+        return DeepResearchStream(
+            interaction_id=first.interaction_id,
+            status=first.status or "unknown",
+            events=_prepend_event(first, events),
+        )
 
     def get_research(self, interaction_id: str) -> DeepResearchInteraction:
         interaction = self._interactions.get(str(interaction_id or "").strip())
@@ -145,3 +185,30 @@ def _extract_output_text_from_outputs(outputs: object) -> str:
         if normalized:
             return normalized
     return ""
+
+
+def _coerce_stream_events(stream: object):
+    for raw in stream:
+        yield _coerce_stream_event(raw)
+
+
+def _coerce_stream_event(event: object) -> DeepResearchStreamEvent:
+    event_type = str(_field(event, "event_type") or "").strip()
+    interaction = _field(event, "interaction")
+    delta = _field(event, "delta")
+    interaction_id = str(_field(interaction, "id") or _field(interaction, "name") or "").strip()
+    status = str(_field(interaction, "status") or _field(interaction, "state") or "").strip().lower()
+    text = str(_field(event, "text") or _field(delta, "text") or "").strip()
+    delta_type = str(_field(delta, "type") or "").strip().lower()
+    return DeepResearchStreamEvent(
+        event_type=event_type,
+        interaction_id=interaction_id,
+        status=status,
+        text=text,
+        delta_type=delta_type,
+    )
+
+
+def _prepend_event(first_event: DeepResearchStreamEvent, rest):
+    yield first_event
+    yield from rest
