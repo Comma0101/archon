@@ -23,7 +23,7 @@ def make_registry():
 
 
 class TestExecutionRunner:
-    def test_host_backend_routes_to_legacy_bridge(self, monkeypatch, tmp_path):
+    def test_host_backend_routes_directly_to_worker_router(self, monkeypatch, tmp_path):
         captured = {}
         task = WorkerTask(
             task="Review this repo",
@@ -34,22 +34,22 @@ class TestExecutionRunner:
             constraints="Read-only",
         )
 
-        def fake_bridge(in_task, exec_observer=None):
+        def fake_router(in_task, exec_observer=None):
             captured["task"] = in_task
             captured["exec_observer"] = exec_observer
             return WorkerResult(
                 worker="codex",
                 status="ok",
-                summary="Bridge executed",
+                summary="Router executed",
                 repo_path=in_task.repo_path,
             )
 
-        monkeypatch.setattr("archon.execution.runner.run_worker_task_legacy", fake_bridge)
+        monkeypatch.setattr("archon.execution.runner._run_host_worker_task", fake_router)
 
         result = run_task(task, execution_backend="host")
 
         assert result.status == "ok"
-        assert result.summary == "Bridge executed"
+        assert result.summary == "Router executed"
         assert captured["task"] == task
         assert captured["exec_observer"] is None
 
@@ -79,11 +79,11 @@ class TestExecutionRunner:
         )
         called = {"legacy": 0}
 
-        def fake_bridge(*args, **kwargs):
+        def fake_router(*args, **kwargs):
             called["legacy"] += 1
-            raise AssertionError("legacy bridge should not run for non-host backend")
+            raise AssertionError("worker router should not run for non-host backend")
 
-        monkeypatch.setattr("archon.execution.runner.run_worker_task_legacy", fake_bridge)
+        monkeypatch.setattr("archon.execution.runner._run_host_worker_task", fake_router)
 
         result = run_task(task, execution_backend="subprocess-restricted")
 
@@ -182,6 +182,28 @@ class TestDelegateCodeTask:
                 error=result.error,
                 vendor_session_id=result.vendor_session_id,
                 event_count=len(result.events),
+            ),
+        )
+        monkeypatch.setattr(
+            "archon.tooling.worker_tools.reserve_worker_session",
+            lambda task, requested_worker: WorkerSessionRecord(
+                session_id="sess-123",
+                created_at="2026-02-24T00:00:00Z",
+                updated_at="2026-02-24T00:00:00Z",
+                completed_at="",
+                requested_worker=requested_worker,
+                selected_worker="",
+                mode=task.mode,
+                status="running",
+                repo_path=task.repo_path,
+                task=task.task,
+                constraints=task.constraints,
+                timeout_sec=task.timeout_sec,
+                summary="Worker session reserved",
+                exit_code=None,
+                error="",
+                vendor_session_id="",
+                event_count=0,
             ),
         )
         monkeypatch.setattr("archon.tooling.worker_tools.run_worker_task", fake_run)

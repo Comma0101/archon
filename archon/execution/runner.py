@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from archon.execution.worker_bridge import run_worker_task_legacy
-
 if TYPE_CHECKING:
     from archon.workers.base import WorkerExecObserver, WorkerResult, WorkerTask
 else:
@@ -16,6 +14,16 @@ else:
 
 _SUPPORTED_BACKENDS = {"host", "subprocess-restricted", "container"}
 _NOT_IMPLEMENTED_BACKENDS = {"subprocess-restricted", "container"}
+
+
+def _run_host_worker_task(
+    task: WorkerTask,
+    *,
+    exec_observer: WorkerExecObserver | None = None,
+) -> WorkerResult:
+    from archon.workers.router import run_worker_task as _run_worker_task_router
+
+    return _run_worker_task_router(task, exec_observer=exec_observer)
 
 
 def run_task(
@@ -52,7 +60,7 @@ def run_task(
             error="Only 'host' is currently supported for worker execution.",
         )
 
-    return run_worker_task_legacy(task, exec_observer=exec_observer)
+    return _run_host_worker_task(task, exec_observer=exec_observer)
 
 
 def run_worker_task(
