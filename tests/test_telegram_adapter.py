@@ -810,6 +810,130 @@ class TestTelegramAdapterCommands:
         assert "showing config snapshot" in sent[0][1]
         assert "Status:" in sent[0][1]
 
+    def test_profile_fallback_uses_configured_default_profile(self, monkeypatch):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: (_ for _ in ()).throw(RuntimeError("llm init failed")),
+            poll_timeout_sec=1,
+        )
+        sent = []
+        cfg = Config()
+        cfg.orchestrator.enabled = True
+        cfg.orchestrator.default_profile = "safe"
+        cfg.profiles = {
+            "default": ProfileConfig(),
+            "safe": ProfileConfig(allowed_tools=["memory_read"], max_mode="review"),
+        }
+
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260307-010003")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: None,
+        )
+        monkeypatch.setattr("archon.adapters.telegram.load_config", lambda: cfg)
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+        adapter._handle_message(
+            {
+                "text": "/profile",
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        assert sent
+        assert sent[0][1].startswith("Degraded mode: live chat agent unavailable")
+        assert "Policy profile: safe" in sent[0][1]
+
+    def test_jobs_fallback_is_labeled_as_degraded_config_snapshot(self, monkeypatch):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: (_ for _ in ()).throw(RuntimeError("llm init failed")),
+            poll_timeout_sec=1,
+        )
+        sent = []
+        cfg = Config()
+
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260307-010004")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: None,
+        )
+        monkeypatch.setattr("archon.adapters.telegram.load_config", lambda: cfg)
+        monkeypatch.setattr(
+            "archon.adapters.telegram.handle_jobs_command",
+            lambda agent, text: (True, "Jobs: none"),
+        )
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+        adapter._handle_message(
+            {
+                "text": "/jobs",
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        assert sent
+        assert sent[0][1].startswith("Degraded mode: live chat agent unavailable")
+        assert sent[0][1].endswith("Jobs: none")
+
+    def test_job_cancel_unavailable_when_live_agent_fails_to_start(self, monkeypatch):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: (_ for _ in ()).throw(RuntimeError("llm init failed")),
+            poll_timeout_sec=1,
+        )
+        sent = []
+
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260307-010005")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: None,
+        )
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+        adapter._handle_message(
+            {
+                "text": "/job cancel research:abc",
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        assert sent
+        assert sent[0][1] == "Local command unavailable: live chat agent failed to start."
+
+    def test_jobs_purge_unavailable_when_live_agent_fails_to_start(self, monkeypatch):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: (_ for _ in ()).throw(RuntimeError("llm init failed")),
+            poll_timeout_sec=1,
+        )
+        sent = []
+
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260307-010006")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: None,
+        )
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+        adapter._handle_message(
+            {
+                "text": "/jobs purge",
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        assert sent
+        assert sent[0][1] == "Local command unavailable: live chat agent failed to start."
+
     def test_plain_chat_agent_creation_failure_reports_real_error(self, monkeypatch):
         adapter = TelegramAdapter(
             token="123:abc",
@@ -839,6 +963,53 @@ class TestTelegramAdapterCommands:
         assert sent
         assert sent[0][1] == "Error: RuntimeError: llm init failed"
         assert saved[-1] == ("tg-99-20260307-010002", "hello", "Error: RuntimeError: llm init failed")
+
+    def test_sync_bot_commands_replaces_remote_command_menu(self, monkeypatch):
+        adapter = _adapter()
+        calls = []
+
+        monkeypatch.setattr(
+            adapter,
+            "_api_call",
+            lambda method, payload, timeout: calls.append((method, payload, timeout)) or {"ok": True},
+        )
+
+        adapter._sync_bot_commands()
+
+        assert calls == [
+            (
+                "setMyCommands",
+                {
+                    "commands": [
+                        {"command": "start", "description": "Connect and show basics"},
+                        {"command": "help", "description": "Show command guide"},
+                        {"command": "status", "description": "Show session status"},
+                        {"command": "jobs", "description": "List background jobs"},
+                        {"command": "approvals", "description": "Show approval state"},
+                        {"command": "skills", "description": "List available skills"},
+                        {"command": "mcp", "description": "Inspect MCP servers"},
+                        {"command": "reset", "description": "Reset chat session"},
+                    ]
+                },
+                10,
+            )
+        ]
+
+    def test_run_loop_syncs_bot_commands_once_on_startup(self, monkeypatch):
+        adapter = _adapter()
+        sync_calls = []
+
+        monkeypatch.setattr(adapter, "_sync_bot_commands", lambda: sync_calls.append("sync"))
+        monkeypatch.setattr(adapter, "_sync_startup_offset", lambda: None)
+        monkeypatch.setattr(
+            adapter,
+            "_get_updates",
+            lambda: adapter._stop_event.set() or [],
+        )
+
+        adapter._run_loop()
+
+        assert sync_calls == ["sync"]
 
     def test_job_lane_route_progress_is_sent_before_final_reply(self, monkeypatch):
         adapter = TelegramAdapter(

@@ -1,5 +1,7 @@
 """Tests for configuration loading."""
 
+import pytest
+
 from archon.config import ProfileConfig, load_config
 from archon.control.skills import BUILTIN_SKILLS, DEFAULT_SKILL_NAME, resolve_skill_profile
 
@@ -78,7 +80,7 @@ def test_load_config_profiles_section(monkeypatch, tmp_path):
                 "[profiles.safe]",
                 'allowed_tools = ["memory_read"]',
                 'max_mode = "analyze"',
-                'execution_backend = "subprocess-restricted"',
+                'execution_backend = "host"',
                 'skill = "researcher"',
             ]
         )
@@ -95,10 +97,27 @@ def test_load_config_profiles_section(monkeypatch, tmp_path):
     assert cfg.profiles["default"].max_mode_explicit is True
     assert cfg.profiles["safe"].allowed_tools == ["memory_read"]
     assert cfg.profiles["safe"].max_mode == "analyze"
-    assert cfg.profiles["safe"].execution_backend == "subprocess-restricted"
+    assert cfg.profiles["safe"].execution_backend == "host"
     assert cfg.profiles["safe"].skill == "researcher"
     assert cfg.profiles["safe"].allowed_tools_explicit is True
     assert cfg.profiles["safe"].max_mode_explicit is True
+
+
+def test_load_config_profiles_section_rejects_unimplemented_execution_backend(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config" / "archon"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        "\n".join(
+            [
+                "[profiles.default]",
+                'execution_backend = "subprocess-restricted"',
+            ]
+        )
+    )
+    monkeypatch.setattr("archon.config.CONFIG_DIR", config_dir)
+
+    with pytest.raises(ValueError, match="Unsupported profile execution_backend 'subprocess-restricted'"):
+        load_config()
 
 
 def test_load_config_agent_tool_result_caps(monkeypatch, tmp_path):

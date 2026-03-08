@@ -58,6 +58,16 @@ if TYPE_CHECKING:
 
 
 MAX_TELEGRAM_MESSAGE_LEN = DEFAULT_TELEGRAM_MESSAGE_LIMIT
+_TELEGRAM_BOT_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("start", "Connect and show basics"),
+    ("help", "Show command guide"),
+    ("status", "Show session status"),
+    ("jobs", "List background jobs"),
+    ("approvals", "Show approval state"),
+    ("skills", "List available skills"),
+    ("mcp", "Inspect MCP servers"),
+    ("reset", "Reset chat session"),
+)
 
 
 def headless_confirmer(command: str, level: Level) -> bool:
@@ -105,6 +115,7 @@ class TelegramAdapter:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._startup_synced = False
+        self._commands_synced = False
         self._last_error_signature: tuple[str, str] | None = None
         self._last_error_at: float = 0.0
 
@@ -137,6 +148,7 @@ class TelegramAdapter:
 
     def _run_loop(self) -> None:
         """Main polling loop."""
+        self._sync_bot_commands()
         self._sync_startup_offset()
         while not self._stop_event.is_set():
             try:
@@ -184,6 +196,25 @@ class TelegramAdapter:
         except Exception as e:
             self._log_poll_error(e, source="startup_sync")
 
+    def _sync_bot_commands(self) -> None:
+        """Replace the remote Telegram command menu with Archon's current surface."""
+        if self._commands_synced:
+            return
+        try:
+            self._api_call(
+                "setMyCommands",
+                {
+                    "commands": [
+                        {"command": command, "description": description}
+                        for command, description in _TELEGRAM_BOT_COMMANDS
+                    ]
+                },
+                timeout=10,
+            )
+            self._commands_synced = True
+        except Exception as e:
+            self._log_poll_error(e, source="command_sync")
+
     def _log_poll_error(self, error: Exception, *, source: str) -> None:
         error_type = type(error).__name__
         message = str(error)
@@ -195,6 +226,9 @@ class TelegramAdapter:
         self._last_error_at = now
         if source == "startup_sync":
             print(f"[telegram] Startup sync skipped ({error_type}: {message})", file=sys.stderr)
+            return
+        if source == "command_sync":
+            print(f"[telegram] Command sync skipped ({error_type}: {message})", file=sys.stderr)
             return
         print(f"[telegram] Poll error: {error_type}: {message}", file=sys.stderr)
 
@@ -301,16 +335,30 @@ class TelegramAdapter:
             self._send_text_and_record(chat_id, body, self._build_news_reply(body))
             return
 
+        raw = (body or "").strip()
         job_agent = self._get_local_shell_agent(chat_id, body)
+        lowered = raw.lower()
+        if (
+            lowered.startswith("/job cancel")
+            or lowered.startswith("/jobs purge")
+        ) and (
+            job_agent is None or self._is_degraded_local_agent(job_agent)
+        ):
+            self._send_text_and_record(
+                chat_id,
+                body,
+                "Local command unavailable: live chat agent failed to start.",
+            )
+            return
 
         handled, msg = handle_jobs_command(job_agent, body)
         if handled:
-            self._send_text_and_record(chat_id, body, msg)
+            self._send_text_and_record(chat_id, body, self._format_degraded_local_response(job_agent, msg))
             return
 
         handled, msg = handle_job_command(job_agent, body)
         if handled:
-            self._send_text_and_record(chat_id, body, msg)
+            self._send_text_and_record(chat_id, body, self._format_degraded_local_response(job_agent, msg))
             return
 
         if cmd == "/approve_next":
@@ -366,13 +414,6 @@ class TelegramAdapter:
                 "Local command unavailable: live chat agent failed to start.",
             )
             return True
-        fallback_error = str(getattr(agent, "_local_shell_fallback_error", "") or "").strip()
-        degraded_prefix = ""
-        if fallback_error:
-            degraded_prefix = (
-                f"Degraded mode: live chat agent unavailable ({fallback_error}); "
-                "showing config snapshot.\n"
-            )
         for handler in (
             handle_status_command,
             handle_cost_command,
@@ -387,7 +428,7 @@ class TelegramAdapter:
         ):
             handled, msg = handler(agent, body)
             if handled:
-                response = f"{degraded_prefix}{msg}" if degraded_prefix else msg
+                response = self._format_degraded_local_response(agent, msg)
                 self._send_text_and_record(chat_id, body, response)
                 return True
         return False
@@ -410,15 +451,22 @@ class TelegramAdapter:
         sub = parts[1].lower() if len(parts) > 1 else ""
 
         # Only use fallback for read-only inspection commands.
+        if cmd == "/jobs" and sub == "purge":
+            return None
+        if cmd == "/job" and sub == "cancel":
+            return None
         if cmd == "/skills" and sub not in {"", "list", "show", "status"}:
             return None
         if cmd == "/profile" and sub not in {"", "show", "status", "list"}:
             return None
         if cmd in {"/status", "/cost", "/context", "/doctor", "/permissions", "/plugins", "/mcp"} or (
             cmd == "/skills" and sub in {"", "list", "show", "status"}
-        ) or (cmd == "/profile" and sub in {"", "show", "status", "list"}):
+        ) or (cmd == "/profile" and sub in {"", "show", "status", "list"}) or cmd == "/jobs" or cmd == "/job":
             cfg = load_config()
             llm_cfg = getattr(cfg, "llm", None)
+            default_profile = str(getattr(getattr(cfg, "orchestrator", None), "default_profile", "") or "").strip()
+            if not default_profile:
+                default_profile = "default"
             return SimpleNamespace(
                 config=cfg,
                 llm=SimpleNamespace(
@@ -426,12 +474,25 @@ class TelegramAdapter:
                     model=str(getattr(llm_cfg, "model", "") or ""),
                     api_key=str(getattr(llm_cfg, "api_key", "") or ""),
                 ),
-                policy_profile="default",
+                policy_profile=default_profile,
                 total_input_tokens=0,
                 total_output_tokens=0,
                 history=[],
             )
         return None
+
+    def _is_degraded_local_agent(self, agent) -> bool:
+        return bool(str(getattr(agent, "_local_shell_fallback_error", "") or "").strip())
+
+    def _format_degraded_local_response(self, agent, message: str) -> str:
+        fallback_error = str(getattr(agent, "_local_shell_fallback_error", "") or "").strip()
+        if not fallback_error:
+            return message
+        return (
+            f"Degraded mode: live chat agent unavailable ({fallback_error}); "
+            "showing config snapshot.\n"
+            f"{message}"
+        )
 
     def _get_or_create_chat_agent(self, chat_id: int) -> "Agent":
         agent = self._agents.get(chat_id)

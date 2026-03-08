@@ -288,9 +288,14 @@ def load_config() -> Config:
                 profile.max_mode = str(profile_value.get("max_mode", profile.max_mode)).strip().lower()
                 if "max_mode" in profile_value:
                     profile.max_mode_explicit = True
-                profile.execution_backend = str(
+                execution_backend = str(
                     profile_value.get("execution_backend", profile.execution_backend)
                 ).strip().lower()
+                if execution_backend != "host":
+                    raise ValueError(
+                        f"Unsupported profile execution_backend '{execution_backend}'"
+                    )
+                profile.execution_backend = execution_backend
                 profile.skill = str(profile_value.get("skill", profile.skill)).strip().lower()
                 parsed_profiles[profile_name.strip()] = profile
             if parsed_profiles:

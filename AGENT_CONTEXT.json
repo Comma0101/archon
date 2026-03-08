@@ -349,9 +349,11 @@
     "2026-03-07: Fixed Deep Research truthfulness in worktree deep-research-truthfulness. Explicit deep-research requests no longer silently fall back into the normal LLM/tool loop when native Google Deep Research is disabled or fails to start. `Agent._maybe_start_deep_research_job()` now returns a direct user-facing unavailability message for disabled config and a direct startup-failure message for exceptions, while preserving the existing `Research job started: research:<id>` path on success and keeping `agent.llm.chat()` at zero calls for all explicit deep-research paths. Verification: XDG_STATE_HOME=/tmp/archon-state python -m pytest tests/test_agent.py -q -k \"deep_research\" (6 passed, 73 deselected); XDG_STATE_HOME=/tmp/archon-state python -m pytest tests -q (511 passed). Live smoke with current config: `printf 'do a deep research on agentic ai how to build effective multi agent system\\nexit\\n' | XDG_STATE_HOME=/tmp/archon-state python -m archon.cli chat` returned the explicit disabled message with `0` tokens instead of web/tool fallback.",
     "research job inspection tools added",
     "deep research default enabled in config defaults",
-    "source awareness prompt grounding added from git and AGENT_CONTEXT"
+    "source awareness prompt grounding added from git and AGENT_CONTEXT",
+    "2026-03-07: Telegram degraded-mode cleanup and remote command sync completed on master. Telegram now pushes a current Archon slash menu to Telegram via setMyCommands at startup so stale OpenClaw-era bot commands are replaced with the compact Archon surface (`start`, `help`, `status`, `jobs`, `approvals`, `skills`, `mcp`, `reset`). When live Telegram chat-agent creation fails, read-only `/jobs` and `/job` responses are now clearly labeled as degraded config snapshots, fallback `/profile` reflects the configured orchestrator default profile instead of hardcoded `default`, and mutating `/job cancel ...` plus `/jobs purge` are blocked instead of running under degraded fallback. Verification: XDG_STATE_HOME=/tmp/archon-state python -m pytest tests/test_telegram_adapter.py tests/test_config.py -q (52 passed); XDG_STATE_HOME=/tmp/archon-state python -m pytest tests -q (558 passed).",
+    "2026-03-07: Tightened profile config truthfulness in `archon/config.py` so TOML-loaded profiles now reject unimplemented `execution_backend` values (`subprocess-restricted`, `container`) at load time instead of appearing selectable and failing only later at runtime."
   ],
   "test_command": "python -m pytest tests/ -v",
-  "total_tests": 539,
+  "total_tests": 558,
   "last_updated": "2026-03-07"
 }
