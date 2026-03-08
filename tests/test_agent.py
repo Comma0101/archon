@@ -1445,6 +1445,46 @@ class TestAgentLoop:
         assert called["hybrid"] == 1
         assert agent.llm.chat.call_count == 1
 
+    def test_orchestrator_hybrid_non_stream_tool_turn_emits_single_shared_executor_route(
+        self,
+        monkeypatch,
+    ):
+        responses = [
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(id="tc_route", name="shell", arguments={"command": "echo hi"})],
+                raw_content=[{"type": "tool_use", "id": "tc_route", "name": "shell", "input": {"command": "echo hi"}}],
+                input_tokens=8,
+                output_tokens=3,
+            ),
+            LLMResponse(
+                text="done",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "done"}],
+                input_tokens=10,
+                output_tokens=2,
+            ),
+        ]
+        agent = make_agent(responses)
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        agent.config.orchestrator.enabled = True
+        agent.config.orchestrator.mode = "hybrid"
+        route_events = []
+        agent.hooks.register("orchestrator.route", route_events.append)
+
+        result = agent.run("run echo hi")
+
+        assert result == "done"
+        assert len(route_events) == 1
+        assert route_events[0].payload == expected_route_payload(
+            turn_id="t001",
+            mode="hybrid",
+            path="hybrid_shared_executor_v1",
+            lane="fast",
+            reason="simple_chat",
+        )
+
     def test_orchestrator_hybrid_falls_back_to_legacy_on_error(self, monkeypatch):
         responses = [
             LLMResponse(
@@ -1539,7 +1579,7 @@ class TestAgentLoop:
         assert route_events[0].payload == expected_route_payload(
             turn_id="t001",
             mode="hybrid",
-            path="hybrid_legacy_bridge_v0",
+            path="hybrid_shared_executor_v1",
             lane=expected_lane,
             reason=expected_reason,
         )
@@ -1582,7 +1622,7 @@ class TestAgentLoop:
         assert route_events[0].payload == expected_route_payload(
             turn_id="t001",
             mode="hybrid",
-            path="hybrid_legacy_bridge_v0",
+            path="hybrid_shared_executor_v1",
             lane="fast",
             reason="simple_chat",
         )
@@ -1612,7 +1652,7 @@ class TestAgentLoop:
         assert route_events[0].payload == expected_route_payload(
             turn_id="t001",
             mode="hybrid",
-            path="hybrid_legacy_bridge_v0",
+            path="hybrid_shared_executor_v1",
             lane="fast",
             reason="simple_chat",
         )
@@ -1738,7 +1778,7 @@ class TestAgentLoop:
         payload = orchestrator_module._route_payload(
             turn_id="t001",
             mode="hybrid",
-            path="hybrid_legacy_bridge_v0",
+            path="hybrid_shared_executor_v1",
             lane="operator",
             reason="bounded_file_or_status_request",
         )
@@ -1746,7 +1786,7 @@ class TestAgentLoop:
         assert payload == expected_route_payload(
             turn_id="t001",
             mode="hybrid",
-            path="hybrid_legacy_bridge_v0",
+            path="hybrid_shared_executor_v1",
             lane="operator",
             reason="bounded_file_or_status_request",
         )

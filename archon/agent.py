@@ -135,18 +135,18 @@ class Agent:
             skill_guidance=skill_guidance,
             compactions=pending_compactions,
         )
-        return execute_turn(
-            self,
+        return orchestrate_response(
+            mode=self._orchestrator_mode(),
             turn_id=turn_id,
             user_message=user_message,
-            active_profile=active_profile,
-            log_prefix=log_prefix,
-            turn_system_prompt=turn_system_prompt,
-            llm_step=lambda iter_system_prompt: orchestrate_response(
-                mode=self._orchestrator_mode(),
+            run_legacy=lambda: execute_turn(
+                self,
                 turn_id=turn_id,
                 user_message=user_message,
-                run_legacy=lambda: _chat_with_retry(
+                active_profile=active_profile,
+                log_prefix=log_prefix,
+                turn_system_prompt=turn_system_prompt,
+                llm_step=lambda iter_system_prompt: _chat_with_retry(
                     self.llm,
                     iter_system_prompt,
                     self.history,
@@ -154,8 +154,8 @@ class Agent:
                     max_attempts=self.llm_retry_attempts,
                     request_timeout_sec=self.llm_request_timeout_sec,
                 ),
-                emit_hook=self._emit_hook,
             ),
+            emit_hook=self._emit_hook,
         )
 
     def run_stream(self, user_message: str, policy_profile: str | None = None) -> Generator[str, None, None]:
