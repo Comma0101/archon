@@ -18,6 +18,7 @@ from archon.control.orchestrator import (
     orchestrate_stream_response,
 )
 from archon.control.policy import evaluate_mcp_policy, evaluate_tool_policy
+from archon.execution.turn_executor import execute_turn
 from archon.llm import LLMClient, LLMResponse
 from archon.tools import ToolRegistry
 from archon.prompt import (
@@ -134,179 +135,28 @@ class Agent:
             skill_guidance=skill_guidance,
             compactions=pending_compactions,
         )
-
-        _recent_tool_calls: list[tuple[str, dict]] = []
-
-        for iteration in range(self.max_iterations):
-            if iteration > 0:
-                iteration_hint = f"\n\n[Iteration {iteration + 1}/{self.max_iterations}. Be targeted — don't repeat previous approaches.]"
-                iter_system_prompt = turn_system_prompt + iteration_hint
-            else:
-                iter_system_prompt = turn_system_prompt
-
-            if self.on_thinking:
-                self.on_thinking()
-            _iter_sp = iter_system_prompt  # capture for lambda closure
-            response = orchestrate_response(
+        return execute_turn(
+            self,
+            turn_id=turn_id,
+            user_message=user_message,
+            active_profile=active_profile,
+            log_prefix=log_prefix,
+            turn_system_prompt=turn_system_prompt,
+            llm_step=lambda iter_system_prompt: orchestrate_response(
                 mode=self._orchestrator_mode(),
                 turn_id=turn_id,
                 user_message=user_message,
                 run_legacy=lambda: _chat_with_retry(
                     self.llm,
-                    _iter_sp,
+                    iter_system_prompt,
                     self.history,
                     self.tools.get_schemas(),
                     max_attempts=self.llm_retry_attempts,
                     request_timeout_sec=self.llm_request_timeout_sec,
                 ),
                 emit_hook=self._emit_hook,
-            )
-            self.total_input_tokens += response.input_tokens
-            self.total_output_tokens += response.output_tokens
-
-            if not response.tool_calls:
-                # Final text response
-                text = response.text or ""
-                self.history.append(self._make_assistant_msg(response))
-                return text
-
-            # Build assistant message with tool_use blocks
-            self.history.append(self._make_assistant_msg(response))
-
-            # Execute each tool and collect results
-            tool_results = []
-            try:
-                for call in response.tool_calls:
-                    policy_decision = evaluate_tool_policy(
-                        config=self.config,
-                        tool_name=call.name,
-                        mode="implement",
-                        profile_name=active_profile,
-                    )
-                    self._emit_hook(
-                        "policy.decision",
-                        {
-                            "turn_id": turn_id,
-                            "name": call.name,
-                            "decision": policy_decision.decision,
-                            "reason": policy_decision.reason,
-                            "profile": policy_decision.profile,
-                            "mode": policy_decision.mode,
-                        },
-                    )
-                    if policy_decision.decision == "deny":
-                        denied_result = f"Error: Policy denied tool '{call.name}' ({policy_decision.reason})"
-                        self._emit_hook(
-                            "post_tool",
-                            {
-                                "turn_id": turn_id,
-                                "name": call.name,
-                                "result_is_error": True,
-                                "result_length": len(denied_result),
-                                "policy_decision": policy_decision.decision,
-                            },
-                        )
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": call.id,
-                            "tool_name": call.name,
-                            "content": denied_result,
-                        })
-                        continue
-                    if call.name == "mcp_call":
-                        server_name = str(call.arguments.get("server", "") or "").strip()
-                        mcp_policy_decision = evaluate_mcp_policy(
-                            config=self.config,
-                            server_name=server_name,
-                            profile_name=active_profile,
-                        )
-                        self._emit_hook(
-                            "policy.decision",
-                            {
-                                "turn_id": turn_id,
-                                "name": f"mcp:{server_name}" if server_name else "mcp",
-                                "decision": mcp_policy_decision.decision,
-                                "reason": mcp_policy_decision.reason,
-                                "profile": mcp_policy_decision.profile,
-                                "mode": mcp_policy_decision.mode,
-                            },
-                        )
-                        if mcp_policy_decision.decision == "deny":
-                            denied_result = (
-                                f"Error: Policy denied MCP server '{server_name or 'unknown'}' "
-                                f"({mcp_policy_decision.reason})"
-                            )
-                            self._emit_hook(
-                                "post_tool",
-                                {
-                                    "turn_id": turn_id,
-                                    "name": call.name,
-                                    "result_is_error": True,
-                                    "result_length": len(denied_result),
-                                    "policy_decision": mcp_policy_decision.decision,
-                                },
-                            )
-                            tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": call.id,
-                                "tool_name": call.name,
-                                "content": denied_result,
-                            })
-                            continue
-                    self._emit_hook(
-                        "pre_tool",
-                        {
-                            "turn_id": turn_id,
-                            "name": call.name,
-                            "arguments": call.arguments,
-                        },
-                    )
-                    _print_tool_call(call.name, call.arguments, prefix=log_prefix)
-                    if self.on_tool_call:
-                        self.on_tool_call(call.name, call.arguments)
-                    result = self.tools.execute(call.name, call.arguments)
-                    result_text = redact_secret_like_text(str(result))
-                    _print_tool_result(result_text, prefix=log_prefix)
-                    history_result = self._truncate_tool_result_for_history(call.name, result_text)
-                    self._emit_hook(
-                        "post_tool",
-                        {
-                            "turn_id": turn_id,
-                            "name": call.name,
-                            "result_is_error": result_text.startswith("Error:"),
-                            "result_length": len(result_text),
-                            "policy_decision": policy_decision.decision,
-                        },
-                    )
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": call.id,
-                        "tool_name": call.name,
-                        "content": history_result,
-                    })
-            except Exception:
-                if self.history and _is_assistant_tool_use_message(self.history[-1]):
-                    self.history.pop()
-                raise
-
-            # Track tool calls for loop detection
-            for call in response.tool_calls:
-                _recent_tool_calls.append((call.name, call.arguments))
-            if len(_recent_tool_calls) > 10:
-                _recent_tool_calls = _recent_tool_calls[-10:]
-            if _detect_tool_loop(_recent_tool_calls):
-                stuck_msg = "I notice I'm repeating the same actions. Let me stop and reassess."
-                self.history.append({"role": "assistant", "content": stuck_msg})
-                return stuck_msg
-
-            # Append tool results as user message (Anthropic format)
-            self.history.append({
-                "role": "user",
-                "content": tool_results,
-            })
-            self._enforce_iteration_budget()
-
-        return "[Iteration limit reached]"
+            ),
+        )
 
     def run_stream(self, user_message: str, policy_profile: str | None = None) -> Generator[str, None, None]:
         """Run a user message, streaming the final text response.
