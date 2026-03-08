@@ -77,6 +77,8 @@ def cancel_research_job(interaction_id: str, reason: str = "Cancelled by user") 
     if record.status not in ("in_progress", "running", "pending"):
         return record  # Already terminal
     record.status = "cancelled"
+    record.summary = "Research job cancelled"
+    record.provider_status = str(record.provider_status or "cancelled").strip() or "cancelled"
     record.error = reason
     record.updated_at = _now_iso()
     save_research_job(record)
@@ -183,6 +185,8 @@ def _now_iso() -> str:
 
 
 def _refresh_research_job(record: ResearchJobRecord, *, refresh_client=None, hook_bus=None) -> ResearchJobRecord:
+    if _is_terminal_research_status(record.status):
+        return _attach_refresh_meta(record, attempted=False, ok=False, error="")
     if refresh_client is None:
         return _attach_refresh_meta(record, attempted=False, ok=False, error="")
     try:

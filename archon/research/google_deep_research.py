@@ -72,6 +72,10 @@ class GoogleDeepResearchClient:
         interaction = self._interactions.get(str(interaction_id or "").strip())
         return _coerce_interaction(interaction)
 
+    def cancel_research(self, interaction_id: str) -> DeepResearchInteraction:
+        interaction = self._interactions.cancel(str(interaction_id or "").strip())
+        return _coerce_interaction(interaction)
+
 
 def _resolve_interactions_client(client: object) -> object:
     with warnings.catch_warnings():

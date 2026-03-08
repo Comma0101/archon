@@ -20,6 +20,7 @@ class _FakeInteractionsClient:
     def __init__(self):
         self.create_calls = []
         self.get_calls = []
+        self.cancel_calls = []
 
     def create(self, **kwargs):
         self.create_calls.append(kwargs)
@@ -37,6 +38,14 @@ class _FakeInteractionsClient:
             "response": {
                 "output_text": "done",
             },
+        }
+
+    def cancel(self, interaction_id: str):
+        self.cancel_calls.append(interaction_id)
+        return {
+            "id": interaction_id,
+            "status": "cancelled",
+            "response": None,
         }
 
 
@@ -69,6 +78,17 @@ def test_google_deep_research_client_loads_interaction_status():
     assert result.status == "completed"
     assert result.output_text == "done"
     assert fake.get_calls == ["int-123"]
+
+
+def test_google_deep_research_client_cancels_interaction():
+    fake = _FakeInteractionsClient()
+    client = GoogleDeepResearchClient(fake, agent="deep-research-pro-preview-12-2025")
+
+    result = client.cancel_research("int-123")
+
+    assert result.interaction_id == "int-123"
+    assert result.status == "cancelled"
+    assert fake.cancel_calls == ["int-123"]
 
 
 def test_google_deep_research_client_reads_output_text_from_outputs_list():

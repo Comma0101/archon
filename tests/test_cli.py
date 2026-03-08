@@ -808,9 +808,11 @@ class TestCliCommands:
         monkeypatch.setattr("archon.cli_repl_commands.load_worker_job_summary", lambda _ref: None)
         monkeypatch.setattr("archon.cli_repl_commands.load_call_job_summary", lambda _ref: None)
 
+        cfg = Config()
+        cfg.research.google_deep_research.timeout_minutes = 999999
         agent = SimpleNamespace(
             llm=SimpleNamespace(model="test"),
-            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+            config=cfg,
         )
 
         action, msg = _handle_repl_command(agent, "/job research:abc")
@@ -825,6 +827,41 @@ class TestCliCommands:
         assert "job_live_status: remote reachable | running normally" in msg
         assert "job_refresh_age:" in msg
         assert "job_next_poll_due_in:" in msg
+
+    def test_handle_repl_command_job_marks_overdue_research_as_not_running_normally(self, monkeypatch):
+        cfg = Config()
+        cfg.research.google_deep_research.timeout_minutes = 20
+        record = SimpleNamespace(
+            interaction_id="abc",
+            status="in_progress",
+            summary="Research in progress",
+            updated_at="2026-03-06T22:10:00Z",
+            created_at="2000-03-06T22:00:00Z",
+            output_text="",
+            error="",
+            provider_status="in_progress",
+            last_polled_at="2026-03-06T22:10:05Z",
+            poll_count=3,
+            _refresh_attempted=True,
+            _refresh_ok=True,
+            _refresh_error="",
+        )
+        monkeypatch.setattr(
+            "archon.cli_repl_commands.load_research_job",
+            lambda interaction_id, refresh_client=None, hook_bus=None: record,
+        )
+        monkeypatch.setattr("archon.cli_repl_commands.load_worker_job_summary", lambda _ref: None)
+        monkeypatch.setattr("archon.cli_repl_commands.load_call_job_summary", lambda _ref: None)
+
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=cfg,
+        )
+
+        action, msg = _handle_repl_command(agent, "/job research:abc")
+
+        assert action == "job"
+        assert "job_live_status: remote reachable | running longer than configured 20m timeout" in msg
 
     def test_handle_repl_command_job_builds_refresh_client_from_config_when_agent_has_no_creator(self, monkeypatch, tmp_path):
         from archon.research.models import ResearchJobRecord
@@ -904,7 +941,16 @@ class TestCliCommands:
         assert action == "job"
         assert msg == "Job unavailable: read-only file system"
 
-    def test_handle_repl_command_job_cancel_reports_local_only(self, monkeypatch):
+    def test_handle_repl_command_job_cancel_reports_remote_cancel_failure_and_local_cancel(self, monkeypatch):
+        class _CancelClient:
+            def cancel_research(self, interaction_id: str):
+                assert interaction_id == "abc"
+                raise RuntimeError("provider cancel failed")
+
+        monkeypatch.setattr(
+            "archon.cli_repl_commands._make_deep_research_refresh_client",
+            lambda agent: _CancelClient(),
+        )
         monkeypatch.setattr(
             "archon.cli_repl_commands.cancel_research_job",
             lambda interaction_id, reason="": SimpleNamespace(status="cancelled"),
@@ -917,10 +963,32 @@ class TestCliCommands:
         action, msg = _handle_repl_command(agent, "/job cancel research:abc")
 
         assert action == "job"
-        assert msg == (
-            "Marked local record cancelled for research:abc. "
-            "Remote Deep Research may still continue if the provider does not support cancellation."
+        assert "Marked local record cancelled for research:abc." in msg
+        assert "Remote cancellation failed: RuntimeError: provider cancel failed" in msg
+
+    def test_handle_repl_command_job_cancel_reports_remote_and_local_success(self, monkeypatch):
+        class _CancelClient:
+            def cancel_research(self, interaction_id: str):
+                assert interaction_id == "abc"
+                return SimpleNamespace(status="cancelled")
+
+        monkeypatch.setattr(
+            "archon.cli_repl_commands._make_deep_research_refresh_client",
+            lambda agent: _CancelClient(),
         )
+        monkeypatch.setattr(
+            "archon.cli_repl_commands.cancel_research_job",
+            lambda interaction_id, reason="": SimpleNamespace(status="cancelled"),
+        )
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+        )
+
+        action, msg = _handle_repl_command(agent, "/job cancel research:abc")
+
+        assert action == "job"
+        assert msg == "Cancelled research:abc remotely and locally."
 
     def test_handle_repl_command_jobs_refreshes_research_job_from_client(self, monkeypatch):
         stale_job = SimpleNamespace(

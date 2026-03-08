@@ -932,11 +932,31 @@ def handle_job_command(agent, text: str) -> tuple[bool, str]:
         if not cancel_ref.startswith("research:"):
             return True, "Only research jobs can be cancelled (use research:<id>)."
         interaction_id = cancel_ref.split(":", 1)[1]
+        remote_error = ""
+        remote_cancelled = False
+        refresh_client = _make_deep_research_refresh_client(agent)
+        if refresh_client is not None:
+            cancel_fn = getattr(refresh_client, "cancel_research", None)
+            if callable(cancel_fn):
+                try:
+                    remote_result = cancel_fn(interaction_id)
+                    remote_status = str(getattr(remote_result, "status", "") or "").strip().lower()
+                    remote_cancelled = remote_status in {"cancelled", "canceled", "canceling"}
+                except Exception as e:
+                    remote_error = f"{type(e).__name__}: {e}"
         result = cancel_research_job(interaction_id, reason="Cancelled by user")
         if result is None:
             return True, f"Job not found: {cancel_ref}"
         if result.status != "cancelled":
             return True, f"Job already in terminal state: {result.status}"
+        if remote_cancelled:
+            return True, f"Cancelled {cancel_ref} remotely and locally."
+        if remote_error:
+            return (
+                True,
+                f"Marked local record cancelled for {cancel_ref}. "
+                f"Remote cancellation failed: {remote_error}",
+            )
         return (
             True,
             f"Marked local record cancelled for {cancel_ref}. "
@@ -1012,10 +1032,22 @@ def _format_research_job_record(record, *, cfg=None) -> str:
     last_polled_at = str(getattr(record, "last_polled_at", "") or "").strip() or "(not yet refreshed)"
     poll_count = max(0, int(getattr(record, "poll_count", 0) or 0))
     created_at = str(getattr(record, "created_at", "") or "").strip()
+    created_at_dt = _parse_iso_datetime(created_at)
     last_polled_dt = _parse_iso_datetime(last_polled_at if last_polled_at != "(not yet refreshed)" else "")
     refresh_attempted = bool(getattr(record, "_refresh_attempted", False))
     refresh_ok = bool(getattr(record, "_refresh_ok", False))
     refresh_error = str(getattr(record, "_refresh_error", "") or "").strip()
+    timeout_minutes = max(
+        1,
+        int(
+            getattr(
+                getattr(getattr(cfg, "research", None), "google_deep_research", None),
+                "timeout_minutes",
+                20,
+            )
+            or 20
+        ),
+    )
     poll_interval = max(
         1,
         int(
@@ -1037,7 +1069,7 @@ def _format_research_job_record(record, *, cfg=None) -> str:
         f"job_last_polled_at: {last_polled_at}",
         f"job_elapsed: {_format_elapsed(created_at)}",
         f"job_poll_count: {poll_count}",
-        f"job_live_status: {_format_research_live_status(status, refresh_attempted, refresh_ok, refresh_error, last_polled_dt)}",
+        f"job_live_status: {_format_research_live_status(status, refresh_attempted, refresh_ok, refresh_error, last_polled_dt, created_at_dt, timeout_minutes)}",
         f"job_refresh_age: {_format_refresh_age(last_polled_dt)}",
         f"job_next_poll_due_in: {_format_next_poll_due(status, last_polled_dt, poll_interval)}",
     ]
@@ -1098,11 +1130,15 @@ def _format_research_live_status(
     refresh_ok: bool,
     refresh_error: str,
     last_polled_at: datetime | None,
+    created_at: datetime | None,
+    timeout_minutes: int,
 ) -> str:
     normalized = str(status or "").strip().lower()
     if refresh_attempted:
         if refresh_ok:
             if normalized in {"in_progress", "running", "queued", "starting"}:
+                if _research_runtime_exceeds_timeout(created_at, timeout_minutes):
+                    return f"remote reachable | running longer than configured {timeout_minutes}m timeout"
                 return "remote reachable | running normally"
             if normalized == "requires_action":
                 return "remote reachable | action required"
@@ -1115,6 +1151,13 @@ def _format_research_live_status(
     if last_polled_at is not None:
         return "using cached status"
     return "waiting for first successful poll"
+
+
+def _research_runtime_exceeds_timeout(created_at: datetime | None, timeout_minutes: int) -> bool:
+    if created_at is None:
+        return False
+    elapsed_seconds = max(0, int((datetime.now(timezone.utc) - created_at).total_seconds()))
+    return elapsed_seconds > max(1, int(timeout_minutes or 20)) * 60
 
 
 def _parse_iso_datetime(value: str) -> datetime | None:
