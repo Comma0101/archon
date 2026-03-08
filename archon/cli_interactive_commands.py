@@ -561,7 +561,7 @@ def telegram_cmd(
 
     click_echo_fn(f"Archon v{version} | Telegram adapter running")
     click_echo_fn(f"Allowed users: {len(config.telegram.allowed_user_ids)}")
-    click_echo_fn("Dangerous tool actions are blocked in Telegram mode (Phase 1).")
+    click_echo_fn("Dangerous tool actions are blocked in Telegram mode.")
     click_echo_fn("Press Ctrl-C to stop.\n")
 
     try:

@@ -11,6 +11,24 @@ from archon.workers.runtime import (
 )
 
 
+def _wait_for_worker_threads(session_id: str, timeout: float = 1.0) -> None:
+    prefixes = {
+        f"archon-worker-{session_id[:8]}",
+        f"archon-worker-kill-{session_id[:8]}",
+    }
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        live = {
+            thread.name
+            for thread in threading.enumerate()
+            if thread.name in prefixes
+        }
+        if not live:
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"background worker threads still alive for {session_id}")
+
+
 class TestWorkerRuntime:
     def test_background_worker_records_completion(self, monkeypatch, tmp_path):
         calls = {"run": 0, "record": 0}
@@ -90,6 +108,7 @@ class TestWorkerRuntime:
         assert ("sess-bg-1", "runtime.stdout.line") in streamed_events
         assert ("sess-bg-1", "runtime.stderr.line") in streamed_events
         assert ("sess-bg-1", "runtime.process.exited") in streamed_events
+        _wait_for_worker_threads("sess-bg-1")
 
     def test_request_background_cancel_sets_flag(self, monkeypatch, tmp_path):
         terminate_called = {"value": False}
@@ -160,6 +179,7 @@ class TestWorkerRuntime:
                 break
             time.sleep(0.01)
         assert terminate_called["value"] is True
+        _wait_for_worker_threads("sess-bg-2")
 
     def test_background_worker_preserves_terminal_failure_state(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
@@ -199,3 +219,4 @@ class TestWorkerRuntime:
         run = get_background_run("sess-bg-3")
         assert run is not None
         assert run.state == "failed"
+        _wait_for_worker_threads("sess-bg-3")

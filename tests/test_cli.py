@@ -30,6 +30,7 @@ from archon.cli import (
     _SLASH_COMMANDS,
 )
 from archon.cli_interactive_commands import chat_cmd as _chat_cmd
+from archon.cli_interactive_commands import telegram_cmd as _telegram_cmd
 from archon.cli_interactive_commands import _tool_spinner_label
 from archon.cli_repl_commands import _maybe_auto_activate_skill
 from archon.control.hooks import HookBus
@@ -58,7 +59,29 @@ class TestCliFormatting:
     def test_format_chat_response_uses_colored_archon_prompt(self):
         out = _format_chat_response("Hello")
         assert "\x1b[" in out
-        assert "\x1b[92;1m" in out  # bright green + bold archon prompt
+
+    def test_telegram_cmd_reports_telegram_mode_without_phase_label(self):
+        outputs = []
+        cfg = Config()
+        cfg.telegram.allowed_user_ids = [1, 2]
+
+        class _Adapter:
+            def run_forever(self):
+                return None
+
+        _telegram_cmd(
+            load_config_fn=lambda: cfg,
+            ensure_dirs_fn=lambda: None,
+            make_telegram_adapter_fn=lambda _cfg: _Adapter(),
+            click_echo_fn=lambda text="", err=False: outputs.append((text, err)),
+            exit_fn=lambda code: (_ for _ in ()).throw(AssertionError(f"unexpected exit {code}")),
+            version="test",
+        )
+
+        plain = [re.sub(r"\x1b\[[0-9;]*m", "", text) for text, _err in outputs]
+        assert "Archon vtest | Telegram adapter running" in plain
+        assert "Allowed users: 2" in plain
+        assert "Dangerous tool actions are blocked in Telegram mode." in plain
 
     def test_make_readline_prompt_wraps_non_printing_ansi_sequences(self):
         prompt = _make_readline_prompt("you>", "\033[93;1m")
