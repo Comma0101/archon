@@ -87,11 +87,407 @@ def assert_tool_sequence_well_formed(messages: list[dict]) -> None:
                 )
 
 
+def capture_non_stream_trace(agent: Agent, user_message: str, policy_profile: str | None = None) -> dict:
+    result = agent.run(user_message, policy_profile=policy_profile)
+    history = list(agent.history)
+    tool_results: list[str] = []
+    for msg in history:
+        content = msg.get("content")
+        if msg.get("role") != "user" or not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                tool_results.append(str(block.get("content", "") or ""))
+    return {
+        "result": result,
+        "turn_id": agent.last_turn_id,
+        "llm_calls": int(getattr(agent.llm.chat, "call_count", 0)),
+        "history": history,
+        "history_roles": [str(msg.get("role", "")) for msg in history],
+        "tool_result_count": len(tool_results),
+        "tool_results": tool_results,
+        "input_tokens": agent.total_input_tokens,
+        "output_tokens": agent.total_output_tokens,
+    }
+
+
+@dataclass
+class NonStreamParityFixture:
+    result: str
+    history: list[dict]
+    history_roles: list[str]
+    llm_calls: int
+    tool_results: list[str]
+
+    @property
+    def tool_result_text(self) -> str:
+        return self.tool_results[-1].rstrip("\n") if self.tool_results else ""
+
+
+def assert_non_stream_fixture(
+    agent: Agent,
+    user_message: str,
+    *,
+    expected_text: str,
+    expected_history_roles: list[str],
+    expected_llm_calls: int,
+    policy_profile: str | None = None,
+) -> NonStreamParityFixture:
+    trace = capture_non_stream_trace(agent, user_message, policy_profile=policy_profile)
+
+    assert trace["result"] == expected_text
+    assert trace["history_roles"] == expected_history_roles
+    assert trace["llm_calls"] == expected_llm_calls
+
+    return NonStreamParityFixture(
+        result=trace["result"],
+        history=trace["history"],
+        history_roles=trace["history_roles"],
+        llm_calls=trace["llm_calls"],
+        tool_results=trace["tool_results"],
+    )
+
+
 class TestAgentLoop:
+    def test_capture_non_stream_trace_records_plain_text_response(self, monkeypatch):
+        responses = [
+            LLMResponse(
+                text="Hello!",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "Hello!"}],
+                input_tokens=10,
+                output_tokens=5,
+            ),
+        ]
+        agent = make_agent(responses)
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+
+        trace = capture_non_stream_trace(agent, "hi")
+
+        assert trace["result"] == "Hello!"
+        assert trace["llm_calls"] == 1
+        assert trace["turn_id"] == "t001"
+        assert trace["history_roles"] == ["user", "assistant"]
+        assert trace["tool_result_count"] == 0
+
+    def test_capture_non_stream_trace_records_tool_turn_sequence(self, monkeypatch):
+        responses = [
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(id="tc_1", name="shell", arguments={"command": "echo hi"})],
+                raw_content=[{"type": "tool_use", "id": "tc_1", "name": "shell", "input": {"command": "echo hi"}}],
+                input_tokens=20,
+                output_tokens=10,
+            ),
+            LLMResponse(
+                text="Done!",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "Done!"}],
+                input_tokens=30,
+                output_tokens=5,
+            ),
+        ]
+        agent = make_agent(responses)
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+
+        trace = capture_non_stream_trace(agent, "run echo hi")
+
+        assert trace["result"] == "Done!"
+        assert trace["llm_calls"] == 2
+        assert trace["history_roles"] == ["user", "assistant", "user", "assistant"]
+        assert trace["tool_result_count"] == 1
+        assert_tool_sequence_well_formed(trace["history"])
+
+    def test_capture_non_stream_trace_records_policy_denied_tool_turn(self, monkeypatch):
+        responses = [
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(id="tc_deny", name="shell", arguments={"command": "echo denied"})],
+                raw_content=[{"type": "tool_use", "id": "tc_deny", "name": "shell", "input": {"command": "echo denied"}}],
+                input_tokens=8,
+                output_tokens=3,
+            ),
+            LLMResponse(
+                text="done",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "done"}],
+                input_tokens=10,
+                output_tokens=2,
+            ),
+        ]
+        agent = make_agent(responses)
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        agent.config.orchestrator.enabled = True
+        agent.config.orchestrator.mode = "hybrid"
+        agent.config.orchestrator.shadow_eval = False
+        agent.config.profiles["default"] = ProfileConfig(allowed_tools=["memory_read"])
+
+        trace = capture_non_stream_trace(agent, "deny shell")
+
+        assert trace["result"] == "done"
+        assert trace["llm_calls"] == 2
+        assert "Policy denied tool 'shell'" in trace["tool_results"][0]
+
+    def test_capture_non_stream_trace_records_mcp_deny_without_execution(self, monkeypatch):
+        responses = [
+            LLMResponse(
+                text=None,
+                tool_calls=[
+                    ToolCall(
+                        id="tc_mcp_deny",
+                        name="mcp_call",
+                        arguments={
+                            "server": "docs",
+                            "tool": "search_docs",
+                            "arguments": {"query": "archon"},
+                        },
+                    )
+                ],
+                raw_content=[
+                    {
+                        "type": "tool_use",
+                        "id": "tc_mcp_deny",
+                        "name": "mcp_call",
+                        "input": {
+                            "server": "docs",
+                            "tool": "search_docs",
+                            "arguments": {"query": "archon"},
+                        },
+                    }
+                ],
+                input_tokens=8,
+                output_tokens=3,
+            ),
+            LLMResponse(
+                text="done",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "done"}],
+                input_tokens=10,
+                output_tokens=2,
+            ),
+        ]
+        agent = make_agent(responses)
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        agent.tools.config = agent.config
+        agent.config.orchestrator.enabled = True
+        agent.config.orchestrator.mode = "hybrid"
+        agent.config.orchestrator.shadow_eval = False
+        agent.config.profiles["default"] = ProfileConfig(allowed_tools=["mcp_call"])
+        agent.config.mcp.servers["docs"] = MCPServerConfig(
+            enabled=True,
+            mode="read_only",
+            transport="stdio",
+            command=["python", "server.py"],
+        )
+
+        trace = capture_non_stream_trace(agent, "try mcp")
+
+        assert trace["result"] == "done"
+        assert trace["llm_calls"] == 2
+        assert "Policy denied MCP server 'docs'" in trace["tool_results"][0]
+
+    def test_capture_non_stream_trace_records_loop_detection_stop(self):
+        tool_response = LLMResponse(
+            text=None,
+            tool_calls=[ToolCall(id="tc_loop", name="shell", arguments={"command": "echo loop"})],
+            raw_content=[{"type": "tool_use", "id": "tc_loop", "name": "shell", "input": {"command": "echo loop"}}],
+            input_tokens=10,
+            output_tokens=10,
+        )
+        config = Config()
+        config.agent.max_iterations = 10
+        llm = MagicMock()
+        llm.chat = MagicMock(side_effect=[tool_response] * 10)
+        tools = ToolRegistry(archon_source_dir=None)
+        agent = Agent(llm, tools, config)
+        agent._system_prompt = "test"
+
+        trace = capture_non_stream_trace(agent, "do something")
+
+        assert "repeating the same actions" in trace["result"]
+        assert trace["llm_calls"] == 3
+        assert trace["history_roles"][-1] == "assistant"
+
     def test_tool_registry_registers_mcp_call(self):
         tools = ToolRegistry(archon_source_dir=None)
 
         assert "mcp_call" in {schema["name"] for schema in tools.get_schemas()}
+
+    def test_non_stream_parity_fixture_text_only_response(self):
+        responses = [
+            LLMResponse(
+                text="Hello!",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "Hello!"}],
+                input_tokens=10,
+                output_tokens=5,
+            ),
+        ]
+        agent = make_agent(responses)
+
+        assert_non_stream_fixture(
+            agent,
+            "hi",
+            expected_text="Hello!",
+            expected_history_roles=["user", "assistant"],
+            expected_llm_calls=1,
+        )
+
+    def test_non_stream_parity_fixture_single_tool_round_trip(self):
+        responses = [
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(id="tc_1", name="shell", arguments={"command": "echo hi"})],
+                raw_content=[{"type": "tool_use", "id": "tc_1", "name": "shell", "input": {"command": "echo hi"}}],
+                input_tokens=20,
+                output_tokens=10,
+            ),
+            LLMResponse(
+                text="Done!",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "Done!"}],
+                input_tokens=30,
+                output_tokens=5,
+            ),
+        ]
+        agent = make_agent(responses)
+
+        assert_non_stream_fixture(
+            agent,
+            "run echo hi",
+            expected_text="Done!",
+            expected_history_roles=["user", "assistant", "user", "assistant"],
+            expected_llm_calls=2,
+        )
+
+    def test_non_stream_parity_fixture_policy_denied_tool_round_trip(self, monkeypatch):
+        responses = [
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(id="tc_shell_deny", name="shell", arguments={"command": "pwd"})],
+                raw_content=[{"type": "tool_use", "id": "tc_shell_deny", "name": "shell", "input": {"command": "pwd"}}],
+                input_tokens=8,
+                output_tokens=3,
+            ),
+            LLMResponse(
+                text="done",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "done"}],
+                input_tokens=10,
+                output_tokens=2,
+            ),
+        ]
+        agent = make_agent(responses)
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        agent.tools.config = agent.config
+        agent.config.orchestrator.enabled = True
+        agent.config.orchestrator.mode = "hybrid"
+        agent.config.orchestrator.shadow_eval = False
+        agent.config.profiles["default"] = ProfileConfig(allowed_tools=["read_file"])
+
+        fixture = assert_non_stream_fixture(
+            agent,
+            "try shell deny",
+            expected_text="done",
+            expected_history_roles=["user", "assistant", "user", "assistant"],
+            expected_llm_calls=2,
+        )
+
+        assert "Policy denied tool 'shell'" in fixture.tool_result_text
+
+    def test_non_stream_parity_fixture_mcp_denied_round_trip(self, monkeypatch):
+        responses = [
+            LLMResponse(
+                text=None,
+                tool_calls=[
+                    ToolCall(
+                        id="tc_mcp_deny",
+                        name="mcp_call",
+                        arguments={
+                            "server": "docs",
+                            "tool": "search_docs",
+                            "arguments": {"query": "archon"},
+                        },
+                    )
+                ],
+                raw_content=[
+                    {
+                        "type": "tool_use",
+                        "id": "tc_mcp_deny",
+                        "name": "mcp_call",
+                        "input": {
+                            "server": "docs",
+                            "tool": "search_docs",
+                            "arguments": {"query": "archon"},
+                        },
+                    }
+                ],
+                input_tokens=8,
+                output_tokens=3,
+            ),
+            LLMResponse(
+                text="done",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "done"}],
+                input_tokens=10,
+                output_tokens=2,
+            ),
+        ]
+        agent = make_agent(responses)
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        agent.tools.config = agent.config
+        agent.config.orchestrator.enabled = True
+        agent.config.orchestrator.mode = "hybrid"
+        agent.config.orchestrator.shadow_eval = False
+        agent.config.profiles["default"] = ProfileConfig(allowed_tools=["mcp_call"])
+        agent.config.mcp.servers["docs"] = MCPServerConfig(
+            enabled=True,
+            mode="read_only",
+            transport="stdio",
+            command=["python", "server.py"],
+        )
+
+        fixture = assert_non_stream_fixture(
+            agent,
+            "try mcp",
+            expected_text="done",
+            expected_history_roles=["user", "assistant", "user", "assistant"],
+            expected_llm_calls=2,
+        )
+
+        assert "Policy denied MCP server 'docs'" in fixture.tool_result_text
+
+    def test_non_stream_parity_fixture_loop_detection_stop(self):
+        tool_response = LLMResponse(
+            text=None,
+            tool_calls=[ToolCall(id="tc_loop", name="shell", arguments={"command": "echo loop"})],
+            raw_content=[{"type": "tool_use", "id": "tc_loop", "name": "shell", "input": {"command": "echo loop"}}],
+            input_tokens=10,
+            output_tokens=10,
+        )
+        config = Config()
+        config.agent.max_iterations = 10
+        llm = MagicMock()
+        llm.chat = MagicMock(side_effect=[tool_response] * 10)
+        tools = ToolRegistry(archon_source_dir=None)
+        agent = Agent(llm, tools, config)
+        agent._system_prompt = "test"
+
+        fixture = assert_non_stream_fixture(
+            agent,
+            "do something",
+            expected_text="I notice I'm repeating the same actions. Let me stop and reassess.",
+            expected_history_roles=["user", "assistant", "user", "assistant", "user", "assistant", "assistant"],
+            expected_llm_calls=3,
+        )
+
+        assert fixture.tool_result_text == "loop"
 
     def test_compact_context_persists_history_artifact_and_clears_history(self, monkeypatch):
         agent = make_agent([])
