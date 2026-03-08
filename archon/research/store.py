@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from archon.config import STATE_DIR
+from archon.config import STATE_DIR, load_config
 from archon.control.jobs import JobSummary, summarize_research_job
+from archon.research.google_deep_research import GoogleDeepResearchClient
 from archon.research.models import ResearchJobRecord
 
 
@@ -104,18 +106,12 @@ def poll_research_job(interaction_id: str) -> ResearchJobRecord | None:
     record = load_research_job(interaction_id)
     if record is None or record.status in ("completed", "cancelled", "error"):
         return record  # Terminal states don't need polling
-    # Try polling via the API
-    try:
-        from archon.research.google_deep_research import GoogleDeepResearchClient
-        import os
-
-        api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY", "")
-        if not api_key:
-            return record
-        client = GoogleDeepResearchClient.from_api_key(api_key)
-        return _refresh_research_job(record, refresh_client=client)
-    except Exception:
-        pass  # Polling failure is non-fatal
+    client = _make_research_refresh_client()
+    if client is not None:
+        try:
+            return _refresh_research_job(record, refresh_client=client)
+        except Exception:
+            pass  # Polling failure is non-fatal
     return record
 
 
@@ -182,6 +178,40 @@ def _read_json_object(path: Path) -> dict | None:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _make_research_refresh_client(cfg=None):
+    if cfg is None:
+        try:
+            cfg = load_config()
+        except Exception:
+            cfg = None
+
+    api_key = ""
+    agent = ""
+    if cfg is not None:
+        deep_cfg = getattr(getattr(cfg, "research", None), "google_deep_research", None)
+        if deep_cfg is None or not bool(getattr(deep_cfg, "enabled", False)):
+            return None
+        agent = str(getattr(deep_cfg, "agent", "") or "").strip()
+        llm_cfg = getattr(cfg, "llm", None)
+        if str(getattr(llm_cfg, "provider", "") or "").strip().lower() == "google":
+            api_key = str(getattr(llm_cfg, "api_key", "") or "").strip()
+        if not api_key and str(getattr(llm_cfg, "fallback_provider", "") or "").strip().lower() == "google":
+            api_key = str(getattr(llm_cfg, "fallback_api_key", "") or "").strip()
+
+    if not api_key:
+        api_key = str(os.environ.get("GEMINI_API_KEY", "")).strip()
+    if not api_key:
+        api_key = str(os.environ.get("GOOGLE_API_KEY", "")).strip()
+    if not api_key:
+        return None
+
+    try:
+        kwargs = {"agent": agent} if agent else {}
+        return GoogleDeepResearchClient.from_api_key(api_key, **kwargs)
+    except Exception:
+        return None
 
 
 def _refresh_research_job(record: ResearchJobRecord, *, refresh_client=None, hook_bus=None) -> ResearchJobRecord:

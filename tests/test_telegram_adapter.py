@@ -777,7 +777,7 @@ class TestTelegramAdapterCommands:
         assert "Doctor:" in sent[0][1]
         assert "llm=" in sent[0][1]
 
-    def test_status_command_labels_fallback_as_config_snapshot(self, monkeypatch):
+    def test_status_command_labels_fallback_as_local_snapshot(self, monkeypatch):
         adapter = TelegramAdapter(
             token="123:abc",
             allowed_user_ids=[42],
@@ -807,7 +807,7 @@ class TestTelegramAdapterCommands:
 
         assert sent
         assert sent[0][1].startswith("Degraded mode: live chat agent unavailable")
-        assert "showing config snapshot" in sent[0][1]
+        assert "using local fallback snapshot" in sent[0][1]
         assert "Status:" in sent[0][1]
 
     def test_profile_fallback_uses_configured_default_profile(self, monkeypatch):
@@ -846,7 +846,7 @@ class TestTelegramAdapterCommands:
         assert sent[0][1].startswith("Degraded mode: live chat agent unavailable")
         assert "Policy profile: safe" in sent[0][1]
 
-    def test_jobs_fallback_is_labeled_as_degraded_config_snapshot(self, monkeypatch):
+    def test_jobs_fallback_is_labeled_as_local_job_store(self, monkeypatch):
         adapter = TelegramAdapter(
             token="123:abc",
             allowed_user_ids=[42],
@@ -878,7 +878,43 @@ class TestTelegramAdapterCommands:
 
         assert sent
         assert sent[0][1].startswith("Degraded mode: live chat agent unavailable")
+        assert "using local job store" in sent[0][1]
         assert sent[0][1].endswith("Jobs: none")
+
+    def test_job_fallback_is_labeled_as_local_job_store(self, monkeypatch):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: (_ for _ in ()).throw(RuntimeError("llm init failed")),
+            poll_timeout_sec=1,
+        )
+        sent = []
+        cfg = Config()
+
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260307-010004")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: None,
+        )
+        monkeypatch.setattr("archon.adapters.telegram.load_config", lambda: cfg)
+        monkeypatch.setattr(
+            "archon.adapters.telegram.handle_job_command",
+            lambda agent, text: (True, "job_id: worker:sess-1"),
+        )
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+        adapter._handle_message(
+            {
+                "text": "/job worker:sess-1",
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        assert sent
+        assert sent[0][1].startswith("Degraded mode: live chat agent unavailable")
+        assert "using local job store" in sent[0][1]
+        assert sent[0][1].endswith("job_id: worker:sess-1")
 
     def test_job_cancel_unavailable_when_live_agent_fails_to_start(self, monkeypatch):
         adapter = TelegramAdapter(

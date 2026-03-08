@@ -353,12 +353,20 @@ class TelegramAdapter:
 
         handled, msg = handle_jobs_command(job_agent, body)
         if handled:
-            self._send_text_and_record(chat_id, body, self._format_degraded_local_response(job_agent, msg))
+            self._send_text_and_record(
+                chat_id,
+                body,
+                self._format_degraded_local_response(job_agent, body, msg),
+            )
             return
 
         handled, msg = handle_job_command(job_agent, body)
         if handled:
-            self._send_text_and_record(chat_id, body, self._format_degraded_local_response(job_agent, msg))
+            self._send_text_and_record(
+                chat_id,
+                body,
+                self._format_degraded_local_response(job_agent, body, msg),
+            )
             return
 
         if cmd == "/approve_next":
@@ -428,7 +436,7 @@ class TelegramAdapter:
         ):
             handled, msg = handler(agent, body)
             if handled:
-                response = self._format_degraded_local_response(agent, msg)
+                response = self._format_degraded_local_response(agent, body, msg)
                 self._send_text_and_record(chat_id, body, response)
                 return True
         return False
@@ -484,13 +492,20 @@ class TelegramAdapter:
     def _is_degraded_local_agent(self, agent) -> bool:
         return bool(str(getattr(agent, "_local_shell_fallback_error", "") or "").strip())
 
-    def _format_degraded_local_response(self, agent, message: str) -> str:
+    def _describe_degraded_local_source(self, body: str) -> str:
+        raw = (body or "").strip()
+        cmd = raw.split(maxsplit=1)[0].lower() if raw else ""
+        if cmd in {"/job", "/jobs"}:
+            return "using local job store"
+        return "using local fallback snapshot"
+
+    def _format_degraded_local_response(self, agent, body: str, message: str) -> str:
         fallback_error = str(getattr(agent, "_local_shell_fallback_error", "") or "").strip()
         if not fallback_error:
             return message
         return (
             f"Degraded mode: live chat agent unavailable ({fallback_error}); "
-            "showing config snapshot.\n"
+            f"{self._describe_degraded_local_source(body)}.\n"
             f"{message}"
         )
 
