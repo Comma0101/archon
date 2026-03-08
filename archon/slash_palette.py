@@ -190,7 +190,14 @@ def run_live_slash_palette(
     def _render() -> list[tuple[str, str]]:
         nonlocal rendered_lines
         matches = filter_palette_items(items, query)
-        visible = matches[:MAX_VISIBLE_MATCHES]
+        
+        if not matches:
+            start_idx = 0
+            visible = []
+        else:
+            start_idx = max(0, min(selected - (MAX_VISIBLE_MATCHES // 2), len(matches) - MAX_VISIBLE_MATCHES))
+            visible = matches[start_idx : start_idx + MAX_VISIBLE_MATCHES]
+
         _clear()
 
         try:
@@ -201,8 +208,9 @@ def run_live_slash_palette(
         output_stream.write("\r\033[2K")
         output_stream.write(f"{prompt}{query}")
         if visible:
-            for idx, (value, desc) in enumerate(visible):
-                marker = ">" if idx == selected else " "
+            for i, (value, desc) in enumerate(visible):
+                actual_idx = start_idx + i
+                marker = ">" if actual_idx == selected else " "
                 
                 # Prefix visible length: space (1) + marker (1) + space (1) + value (max 26) + space (1) = 30
                 prefix_len = 30
@@ -217,14 +225,14 @@ def run_live_slash_palette(
                 elif max_desc_len <= 0:
                     display_desc = ""
 
-                line = f"\r\n {'\033[96;1m' if idx == selected else ''}{marker} {value:<26} {display_desc}{'\033[0m' if idx == selected else ''}"
+                line = f"\r\n {'\033[96;1m' if actual_idx == selected else ''}{marker} {value:<26} {display_desc}{'\033[0m' if actual_idx == selected else ''}"
                 output_stream.write(line)
             rendered_lines = 1 + len(visible)
         else:
             output_stream.write("\r\n   (no matches)")
             rendered_lines = 2
         output_stream.flush()
-        return visible
+        return matches
 
     try:
         tty.setraw(fd)
