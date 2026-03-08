@@ -135,10 +135,18 @@ class TestDeepResearchTools:
             interaction_id = "abc123"
             status = "completed"
             prompt = "agentic ai"
+            created_at = "2026-03-07T00:00:00Z"
             updated_at = "2026-03-07T00:00:00Z"
             summary = "done"
             output_text = "report body"
             error = ""
+            provider_status = "completed"
+            last_polled_at = "2026-03-07T00:01:00Z"
+            poll_count = 3
+            timeout_minutes = 20
+            _refresh_attempted = True
+            _refresh_ok = True
+            _refresh_error = ""
 
         captured = {}
 
@@ -160,8 +168,12 @@ class TestDeepResearchTools:
         assert captured["api_key"] == "cfg-google-key"
         assert captured["interaction_id"] == "abc123"
         assert captured["refresh_client"] is not None
-        assert "Job: research:abc123" in result
-        assert "Status: completed" in result
+        assert "job_id: research:abc123" in result
+        assert "job_status: completed" in result
+        assert "job_provider_status: completed" in result
+        assert "job_last_polled_at: 2026-03-07T00:01:00Z" in result
+        assert "job_poll_count: 3" in result
+        assert "job_live_status:" in result
 
     def test_list_research_jobs_tool_formats_recent_jobs(self, monkeypatch):
         reg = make_registry()
@@ -175,10 +187,18 @@ class TestDeepResearchTools:
                 self.interaction_id = interaction_id
                 self.status = status
                 self.prompt = f"prompt for {interaction_id}"
+                self.created_at = "2026-03-07T00:00:00Z"
                 self.updated_at = "2026-03-07T00:00:00Z"
                 self.summary = summary
                 self.output_text = ""
                 self.error = ""
+                self.provider_status = status
+                self.last_polled_at = "2026-03-07T00:01:00Z"
+                self.poll_count = 2
+                self.timeout_minutes = 20
+                self._refresh_attempted = True
+                self._refresh_ok = True
+                self._refresh_error = ""
 
         captured = {}
 
@@ -204,5 +224,5 @@ class TestDeepResearchTools:
         assert captured["limit"] == 2
         assert captured["refresh_client"] is not None
         assert "Research jobs: 2" in result
-        assert "research:job-1 | in_progress | Running" in result
-        assert "research:job-2 | completed | Finished" in result
+        assert "research:job-1 | in_progress | provider=in_progress | polls=2" in result
+        assert "research:job-2 | completed | provider=completed | polls=2" in result

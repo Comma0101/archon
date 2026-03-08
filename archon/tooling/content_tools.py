@@ -4,6 +4,7 @@ import os
 
 from archon.config import ensure_dirs, load_config
 from archon.news.runner import get_or_build_news_digest, send_digest_to_telegram
+from archon.research.formatting import format_research_job_compact_line, format_research_job_record
 from archon.web.read import read_web_url
 from archon.web.search import search_web
 
@@ -289,19 +290,7 @@ def register_content_tools(registry) -> None:
         if record is None:
             return f"Research job '{job_id}' not found."
 
-        lines = [
-            f"Job: research:{record.interaction_id}",
-            f"Status: {record.status}",
-            f"Prompt: {record.prompt}",
-            f"Updated: {record.updated_at}",
-        ]
-        if record.summary:
-            lines.append(f"Summary: {record.summary}")
-        if record.output_text:
-            lines.append(f"Output:\n{record.output_text[:3000]}")
-        if record.error:
-            lines.append(f"Error: {record.error}")
-        return "\n".join(lines)
+        return format_research_job_record(record, cfg=cfg)
 
     registry.register(
         "check_research_job",
@@ -334,14 +323,7 @@ def register_content_tools(registry) -> None:
             return "\n".join(lines)
 
         for record in records:
-            summary = truncate_text(str(getattr(record, "summary", "") or ""), 160)
-            if not summary:
-                summary = truncate_text(str(getattr(record, "prompt", "") or ""), 160)
-            if not summary:
-                summary = "No summary"
-            lines.append(
-                f"- research:{record.interaction_id} | {record.status} | {summary}"
-            )
+            lines.append(f"- {truncate_text(format_research_job_compact_line(record, cfg=cfg), 220)}")
         return "\n".join(lines)
 
     registry.register(
