@@ -375,6 +375,7 @@ def chat_cmd(
                     "help",
                     "status",
                     "cost",
+                    "clear",
                     "compact",
                     "context",
                     "doctor",

@@ -799,6 +799,24 @@ class TestCliCommands:
         assert action == "job"
         assert msg == "Job unavailable: read-only file system"
 
+    def test_handle_repl_command_job_cancel_reports_local_only(self, monkeypatch):
+        monkeypatch.setattr(
+            "archon.cli_repl_commands.cancel_research_job",
+            lambda interaction_id, reason="": SimpleNamespace(status="cancelled"),
+        )
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+        )
+
+        action, msg = _handle_repl_command(agent, "/job cancel research:abc")
+
+        assert action == "job"
+        assert msg == (
+            "Marked local record cancelled for research:abc. "
+            "Remote Deep Research may still continue if the provider does not support cancellation."
+        )
+
     def test_handle_repl_command_jobs_refreshes_research_job_from_client(self, monkeypatch):
         stale_job = SimpleNamespace(
             job_id="research:abc",
@@ -860,6 +878,19 @@ class TestCliCommands:
         assert action == "jobs"
         assert calls == []
         assert "worker:sess-1" in msg
+
+    def test_handle_repl_command_jobs_purge_reports_local_records(self, monkeypatch):
+        monkeypatch.setattr("archon.cli_repl_commands.purge_completed_jobs", lambda statuses=None: 2)
+        monkeypatch.setattr("archon.cli_repl_commands.purge_stale_sessions", lambda statuses=None: 1)
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+        )
+
+        action, msg = _handle_repl_command(agent, "/jobs purge")
+
+        assert action == "jobs"
+        assert msg == "Purged 3 local records (2 research, 1 worker)."
 
     def test_handle_repl_command_mcp_reports_enabled_counts_and_server_names(self):
         cfg = Config()
@@ -2103,6 +2134,26 @@ class TestCliLocalInteractiveCommands:
         assert "Compact: history_messages=1 | path=compactions/sessions/local-shell.md | summary=assistant: local shell compaction" in outputs
         assert "Context: history_messages=0 | pending_compactions=1" in outputs
         assert agent.run_calls == []
+
+    def test_local_clear_command_does_not_call_agent_run(self):
+        agent = _LocalCommandAgent()
+        agent.history = [{"role": "user", "content": "hello"}]
+        agent.total_input_tokens = 10
+        agent.total_output_tokens = 5
+
+        outputs = [
+            re.sub(r"\x1b\[[0-9;]*m", "", text)
+            for text, _err in _run_local_command_session(
+                agent,
+                ["/clear", "quit"],
+            )
+        ]
+
+        assert "Cleared 1 messages. Fresh start." in outputs
+        assert agent.run_calls == []
+        assert agent.history == []
+        assert agent.total_input_tokens == 0
+        assert agent.total_output_tokens == 0
 
 
 class TestCliPendingApprovalInteractiveChat:

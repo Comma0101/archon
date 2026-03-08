@@ -871,7 +871,7 @@ def handle_jobs_command(agent, text: str) -> tuple[bool, str]:
             details.append(f"{research_removed} research")
         if worker_removed:
             details.append(f"{worker_removed} worker")
-        return True, f"Purged {total} jobs ({', '.join(details)})."
+        return True, f"Purged {total} local records ({', '.join(details)})."
 
     parsed = _parse_jobs_args(parts)
     if parsed is None:
@@ -897,20 +897,17 @@ def handle_jobs_command(agent, text: str) -> tuple[bool, str]:
 def handle_job_command(agent, text: str) -> tuple[bool, str]:
     """Handle `/job <id>` command (show one normalized job summary)."""
     raw = (text or "").strip()
-    parts = raw.split(maxsplit=1)
+    parts = raw.split(maxsplit=2)
     if not parts or parts[0].lower() != "/job":
         return False, ""
     if len(parts) < 2 or not parts[1].strip():
         return True, "Usage: /job <id>"
 
-    sub = parts[1].strip()
-
     # /job cancel <id>
-    if sub.lower() == "cancel":
-        cancel_parts = raw.split(maxsplit=2)
-        if len(cancel_parts) < 3 or not cancel_parts[2].strip():
+    if parts[1].strip().lower() == "cancel":
+        if len(parts) < 3 or not parts[2].strip():
             return True, "Usage: /job cancel <research:id>"
-        cancel_ref = cancel_parts[2].strip()
+        cancel_ref = parts[2].strip()
         if not cancel_ref.startswith("research:"):
             return True, "Only research jobs can be cancelled (use research:<id>)."
         interaction_id = cancel_ref.split(":", 1)[1]
@@ -919,9 +916,13 @@ def handle_job_command(agent, text: str) -> tuple[bool, str]:
             return True, f"Job not found: {cancel_ref}"
         if result.status != "cancelled":
             return True, f"Job already in terminal state: {result.status}"
-        return True, f"Cancelled job {cancel_ref}."
+        return (
+            True,
+            f"Marked local record cancelled for {cancel_ref}. "
+            "Remote Deep Research may still continue if the provider does not support cancellation.",
+        )
 
-    job_ref = sub
+    job_ref = parts[1].strip()
     try:
         if job_ref.startswith("research:"):
             interaction_id = job_ref.split(":", 1)[1]
