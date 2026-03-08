@@ -184,6 +184,74 @@ def test_consume_research_stream_persists_progress_and_completion(tmp_path, monk
     assert record.poll_count == 2
 
 
+def test_consume_research_stream_marks_unfinished_stream_as_error(tmp_path, monkeypatch):
+    monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path)
+
+    save_research_job(
+        ResearchJobRecord(
+            interaction_id="stream-123",
+            status="in_progress",
+            prompt="test query",
+            agent="deep-research-pro-preview-12-2025",
+            created_at="2099-01-01T00:00:00Z",
+            updated_at="2099-01-01T00:00:00Z",
+            summary="Research job started",
+            output_text="",
+            error="",
+            stream_status="interaction.status_update",
+        )
+    )
+
+    class _Event:
+        def __init__(self, event_type: str, **fields):
+            self.event_type = event_type
+            for key, value in fields.items():
+                setattr(self, key, value)
+
+    events = iter(
+        [
+            _Event("interaction.status_update", status="in_progress"),
+        ]
+    )
+
+    consume_research_stream("stream-123", events)
+
+    record = load_research_job("stream-123")
+    assert record is not None
+    assert record.status == "error"
+    assert record.summary == "Research stream ended before completion"
+    assert "ended before completion" in record.error
+
+
+def test_load_research_job_marks_stale_stream_without_live_monitor_as_error(tmp_path, monkeypatch):
+    monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path)
+
+    save_research_job(
+        ResearchJobRecord(
+            interaction_id="stream-123",
+            status="in_progress",
+            prompt="test query",
+            agent="deep-research-pro-preview-12-2025",
+            created_at="2000-01-01T00:00:00Z",
+            updated_at="2000-01-01T00:00:10Z",
+            summary="Research job started",
+            output_text="",
+            error="",
+            provider_status="in_progress",
+            last_event_at="2000-01-01T00:00:10Z",
+            stream_status="interaction.status_update",
+            poll_count=2,
+        )
+    )
+
+    record = load_research_job("stream-123")
+
+    assert record is not None
+    assert record.status == "error"
+    assert record.summary == "Research stream inactive"
+    assert "No active stream consumer" in record.error
+
+
 def test_start_research_stream_job_starts_stream_in_worker_and_persists_updates(tmp_path, monkeypatch):
     monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path)
 
