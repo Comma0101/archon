@@ -202,6 +202,7 @@ def build_slash_subvalues(
         mcp_values.append((f"tools {server}", "List advertised tools for one server"))
     return {
         "/model": [
+            ("show", "Show current provider-model"),
             ("set", "Set provider-model"),
             *( (f"set {value}", provider) for value, provider in build_model_set_subvalues(model_catalog) ),
         ],
@@ -229,6 +230,7 @@ def build_slash_subvalues(
             *plugin_values,
         ],
         "/permissions": [
+            ("status", "Show current permission mode"),
             ("auto", "Set permission mode to auto"),
             ("accept_reads", "Set permission mode to accept_reads"),
             ("confirm_all", "Set permission mode to confirm_all"),

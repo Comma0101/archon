@@ -182,6 +182,13 @@ def run_live_slash_palette(
             return
         selected = max(0, min(selected, len(matches) - 1))
 
+    def _selection_has_children(value: str) -> bool:
+        normalized = str(value or "").strip()
+        if not normalized or " " in normalized:
+            return False
+        prefix = normalized + " "
+        return any(item.startswith(prefix) for item, _desc in items)
+
     def _clear() -> None:
         nonlocal rendered_lines
         if rendered_lines <= 0:
@@ -248,8 +255,15 @@ def run_live_slash_palette(
         while True:
             ch = os.read(fd, 1)
             if ch in (b"\r", b"\n", b"\t"):
+                chosen = matches[selected][0] if matches else query
+                if _selection_has_children(chosen) and " " not in str(query or "").strip():
+                    query = f"{chosen} "
+                    selected = 0
+                    matches = _render()
+                    _clamp_selected(matches)
+                    continue
                 _clear()
-                return matches[selected][0] if matches else query
+                return chosen
             if ch in (b"\x03",):
                 _clear()
                 raise KeyboardInterrupt

@@ -241,6 +241,16 @@ class TestCliCommands:
         assert "google" in msg
         assert "old-model" in msg
 
+    def test_handle_model_command_show_alias_shows_current(self):
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(provider="google", model="old-model"),
+            config=SimpleNamespace(llm=SimpleNamespace(provider="google", model="old-model")),
+        )
+        handled, msg = _handle_model_command(agent, "/model show")
+        assert handled is True
+        assert "google" in msg
+        assert "old-model" in msg
+
     def test_handle_model_command_set_alias_can_switch_provider_and_model(self, monkeypatch):
         monkeypatch.setattr(
             "archon.cli.LLMClient",
@@ -2387,6 +2397,7 @@ class TestCliLocalInteractiveCommands:
             ("/cost", "Cost: total_tokens=150 | input=120 | output=30"),
             ("/doctor", "Doctor: llm=ok | profile=ok | calls=on | mcp=1/2"),
             ("/permissions", "Permissions: permission_mode=confirm_all | profile=safe | mode=review | tools=2 [read_file,shell]"),
+            ("/permissions status", "Permissions: permission_mode=confirm_all | profile=safe | mode=review | tools=2 [read_file,shell]"),
             ("/approvals", "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0"),
             ("/approvals status", "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0"),
             ("/approvals on", "Approvals: dangerous_mode=on | pending=none | approve_next_tokens=0"),
@@ -2775,15 +2786,17 @@ class TestSlashCompleter:
 
     def test_permissions_subcommand_completion_from_line_buffer(self, monkeypatch):
         monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/permissions ")
-        assert _slash_completer("", 0) == "auto"
-        assert _slash_completer("", 1) == "accept_reads"
-        assert _slash_completer("", 2) == "confirm_all"
-        assert _slash_completer("", 3) is None
+        assert _slash_completer("", 0) == "status"
+        assert _slash_completer("", 1) == "auto"
+        assert _slash_completer("", 2) == "accept_reads"
+        assert _slash_completer("", 3) == "confirm_all"
+        assert _slash_completer("", 4) is None
 
     def test_model_subcommand_completion_from_line_buffer(self, monkeypatch):
         monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/model ")
-        assert _slash_completer("", 0) == "set"
-        assert _slash_completer("", 1) is None
+        assert _slash_completer("", 0) == "show"
+        assert _slash_completer("", 1) == "set"
+        assert _slash_completer("", 2) is None
 
     def test_model_set_value_completion_from_line_buffer(self, monkeypatch):
         monkeypatch.setattr("archon.cli.readline.get_line_buffer", lambda: "/model set ")
@@ -2909,13 +2922,13 @@ class TestPickSlashCommand:
         assert "/skills" in _SLASH_SUBVALUES
         assert "/plugins" in _SLASH_SUBVALUES
         model_values = [value for value, _desc in _SLASH_SUBVALUES["/model"]]
-        assert model_values[0] == "set"
+        assert model_values[:2] == ["show", "set"]
         approval_values = [value for value, _desc in _SLASH_SUBVALUES["/approvals"]]
         assert approval_values == ["status", "on", "off"]
         call_values = [value for value, _desc in _SLASH_SUBVALUES["/calls"]]
         assert call_values == ["status", "on", "off"]
         permission_values = [value for value, _desc in _SLASH_SUBVALUES["/permissions"]]
-        assert permission_values == ["auto", "accept_reads", "confirm_all"]
+        assert permission_values == ["status", "auto", "accept_reads", "confirm_all"]
         profile_values = [value for value, _desc in _SLASH_SUBVALUES["/profile"]]
         assert profile_values == ["show", "set default"]
         skill_values = [value for value, _desc in _SLASH_SUBVALUES["/skills"]]

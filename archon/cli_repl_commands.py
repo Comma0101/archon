@@ -63,7 +63,7 @@ _TERMINAL_HELP_TEXT = (
 def handle_model_command(agent, text: str) -> tuple[bool, str]:
     """Handle `/model` command (show current provider/model)."""
     raw = (text or "").strip()
-    if raw.lower() != "/model":
+    if raw.lower() not in {"/model", "/model show"}:
         return False, ""
     llm = getattr(agent, "llm", None)
     cfg_llm = getattr(getattr(agent, "config", None), "llm", None)
@@ -143,8 +143,10 @@ def handle_permissions_command(agent, text: str) -> tuple[bool, str]:
     if not parts or parts[0].lower() != "/permissions":
         return False, ""
     mode = parts[1].strip().lower() if len(parts) > 1 else ""
+    if mode == "status":
+        mode = ""
     if len(parts) > 2 or mode not in {"", "auto", "accept_reads", "confirm_all"}:
-        return True, "Usage: /permissions [auto|accept_reads|confirm_all]"
+        return True, "Usage: /permissions [status|auto|accept_reads|confirm_all]"
 
     cfg = getattr(agent, "config", None)
     safety_cfg = getattr(cfg, "safety", None)
