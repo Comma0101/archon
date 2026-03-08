@@ -68,6 +68,30 @@ class TestExecutionRunner:
         assert result.status == "unsupported"
         assert "Unsupported execution backend" in result.summary
 
+    def test_non_host_backend_reports_not_implemented(self, monkeypatch, tmp_path):
+        task = WorkerTask(
+            task="Review this repo",
+            worker="auto",
+            mode="review",
+            repo_path=str(tmp_path),
+            timeout_sec=120,
+            constraints="Read-only",
+        )
+        called = {"legacy": 0}
+
+        def fake_bridge(*args, **kwargs):
+            called["legacy"] += 1
+            raise AssertionError("legacy bridge should not run for non-host backend")
+
+        monkeypatch.setattr("archon.execution.runner.run_worker_task_legacy", fake_bridge)
+
+        result = run_task(task, execution_backend="subprocess-restricted")
+
+        assert result.status == "unsupported"
+        assert "not implemented yet" in result.summary
+        assert "Only 'host' is currently supported" in result.error
+        assert called["legacy"] == 0
+
     def test_worker_tools_imports_execution_runner_alias(self):
         from archon.tooling import worker_tools
 

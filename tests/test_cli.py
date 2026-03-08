@@ -728,6 +728,62 @@ class TestCliCommands:
         assert "job_status: completed" in msg
         assert "job_summary: Final report body" in msg
 
+    def test_handle_repl_command_job_builds_refresh_client_from_config_when_agent_has_no_creator(self, monkeypatch, tmp_path):
+        from archon.research.models import ResearchJobRecord
+        from archon.research.store import save_research_job
+
+        monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path / "research" / "jobs")
+        monkeypatch.setattr("archon.cli_repl_commands.load_worker_job_summary", lambda _ref: None)
+        monkeypatch.setattr("archon.cli_repl_commands.load_call_job_summary", lambda _ref: None)
+        save_research_job(
+            ResearchJobRecord(
+                interaction_id="abc",
+                status="running",
+                prompt="Research LA restaurant market",
+                agent="deep-research-pro-preview-12-2025",
+                created_at="2026-03-06T22:00:00Z",
+                updated_at="2026-03-06T22:05:00Z",
+                summary="Research job started",
+                output_text="",
+                error="",
+            )
+        )
+
+        cfg = Config()
+        cfg.llm.provider = "google"
+        cfg.llm.api_key = "cfg-google-key"
+        cfg.research.google_deep_research.enabled = True
+        client = object()
+        load_calls = []
+
+        monkeypatch.setattr(
+            "archon.research.google_deep_research.GoogleDeepResearchClient.from_api_key",
+            lambda api_key, agent=None: client if api_key == "cfg-google-key" else None,
+        )
+
+        def fake_load(interaction_id: str, refresh_client=None):
+            load_calls.append((interaction_id, refresh_client))
+            return SimpleNamespace(
+                job_id="research:abc",
+                kind="deep_research",
+                status="completed",
+                summary="Final report body",
+                last_update_at="2026-03-06T22:10:00Z",
+            )
+
+        monkeypatch.setattr("archon.cli_repl_commands.load_research_job_summary", fake_load)
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=cfg,
+        )
+
+        action, msg = _handle_repl_command(agent, "/job research:abc")
+
+        assert action == "job"
+        assert load_calls == [("abc", client)]
+        assert "job_status: completed" in msg
+        assert "job_summary: Final report body" in msg
+
     def test_handle_repl_command_job_degrades_gracefully_on_lookup_error(self, monkeypatch):
         agent = SimpleNamespace(
             llm=SimpleNamespace(model="test"),

@@ -15,6 +15,7 @@ else:
 
 
 _SUPPORTED_BACKENDS = {"host", "subprocess-restricted", "container"}
+_NOT_IMPLEMENTED_BACKENDS = {"subprocess-restricted", "container"}
 
 
 def run_task(
@@ -38,6 +39,17 @@ def run_task(
             summary=f"Unsupported execution backend '{execution_backend}'",
             repo_path=task.repo_path,
             error=f"Supported execution backends: {', '.join(sorted(_SUPPORTED_BACKENDS))}",
+        )
+
+    if backend in _NOT_IMPLEMENTED_BACKENDS:
+        from archon.workers.base import WorkerResult as _WorkerResult
+
+        return _WorkerResult(
+            worker=(task.worker or "").strip().lower() or "auto",
+            status="unsupported",
+            summary=f"Execution backend '{backend}' is not implemented yet",
+            repo_path=task.repo_path,
+            error="Only 'host' is currently supported for worker execution.",
         )
 
     return run_worker_task_legacy(task, exec_observer=exec_observer)

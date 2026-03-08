@@ -16,7 +16,7 @@ from archon.control.skills import (
     list_builtin_skills,
 )
 from archon.mcp import MCPClient
-from archon.research.store import cancel_research_job, list_research_job_summaries, load_research_job_summary, poll_research_job, purge_completed_jobs
+from archon.research.store import cancel_research_job, list_research_job_summaries, load_research_job_summary, purge_completed_jobs
 from archon.workers.session_store import list_worker_job_summaries, load_worker_job_summary, purge_stale_sessions
 
 _NATIVE_PLUGIN_SPECS = (
@@ -766,10 +766,39 @@ def _job_is_active(job) -> bool:
 
 def _make_deep_research_refresh_client(agent):
     creator = getattr(agent, "_create_google_deep_research_client", None)
-    if not callable(creator):
+    if callable(creator):
+        try:
+            return creator()
+        except Exception:
+            return None
+
+    cfg = getattr(agent, "config", None)
+    if cfg is None:
         return None
+    deep_cfg = getattr(getattr(cfg, "research", None), "google_deep_research", None)
+    if deep_cfg is None or not bool(getattr(deep_cfg, "enabled", False)):
+        return None
+
+    llm_cfg = getattr(cfg, "llm", None)
+    api_key = ""
+    if str(getattr(llm_cfg, "provider", "") or "").strip().lower() == "google":
+        api_key = str(getattr(llm_cfg, "api_key", "") or "").strip()
+    if not api_key and str(getattr(llm_cfg, "fallback_provider", "") or "").strip().lower() == "google":
+        api_key = str(getattr(llm_cfg, "fallback_api_key", "") or "").strip()
+    if not api_key:
+        api_key = str(os.environ.get("GEMINI_API_KEY", "")).strip()
+    if not api_key:
+        api_key = str(os.environ.get("GOOGLE_API_KEY", "")).strip()
+    if not api_key:
+        return None
+
     try:
-        return creator()
+        from archon.research.google_deep_research import GoogleDeepResearchClient
+
+        return GoogleDeepResearchClient.from_api_key(
+            api_key,
+            agent=str(getattr(deep_cfg, "agent", "") or "").strip(),
+        )
     except Exception:
         return None
 
@@ -897,16 +926,7 @@ def handle_job_command(agent, text: str) -> tuple[bool, str]:
         if job_ref.startswith("research:"):
             interaction_id = job_ref.split(":", 1)[1]
             refresh_client = _make_deep_research_refresh_client(agent)
-            if refresh_client is not None:
-                job = load_research_job_summary(interaction_id, refresh_client=refresh_client)
-            else:
-                # Fall back to direct API polling when agent client unavailable
-                record = poll_research_job(interaction_id)
-                if record is not None:
-                    from archon.control.jobs import summarize_research_job
-                    job = summarize_research_job(record)
-                else:
-                    job = None
+            job = load_research_job_summary(interaction_id, refresh_client=refresh_client)
         else:
             job = _load_job_summary(job_ref)
     except OSError as e:
