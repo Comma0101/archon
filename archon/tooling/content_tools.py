@@ -233,6 +233,7 @@ def register_content_tools(registry) -> None:
                 output_text=str(getattr(interaction, "output_text", "") or ""),
                 error="",
                 provider_status=str(getattr(interaction, "status", "") or "running").strip() or "running",
+                timeout_minutes=max(1, int(getattr(deep_cfg, "timeout_minutes", 20) or 20)),
             )
         )
         try:

@@ -1040,7 +1040,8 @@ def _format_research_job_record(record, *, cfg=None) -> str:
     timeout_minutes = max(
         1,
         int(
-            getattr(
+            getattr(record, "timeout_minutes", 0)
+            or getattr(
                 getattr(getattr(cfg, "research", None), "google_deep_research", None),
                 "timeout_minutes",
                 20,

@@ -187,8 +187,8 @@ def test_load_research_job_summary_refreshes_and_persists_latest_interaction_sta
             status="running",
             prompt="Research LA restaurant market",
             agent="deep-research-pro-preview-12-2025",
-            created_at="2026-03-06T22:00:00Z",
-            updated_at="2026-03-06T22:05:00Z",
+            created_at="2099-03-08T07:50:00Z",
+            updated_at="2099-03-08T07:55:00Z",
             summary="Research job started",
             output_text="",
             error="",
@@ -233,8 +233,8 @@ def test_load_research_job_refresh_tracks_poll_metadata_and_provider_status(tmp_
             status="running",
             prompt="Research LA restaurant market",
             agent="deep-research-pro-preview-12-2025",
-            created_at="2026-03-06T22:00:00Z",
-            updated_at="2026-03-06T22:05:00Z",
+            created_at="2099-03-08T07:50:00Z",
+            updated_at="2099-03-08T07:55:00Z",
             summary="Research job started",
             output_text="",
             error="",
@@ -268,8 +268,8 @@ def test_load_research_job_emits_progress_event_on_nonterminal_refresh(tmp_path,
             status="running",
             prompt="Research LA restaurant market",
             agent="deep-research-pro-preview-12-2025",
-            created_at="2026-03-06T22:00:00Z",
-            updated_at="2026-03-06T22:05:00Z",
+            created_at="2099-03-08T07:50:00Z",
+            updated_at="2099-03-08T07:55:00Z",
             summary="Research job started",
             output_text="",
             error="",
@@ -297,3 +297,53 @@ def test_load_research_job_emits_progress_event_on_nonterminal_refresh(tmp_path,
     rendered = payload["event"].render_text()
     assert "research:abc" in rendered
     assert "in progress" in rendered.lower()
+
+
+def test_load_research_job_times_out_overdue_nonterminal_job_and_attempts_remote_cancel(tmp_path, monkeypatch):
+    jobs_dir = tmp_path / "research" / "jobs"
+    monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", jobs_dir)
+
+    save_research_job(
+        ResearchJobRecord(
+            interaction_id="abc",
+            status="running",
+            prompt="Research LA restaurant market",
+            agent="deep-research-pro-preview-12-2025",
+            created_at="2000-03-06T22:00:00Z",
+            updated_at="2000-03-06T22:05:00Z",
+            summary="Research job started",
+            output_text="",
+            error="",
+            timeout_minutes=20,
+        )
+    )
+
+    class _RefreshClient:
+        def __init__(self):
+            self.cancel_calls = []
+
+        def get_research(self, interaction_id: str):
+            return SimpleNamespace(
+                interaction_id=interaction_id,
+                status="in_progress",
+                output_text="",
+            )
+
+        def cancel_research(self, interaction_id: str):
+            self.cancel_calls.append(interaction_id)
+            return SimpleNamespace(
+                interaction_id=interaction_id,
+                status="cancelled",
+                output_text="",
+            )
+
+    refresh_client = _RefreshClient()
+
+    record = load_research_job("abc", refresh_client=refresh_client)
+
+    assert record is not None
+    assert record.status == "error"
+    assert record.summary == "Research job exceeded configured timeout (20m)"
+    assert record.provider_status == "in_progress"
+    assert "Timed out after 20m" in record.error
+    assert refresh_client.cancel_calls == ["abc"]

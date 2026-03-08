@@ -202,6 +202,45 @@ def _refresh_research_job(record: ResearchJobRecord, *, refresh_client=None, hoo
     polled_at = _now_iso()
     status = str(getattr(interaction, "status", "") or record.status or "unknown").strip()
     output_text = str(getattr(interaction, "output_text", "") or record.output_text or "").strip()
+    timeout_minutes = max(1, int(getattr(record, "timeout_minutes", 20) or 20))
+    timed_out = _research_runtime_exceeds_timeout(record.created_at, timeout_minutes)
+    if timed_out and not _is_terminal_research_status(status):
+        remote_cancel_error = ""
+        cancel_fn = getattr(refresh_client, "cancel_research", None)
+        if callable(cancel_fn):
+            try:
+                cancel_fn(record.interaction_id)
+            except Exception as e:
+                remote_cancel_error = f"{type(e).__name__}: {e}"
+        summary = f"Research job exceeded configured timeout ({timeout_minutes}m)"
+        saved = save_research_job(
+            ResearchJobRecord(
+                interaction_id=record.interaction_id,
+                status="error",
+                prompt=record.prompt,
+                agent=record.agent,
+                created_at=record.created_at,
+                updated_at=polled_at,
+                summary=summary,
+                output_text=output_text,
+                error=(
+                    f"Timed out after {timeout_minutes}m"
+                    + (f"; remote cancel failed: {remote_cancel_error}" if remote_cancel_error else "")
+                ),
+                provider_status=status,
+                last_polled_at=polled_at,
+                poll_count=max(0, int(record.poll_count or 0)) + 1,
+                timeout_minutes=timeout_minutes,
+            )
+        )
+        _emit_job_completed_event(
+            job_kind="research",
+            job_id=f"research:{record.interaction_id}",
+            status="error",
+            summary=summary,
+            hook_bus=hook_bus,
+        )
+        return _attach_refresh_meta(saved, attempted=True, ok=True, error="")
     summary = _summarize_research_state(status=status, output_text=output_text, fallback=record.summary)
     provider_status = status
     state_changed = (
@@ -223,6 +262,7 @@ def _refresh_research_job(record: ResearchJobRecord, *, refresh_client=None, hoo
         provider_status=provider_status,
         last_polled_at=polled_at,
         poll_count=max(0, int(record.poll_count or 0)) + 1,
+        timeout_minutes=timeout_minutes,
     )
     saved = save_research_job(updated)
     if state_changed:
@@ -278,6 +318,18 @@ def _summarize_research_state(*, status: str, output_text: str, fallback: str) -
 def _is_terminal_research_status(status: str) -> bool:
     normalized = str(status or "").strip().lower()
     return normalized in {"completed", "done", "failed", "error", "cancelled"}
+
+
+def _research_runtime_exceeds_timeout(created_at: str, timeout_minutes: int) -> bool:
+    text = str(created_at or "").strip()
+    if not text:
+        return False
+    try:
+        started = datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return False
+    elapsed_seconds = max(0, int((datetime.now(timezone.utc) - started).total_seconds()))
+    return elapsed_seconds > max(1, int(timeout_minutes or 20)) * 60
 
 
 def _monitor_research_job_loop(

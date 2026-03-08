@@ -19,6 +19,7 @@ class ResearchJobRecord:
     provider_status: str = ""
     last_polled_at: str = ""
     poll_count: int = 0
+    timeout_minutes: int = 20
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -34,6 +35,7 @@ class ResearchJobRecord:
             "provider_status": self.provider_status,
             "last_polled_at": self.last_polled_at,
             "poll_count": int(self.poll_count or 0),
+            "timeout_minutes": int(self.timeout_minutes or 20),
         }
 
     @classmethod
@@ -51,4 +53,5 @@ class ResearchJobRecord:
             provider_status=str(data.get("provider_status", "") or ""),
             last_polled_at=str(data.get("last_polled_at", "") or ""),
             poll_count=int(data.get("poll_count", 0) or 0),
+            timeout_minutes=int(data.get("timeout_minutes", 20) or 20),
         )
