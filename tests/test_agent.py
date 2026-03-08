@@ -10,11 +10,17 @@ import pytest
 import archon.agent as agent_module
 import archon.control.orchestrator as orchestrator_module
 import archon.prompt as prompt_module
-from archon.agent import Agent, _chat_with_retry, _print_tool_call, _print_tool_result
+from archon.agent import (
+    Agent,
+    _chat_stream_collect_with_retry,
+    _chat_with_retry,
+    _print_tool_call,
+    _print_tool_result,
+)
 from archon.llm import LLMResponse, ToolCall
 from archon.tools import ToolRegistry
 from archon.config import Config, MCPServerConfig, ProfileConfig
-from archon.execution.turn_executor import execute_turn
+from archon.execution.turn_executor import execute_turn, execute_turn_stream
 from archon.prompt import build_runtime_capability_summary
 
 
@@ -234,6 +240,68 @@ def capture_stream_trace(agent: Agent, user_message: str, policy_profile: str | 
     }
 
 
+def capture_stream_executor_trace(
+    agent: Agent,
+    user_message: str,
+    policy_profile: str | None = None,
+) -> dict:
+    turn_id = agent._next_turn_id()
+    agent.last_turn_id = turn_id
+    active_profile = agent._resolve_policy_profile(policy_profile)
+    log_prefix = agent_module._make_log_prefix(agent.log_label, turn_id)
+    agent._trim_history_if_needed()
+    agent._repair_history_tool_sequence()
+    agent.history.append({"role": "user", "content": user_message})
+    agent_module._maybe_capture_preference_memory(user_message)
+    skill_guidance = agent_module.build_skill_guidance(agent.config, profile_name=active_profile)
+    pending_compactions = agent._consume_pending_compactions()
+    turn_system_prompt = agent_module._build_turn_system_prompt(
+        agent.system_prompt,
+        user_message,
+        agent.config,
+        profile_name=active_profile,
+        skill_guidance=skill_guidance,
+        compactions=pending_compactions,
+    )
+    chunks = list(
+        execute_turn_stream(
+            agent,
+            turn_id=turn_id,
+            user_message=user_message,
+            active_profile=active_profile,
+            log_prefix=log_prefix,
+            turn_system_prompt=turn_system_prompt,
+            llm_stream_step=lambda iter_system_prompt: _chat_stream_collect_with_retry(
+                agent.llm,
+                iter_system_prompt,
+                agent.history,
+                agent.tools.get_schemas(),
+                max_attempts=agent.llm_retry_attempts,
+                request_timeout_sec=agent.llm_request_timeout_sec,
+            ),
+        )
+    )
+    history = list(agent.history)
+    tool_results: list[str] = []
+    for msg in history:
+        content = msg.get("content")
+        if msg.get("role") != "user" or not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                tool_results.append(str(block.get("content", "") or ""))
+    return {
+        "chunks": chunks,
+        "turn_id": agent.last_turn_id,
+        "history": history,
+        "history_roles": [str(msg.get("role", "")) for msg in history],
+        "tool_results": tool_results,
+        "chat_stream_calls": int(getattr(agent.llm.chat_stream, "call_count", 0)),
+        "input_tokens": agent.total_input_tokens,
+        "output_tokens": agent.total_output_tokens,
+    }
+
+
 @dataclass
 class StreamParityFixture:
     chunks: list[str]
@@ -272,6 +340,53 @@ def assert_stream_fixture(
 
 
 class TestAgentLoop:
+    def test_turn_executor_stream_matches_text_only_run_stream_path(self, monkeypatch):
+        final_resp = LLMResponse(
+            text="Hello world",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "Hello world"}],
+            input_tokens=6,
+            output_tokens=3,
+        )
+        agent = make_agent([], stream_chunks=[["Hello", " ", "world", final_resp]])
+        expected_agent = make_agent([], stream_chunks=[["Hello", " ", "world", final_resp]])
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+
+        expected = capture_stream_trace(expected_agent, "hi")
+        actual = capture_stream_executor_trace(agent, "hi")
+
+        assert actual["chunks"] == expected["chunks"]
+        assert actual["history_roles"] == expected["history_roles"]
+        assert actual["tool_results"] == expected["tool_results"]
+
+    def test_turn_executor_stream_matches_tool_round_trip_run_stream_path(self, monkeypatch):
+        tool_resp = LLMResponse(
+            text=None,
+            tool_calls=[ToolCall(id="tc_stream_tool", name="shell", arguments={"command": "echo hi"})],
+            raw_content=[{"type": "tool_use", "id": "tc_stream_tool", "name": "shell", "input": {"command": "echo hi"}}],
+            input_tokens=6,
+            output_tokens=3,
+        )
+        final_resp = LLMResponse(
+            text="done",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "done"}],
+            input_tokens=4,
+            output_tokens=2,
+        )
+        agent = make_agent([], stream_chunks=[[tool_resp], ["done", final_resp]])
+        expected_agent = make_agent([], stream_chunks=[[tool_resp], ["done", final_resp]])
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+
+        expected = capture_stream_trace(expected_agent, "run echo hi")
+        actual = capture_stream_executor_trace(agent, "run echo hi")
+
+        assert actual["chunks"] == expected["chunks"]
+        assert actual["history_roles"] == expected["history_roles"]
+        assert actual["tool_results"] == expected["tool_results"]
+
     def test_turn_executor_non_stream_matches_text_only_run_path(self, monkeypatch):
         responses = [
             LLMResponse(

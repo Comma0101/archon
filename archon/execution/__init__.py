@@ -2,12 +2,13 @@
 
 from .contracts import ExecutionBackendInfo, ExecutionRuntimeResult
 from .runner import run_task, run_worker_task
-from .turn_executor import execute_turn
+from .turn_executor import execute_turn, execute_turn_stream
 
 __all__ = [
     "ExecutionBackendInfo",
     "ExecutionRuntimeResult",
     "execute_turn",
+    "execute_turn_stream",
     "run_task",
     "run_worker_task",
 ]
