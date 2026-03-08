@@ -1792,7 +1792,7 @@ class TestAgentLoop:
         assert route_events[0].payload == expected_route_payload(
             turn_id="t001",
             mode="hybrid",
-            path="hybrid_shared_executor_v1",
+            path="hybrid_shared_executor",
             lane="fast",
             reason="simple_chat",
         )
@@ -1891,7 +1891,7 @@ class TestAgentLoop:
         assert route_events[0].payload == expected_route_payload(
             turn_id="t001",
             mode="hybrid",
-            path="hybrid_shared_executor_v1",
+            path="hybrid_shared_executor",
             lane=expected_lane,
             reason=expected_reason,
         )
@@ -1934,7 +1934,7 @@ class TestAgentLoop:
         assert route_events[0].payload == expected_route_payload(
             turn_id="t001",
             mode="hybrid",
-            path="hybrid_shared_executor_v1",
+            path="hybrid_shared_executor",
             lane="fast",
             reason="simple_chat",
         )
@@ -1964,7 +1964,7 @@ class TestAgentLoop:
         assert route_events[0].payload == expected_route_payload(
             turn_id="t001",
             mode="hybrid",
-            path="hybrid_shared_executor_v1",
+            path="hybrid_shared_executor",
             lane="fast",
             reason="simple_chat",
         )
@@ -1993,7 +1993,7 @@ class TestAgentLoop:
         assert route_events[0].payload == expected_route_payload(
             turn_id="t001",
             mode="hybrid",
-            path="hybrid_stream_shared_executor_v1",
+            path="hybrid_stream_shared_executor",
             lane="fast",
             reason="simple_chat",
         )
@@ -2031,7 +2031,7 @@ class TestAgentLoop:
         assert route_events[0].payload == expected_route_payload(
             turn_id="t001",
             mode="hybrid",
-            path="hybrid_stream_shared_executor_v1",
+            path="hybrid_stream_shared_executor",
             lane="fast",
             reason="simple_chat",
         )
@@ -2128,7 +2128,7 @@ class TestAgentLoop:
         payload = orchestrator_module._route_payload(
             turn_id="t001",
             mode="hybrid",
-            path="hybrid_shared_executor_v1",
+            path="hybrid_shared_executor",
             lane="operator",
             reason="bounded_file_or_status_request",
         )
@@ -2136,7 +2136,7 @@ class TestAgentLoop:
         assert payload == expected_route_payload(
             turn_id="t001",
             mode="hybrid",
-            path="hybrid_shared_executor_v1",
+            path="hybrid_shared_executor",
             lane="operator",
             reason="bounded_file_or_status_request",
         )

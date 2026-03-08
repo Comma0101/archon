@@ -101,7 +101,7 @@ def orchestrate_response(
             _route_payload(
                 turn_id=turn_id,
                 mode="hybrid",
-                path="hybrid_shared_executor_v1",
+                path="hybrid_shared_executor",
                 lane=lane,
                 reason=reason,
             ),
@@ -158,7 +158,7 @@ def orchestrate_stream_response(
             _route_payload(
                 turn_id=turn_id,
                 mode="hybrid",
-                path="hybrid_stream_shared_executor_v1",
+                path="hybrid_stream_shared_executor",
                 lane=lane,
                 reason=reason,
             ),

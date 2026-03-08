@@ -1010,7 +1010,7 @@ def _describe_orchestrator_mode(cfg) -> str:
     if not enabled:
         return "legacy"
     if mode == "hybrid":
-        return "hybrid(route-only)"
+        return "hybrid(shared-executor)"
     return mode
 
 
