@@ -136,8 +136,8 @@ def _background_run_main(session_id: str, task: WorkerTask, requested_worker: st
     if run and run.cancel_requested:
         _update_run(session_id, state="cancelled")
     else:
-        terminal_state = "completed" if result.status in {"ok", "failed", "timeout", "cancelled", "unsupported", "unavailable", "error"} else "completed"
-        _update_run(session_id, state=terminal_state)
+        terminal_state = _result_status_to_runtime_state(result.status)
+        _update_run(session_id, state=terminal_state, error=str(result.error or ""))
 
 
 def _update_run(
@@ -181,6 +181,15 @@ def _set_process(session_id: str, proc: subprocess.Popen):
 def _clear_process(session_id: str):
     with _LOCK:
         _PROCESSES.pop(session_id, None)
+
+
+def _result_status_to_runtime_state(status: str) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized == "cancelled":
+        return "cancelled"
+    if normalized == "ok":
+        return "completed"
+    return "failed"
 
 
 def _now_iso() -> str:

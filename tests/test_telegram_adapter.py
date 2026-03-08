@@ -773,8 +773,72 @@ class TestTelegramAdapterCommands:
         )
 
         assert sent
-        assert sent[0][1].startswith("Doctor:")
+        assert sent[0][1].startswith("Degraded mode: live chat agent unavailable")
+        assert "Doctor:" in sent[0][1]
         assert "llm=" in sent[0][1]
+
+    def test_status_command_labels_fallback_as_config_snapshot(self, monkeypatch):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: (_ for _ in ()).throw(RuntimeError("llm init failed")),
+            poll_timeout_sec=1,
+        )
+        sent = []
+        cfg = Config()
+        cfg.llm.provider = "openai"
+        cfg.llm.model = "gpt-5-mini"
+
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260307-010001")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: None,
+        )
+        monkeypatch.setattr("archon.adapters.telegram.load_config", lambda: cfg)
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+        adapter._handle_message(
+            {
+                "text": "/status",
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        assert sent
+        assert sent[0][1].startswith("Degraded mode: live chat agent unavailable")
+        assert "showing config snapshot" in sent[0][1]
+        assert "Status:" in sent[0][1]
+
+    def test_plain_chat_agent_creation_failure_reports_real_error(self, monkeypatch):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: (_ for _ in ()).throw(RuntimeError("llm init failed")),
+            poll_timeout_sec=1,
+        )
+        sent = []
+        saved = []
+
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260307-010002")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: saved.append((session_id, user_msg, assistant_msg)),
+        )
+        monkeypatch.setattr(adapter, "_send_typing", lambda chat_id: None)
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+        adapter._handle_message(
+            {
+                "text": "hello",
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        assert sent
+        assert sent[0][1] == "Error: RuntimeError: llm init failed"
+        assert saved[-1] == ("tg-99-20260307-010002", "hello", "Error: RuntimeError: llm init failed")
 
     def test_job_lane_route_progress_is_sent_before_final_reply(self, monkeypatch):
         adapter = TelegramAdapter(

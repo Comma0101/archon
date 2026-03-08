@@ -72,9 +72,6 @@ def register_call_service_tools(registry) -> None:
             )
 
         mode = str(svc_cfg.mode or "").strip().lower() or "systemd"
-        if not registry.confirmer(f"Voice service {action} ({mode})", Level.DANGEROUS):
-            return "Voice service action rejected by safety gate."
-
         if mode == "systemd":
             unit = str(svc_cfg.systemd_unit or "archon-voice.service").strip()
             if not unit:
@@ -86,6 +83,8 @@ def register_call_service_tools(registry) -> None:
                         "reason: calls.voice_service.systemd_unit missing",
                     ]
                 )
+            if not registry.confirmer(f"Voice service {action} ({mode})", Level.DANGEROUS):
+                return "Voice service action rejected by safety gate."
             try:
                 result = _run_systemd_unit(action, unit)
             except Exception as e:
@@ -138,7 +137,7 @@ def register_call_service_tools(registry) -> None:
 
     registry.register(
         "voice_service_start",
-        "Start the local Archon voice service (systemd/subprocess mode depending on config).",
+        "Start the local Archon voice service via the configured user systemd unit.",
         {
             "properties": {},
             "required": [],
@@ -151,11 +150,10 @@ def register_call_service_tools(registry) -> None:
 
     registry.register(
         "voice_service_stop",
-        "Stop the local Archon voice service (systemd/subprocess mode depending on config).",
+        "Stop the local Archon voice service via the configured user systemd unit.",
         {
             "properties": {},
             "required": [],
         },
         voice_service_stop,
     )
-

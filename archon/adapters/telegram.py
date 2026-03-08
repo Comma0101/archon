@@ -340,10 +340,39 @@ class TelegramAdapter:
         self._handle_chat_body(chat_id, user_id, body, history_user_text=body)
 
     def _handle_local_shell_command(self, chat_id: int, body: str) -> bool:
+        raw = (body or "").strip()
+        if not raw.startswith("/"):
+            return False
+        cmd = raw.split(maxsplit=1)[0].lower()
+        if cmd not in {
+            "/status",
+            "/cost",
+            "/compact",
+            "/context",
+            "/doctor",
+            "/permissions",
+            "/skills",
+            "/plugins",
+            "/mcp",
+            "/profile",
+        }:
+            return False
+
         agent = self._get_local_shell_agent(chat_id, body)
         if agent is None:
-            self._send_text_and_record(chat_id, body, "Local command unavailable")
+            self._send_text_and_record(
+                chat_id,
+                body,
+                "Local command unavailable: live chat agent failed to start.",
+            )
             return True
+        fallback_error = str(getattr(agent, "_local_shell_fallback_error", "") or "").strip()
+        degraded_prefix = ""
+        if fallback_error:
+            degraded_prefix = (
+                f"Degraded mode: live chat agent unavailable ({fallback_error}); "
+                "showing config snapshot.\n"
+            )
         for handler in (
             handle_status_command,
             handle_cost_command,
@@ -358,15 +387,19 @@ class TelegramAdapter:
         ):
             handled, msg = handler(agent, body)
             if handled:
-                self._send_text_and_record(chat_id, body, msg)
+                response = f"{degraded_prefix}{msg}" if degraded_prefix else msg
+                self._send_text_and_record(chat_id, body, response)
                 return True
         return False
 
     def _get_local_shell_agent(self, chat_id: int, body: str):
         try:
             return self._get_or_create_chat_agent(chat_id)
-        except Exception:
-            return self._build_local_shell_fallback_agent(body)
+        except Exception as e:
+            fallback_agent = self._build_local_shell_fallback_agent(body)
+            if fallback_agent is not None:
+                setattr(fallback_agent, "_local_shell_fallback_error", f"{type(e).__name__}: {e}")
+            return fallback_agent
 
     def _build_local_shell_fallback_agent(self, body: str):
         raw = (body or "").strip()
@@ -463,13 +496,14 @@ class TelegramAdapter:
         *,
         history_user_text: str,
     ) -> None:
-        agent = self._get_or_create_chat_agent(chat_id)
-
-        # Wire typing indicator: fire on every LLM call and tool call
-        agent.on_thinking = lambda: self._send_typing(chat_id)
-        agent.on_tool_call = lambda name, args: self._send_typing(chat_id)
-
+        agent = None
         try:
+            agent = self._get_or_create_chat_agent(chat_id)
+
+            # Wire typing indicator: fire on every LLM call and tool call
+            agent.on_thinking = lambda: self._send_typing(chat_id)
+            agent.on_tool_call = lambda name, args: self._send_typing(chat_id)
+
             self._send_typing(chat_id)
             auto_skill_changed, auto_skill_msg = _maybe_auto_activate_skill(agent, body)
             if auto_skill_changed and auto_skill_msg:
@@ -486,7 +520,7 @@ class TelegramAdapter:
             response = agent.run(body)
         except Exception as e:
             response = f"Error: {type(e).__name__}: {e}"
-            turn_id = getattr(agent, "last_turn_id", "")
+            turn_id = getattr(agent, "last_turn_id", "") if agent is not None else ""
             turn_info = f" turn={turn_id}" if turn_id else ""
             print(f"[telegram] Agent error for chat {chat_id}{turn_info}: {response}", file=sys.stderr)
         finally:

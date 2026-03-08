@@ -160,3 +160,42 @@ class TestWorkerRuntime:
                 break
             time.sleep(0.01)
         assert terminate_called["value"] is True
+
+    def test_background_worker_preserves_terminal_failure_state(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            "archon.workers.runtime.reserve_worker_session",
+            lambda task, requested_worker: type("R", (), {"session_id": "sess-bg-3"})(),
+        )
+        monkeypatch.setattr(
+            "archon.workers.runtime.append_worker_events",
+            lambda session_id, events: None,
+        )
+        monkeypatch.setattr(
+            "archon.workers.runtime.run_worker_task",
+            lambda task, exec_observer=None: WorkerResult(
+                worker="codex",
+                status="failed",
+                summary="worker failed",
+                repo_path=task.repo_path,
+                error="boom",
+            ),
+        )
+        monkeypatch.setattr(
+            "archon.workers.runtime.record_worker_run",
+            lambda task, result, requested_worker: type("Rec", (), {"session_id": "sess-bg-3"})(),
+        )
+
+        start_background_worker(
+            WorkerTask(task="Review", worker="codex", mode="review", repo_path=str(tmp_path)),
+            requested_worker="codex",
+        )
+
+        for _ in range(50):
+            run = get_background_run("sess-bg-3")
+            if run and run.state == "failed":
+                break
+            time.sleep(0.01)
+
+        run = get_background_run("sess-bg-3")
+        assert run is not None
+        assert run.state == "failed"

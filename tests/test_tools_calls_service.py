@@ -20,6 +20,17 @@ def _calls_config(*, enabled: bool = True, mode: str = "systemd", unit: str = "a
 
 
 class TestCallServiceTools:
+    def test_voice_service_schemas_describe_systemd_control_only(self):
+        registry = make_registry()
+        schemas = {schema["name"]: schema for schema in registry.get_schemas()}
+
+        assert schemas["voice_service_start"]["description"] == (
+            "Start the local Archon voice service via the configured user systemd unit."
+        )
+        assert schemas["voice_service_stop"]["description"] == (
+            "Stop the local Archon voice service via the configured user systemd unit."
+        )
+
     def test_voice_service_status_reports_health(self, monkeypatch):
         monkeypatch.setattr(
             "archon.tooling.call_service_tools.voice_runner.voice_service_health",
@@ -90,3 +101,22 @@ class TestCallServiceTools:
         assert calls[0][1] == Level.DANGEROUS
         assert commands[0] == ["systemctl", "--user", "stop", "archon-voice.service"]
 
+    def test_voice_service_subprocess_mode_reports_unsupported_without_confirmation(self, monkeypatch):
+        calls = []
+
+        def fake_confirmer(command, level):
+            calls.append((command, level))
+            return True
+
+        monkeypatch.setattr(
+            "archon.tooling.call_service_tools.load_config",
+            lambda: _calls_config(enabled=True, mode="subprocess", unit="archon-voice.service"),
+        )
+
+        registry = make_registry(confirmer=fake_confirmer)
+        out = registry.execute("voice_service_start", {})
+
+        assert "mode: subprocess" in out
+        assert "status: unsupported" in out
+        assert "reason: subprocess lifecycle mode is not implemented yet" in out
+        assert calls == []
