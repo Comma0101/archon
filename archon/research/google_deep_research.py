@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+import warnings
 
 
 DEFAULT_DEEP_RESEARCH_AGENT = "deep-research-pro-preview-12-2025"
@@ -73,7 +74,13 @@ class GoogleDeepResearchClient:
 
 
 def _resolve_interactions_client(client: object) -> object:
-    interactions = getattr(client, "interactions", None)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Interactions usage is experimental and may change in future versions.",
+            category=UserWarning,
+        )
+        interactions = getattr(client, "interactions", None)
     return interactions if interactions is not None else client
 
 

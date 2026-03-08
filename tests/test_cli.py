@@ -797,6 +797,9 @@ class TestCliCommands:
             provider_status="in_progress",
             last_polled_at="2026-03-06T22:10:05Z",
             poll_count=3,
+            _refresh_attempted=True,
+            _refresh_ok=True,
+            _refresh_error="",
         )
         monkeypatch.setattr(
             "archon.cli_repl_commands.load_research_job",
@@ -819,6 +822,9 @@ class TestCliCommands:
         assert "job_last_polled_at: 2026-03-06T22:10:05Z" in msg
         assert "job_poll_count: 3" in msg
         assert "job_elapsed:" in msg
+        assert "job_live_status: remote reachable | running normally" in msg
+        assert "job_refresh_age:" in msg
+        assert "job_next_poll_due_in:" in msg
 
     def test_handle_repl_command_job_builds_refresh_client_from_config_when_agent_has_no_creator(self, monkeypatch, tmp_path):
         from archon.research.models import ResearchJobRecord

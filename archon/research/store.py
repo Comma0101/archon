@@ -46,6 +46,8 @@ def load_research_job(
     if data is None:
         return None
     record = ResearchJobRecord.from_dict(data)
+    if refresh_client is None:
+        return _attach_refresh_meta(record, attempted=False, ok=False, error="")
     return _refresh_research_job(record, refresh_client=refresh_client, hook_bus=hook_bus)
 
 
@@ -182,11 +184,16 @@ def _now_iso() -> str:
 
 def _refresh_research_job(record: ResearchJobRecord, *, refresh_client=None, hook_bus=None) -> ResearchJobRecord:
     if refresh_client is None:
-        return record
+        return _attach_refresh_meta(record, attempted=False, ok=False, error="")
     try:
         interaction = refresh_client.get_research(record.interaction_id)
-    except Exception:
-        return record
+    except Exception as e:
+        return _attach_refresh_meta(
+            record,
+            attempted=True,
+            ok=False,
+            error=f"{type(e).__name__}: {e}",
+        )
 
     polled_at = _now_iso()
     status = str(getattr(interaction, "status", "") or record.status or "unknown").strip()
@@ -231,7 +238,14 @@ def _refresh_research_job(record: ResearchJobRecord, *, refresh_client=None, hoo
                 summary=summary,
                 hook_bus=hook_bus,
             )
-    return saved
+    return _attach_refresh_meta(saved, attempted=True, ok=True, error="")
+
+
+def _attach_refresh_meta(record: ResearchJobRecord, *, attempted: bool, ok: bool, error: str) -> ResearchJobRecord:
+    setattr(record, "_refresh_attempted", bool(attempted))
+    setattr(record, "_refresh_ok", bool(ok))
+    setattr(record, "_refresh_error", str(error or "").strip())
+    return record
 
 
 def _summarize_research_state(*, status: str, output_text: str, fallback: str) -> str:

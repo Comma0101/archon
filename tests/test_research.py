@@ -1,5 +1,6 @@
 """Tests for native research clients and stores."""
 
+import warnings
 from types import SimpleNamespace
 
 import pytest
@@ -92,6 +93,30 @@ def test_google_deep_research_client_reads_output_text_from_outputs_list():
     result = client.get_research("int-123")
 
     assert result.output_text == "final report body"
+
+
+def test_google_deep_research_client_suppresses_interactions_experimental_warning():
+    class _WarningInteractionsClient:
+        @property
+        def interactions(self):
+            warnings.warn(
+                "Interactions usage is experimental and may change in future versions.",
+                UserWarning,
+            )
+            return self
+
+        def create(self, **kwargs):
+            return {"id": "int-123", "status": "running"}
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        client = GoogleDeepResearchClient(
+            _WarningInteractionsClient(),
+            agent="deep-research-pro-preview-12-2025",
+        )
+        client.start_research("Research LA restaurant market")
+
+    assert caught == []
 
 
 def test_google_deep_research_client_rejects_custom_tools():
