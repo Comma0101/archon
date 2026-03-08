@@ -1065,7 +1065,7 @@ class TestCliCommands:
         assert "Status:" in msg
         assert "model=google/gemini-x" in msg
         assert "profile=safe" in msg
-        assert "orchestrator=hybrid" in msg
+        assert "orchestrator=hybrid(route-only)" in msg
         assert "calls=on" in msg
         assert "mcp=1/1" in msg
         assert "tokens=150" in msg

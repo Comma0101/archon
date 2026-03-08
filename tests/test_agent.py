@@ -1062,7 +1062,7 @@ class TestAgentLoop:
         assert route_events[0].payload == expected_route_payload(
             turn_id="t001",
             mode="hybrid",
-            path="hybrid_planner_v0",
+            path="hybrid_legacy_bridge_v0",
             lane=expected_lane,
             reason=expected_reason,
         )
@@ -1105,7 +1105,7 @@ class TestAgentLoop:
         assert route_events[0].payload == expected_route_payload(
             turn_id="t001",
             mode="hybrid",
-            path="hybrid_planner_v0",
+            path="hybrid_legacy_bridge_v0",
             lane="fast",
             reason="simple_chat",
         )
@@ -1135,7 +1135,7 @@ class TestAgentLoop:
         assert route_events[0].payload == expected_route_payload(
             turn_id="t001",
             mode="hybrid",
-            path="hybrid_planner_v0",
+            path="hybrid_legacy_bridge_v0",
             lane="fast",
             reason="simple_chat",
         )
@@ -1164,7 +1164,7 @@ class TestAgentLoop:
         assert route_events[0].payload == expected_route_payload(
             turn_id="t001",
             mode="hybrid",
-            path="hybrid_stream_planner_v0",
+            path="hybrid_stream_legacy_bridge_v0",
             lane="fast",
             reason="simple_chat",
         )
@@ -1261,7 +1261,7 @@ class TestAgentLoop:
         payload = orchestrator_module._route_payload(
             turn_id="t001",
             mode="hybrid",
-            path="hybrid_planner_v0",
+            path="hybrid_legacy_bridge_v0",
             lane="operator",
             reason="bounded_file_or_status_request",
         )
@@ -1269,7 +1269,7 @@ class TestAgentLoop:
         assert payload == expected_route_payload(
             turn_id="t001",
             mode="hybrid",
-            path="hybrid_planner_v0",
+            path="hybrid_legacy_bridge_v0",
             lane="operator",
             reason="bounded_file_or_status_request",
         )

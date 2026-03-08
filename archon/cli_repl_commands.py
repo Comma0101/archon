@@ -945,6 +945,8 @@ def _describe_orchestrator_mode(cfg) -> str:
     mode = str(getattr(orchestrator, "mode", "legacy") or "legacy").strip().lower() or "legacy"
     if not enabled:
         return "legacy"
+    if mode == "hybrid":
+        return "hybrid(route-only)"
     return mode
 
 
