@@ -15,6 +15,19 @@ def make_registry(confirmer=None):
 
 
 class TestCallMissionTools:
+    def test_call_mission_schema_descriptions_match_current_runner(self):
+        registry = make_registry()
+        schemas = {schema["name"]: schema for schema in registry.get_schemas()}
+        start_schema = schemas["call_mission_start"]
+
+        assert start_schema["description"] == (
+            "Start a voice call mission via the local Archon voice service. "
+            "Archon prefers realtime mode when configured and falls back to scripted mode when needed."
+        )
+        assert start_schema["input_schema"]["properties"]["goal"]["description"] == (
+            "Call goal/instructions for the voice mission"
+        )
+
     def test_call_mission_start_requires_approval(self, monkeypatch):
         calls = []
 

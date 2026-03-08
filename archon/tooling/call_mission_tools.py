@@ -1,4 +1,4 @@
-"""Call mission tool registrations for Archon (Phase 1 scripted path)."""
+"""Call mission tool registrations for Archon voice mission control."""
 
 from __future__ import annotations
 
@@ -95,7 +95,8 @@ def register_call_mission_tools(registry) -> None:
 
     registry.register(
         "call_mission_start",
-        "Start a voice call mission via the local Archon voice service (Phase 1 scripted Twilio path).",
+        "Start a voice call mission via the local Archon voice service. "
+        "Archon prefers realtime mode when configured and falls back to scripted mode when needed.",
         {
             "properties": {
                 "target_number": {
@@ -104,7 +105,7 @@ def register_call_mission_tools(registry) -> None:
                 },
                 "goal": {
                     "type": "string",
-                    "description": "Call goal/script text for the Phase 1 scripted voice flow",
+                    "description": "Call goal/instructions for the voice mission",
                 },
                 "call_session_id": {
                     "type": "string",
