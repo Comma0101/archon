@@ -35,7 +35,12 @@ def register_content_tools(registry) -> None:
         from archon.research.google_deep_research import GoogleDeepResearchClient
 
         agent_name = str(getattr(deep_cfg, "agent", "") or "").strip()
-        return GoogleDeepResearchClient.from_api_key(api_key, agent=agent_name)
+        thinking_summaries = str(getattr(deep_cfg, "thinking_summaries", "auto") or "auto").strip().lower()
+        return GoogleDeepResearchClient.from_api_key(
+            api_key,
+            agent=agent_name,
+            thinking_summaries=thinking_summaries,
+        )
 
     # 12. news_brief
     def news_brief(force_refresh: bool = False, send_to_telegram: bool = False) -> str:

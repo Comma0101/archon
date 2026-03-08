@@ -19,6 +19,7 @@ class ResearchJobRecord:
     provider_status: str = ""
     last_polled_at: str = ""
     last_event_at: str = ""
+    last_event_id: str = ""
     stream_status: str = ""
     latest_thought_summary: str = ""
     poll_count: int = 0
@@ -38,6 +39,7 @@ class ResearchJobRecord:
             "provider_status": self.provider_status,
             "last_polled_at": self.last_polled_at,
             "last_event_at": self.last_event_at,
+            "last_event_id": self.last_event_id,
             "stream_status": self.stream_status,
             "latest_thought_summary": self.latest_thought_summary,
             "poll_count": int(self.poll_count or 0),
@@ -59,6 +61,7 @@ class ResearchJobRecord:
             provider_status=str(data.get("provider_status", "") or ""),
             last_polled_at=str(data.get("last_polled_at", "") or ""),
             last_event_at=str(data.get("last_event_at", "") or ""),
+            last_event_id=str(data.get("last_event_id", "") or ""),
             stream_status=str(data.get("stream_status", "") or ""),
             latest_thought_summary=str(data.get("latest_thought_summary", "") or ""),
             poll_count=int(data.get("poll_count", 0) or 0),

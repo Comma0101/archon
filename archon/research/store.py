@@ -117,7 +117,13 @@ def poll_research_job(interaction_id: str) -> ResearchJobRecord | None:
     return record
 
 
-def consume_research_stream(interaction_id: str, events, *, hook_bus=None) -> ResearchJobRecord | None:
+def consume_research_stream(
+    interaction_id: str,
+    events,
+    *,
+    hook_bus=None,
+    mark_unfinished_as_error: bool = True,
+) -> ResearchJobRecord | None:
     record = load_research_job(interaction_id)
     if record is None:
         return None
@@ -125,6 +131,7 @@ def consume_research_stream(interaction_id: str, events, *, hook_bus=None) -> Re
     for event in events:
         now = _now_iso()
         event_type = str(getattr(event, "event_type", "") or "").strip().lower()
+        event_id = str(getattr(event, "event_id", "") or "").strip()
         text = str(getattr(event, "text", "") or "").strip()
         delta_type = str(getattr(event, "delta_type", "") or "").strip().lower()
         status = str(getattr(event, "status", "") or latest.status or "").strip().lower() or latest.status
@@ -157,13 +164,14 @@ def consume_research_stream(interaction_id: str, events, *, hook_bus=None) -> Re
                 provider_status=status,
                 last_polled_at=latest.last_polled_at,
                 last_event_at=now,
+                last_event_id=event_id or latest.last_event_id,
                 stream_status=event_type,
                 latest_thought_summary=latest_thought_summary,
                 poll_count=max(0, int(latest.poll_count or 0)) + 1,
                 timeout_minutes=max(1, int(latest.timeout_minutes or 20)),
             )
         )
-    if not _is_terminal_research_status(latest.status):
+    if mark_unfinished_as_error and not _is_terminal_research_status(latest.status):
         latest = save_research_job(
             ResearchJobRecord(
                 interaction_id=latest.interaction_id,
@@ -178,6 +186,7 @@ def consume_research_stream(interaction_id: str, events, *, hook_bus=None) -> Re
                 provider_status=latest.provider_status or latest.status,
                 last_polled_at=latest.last_polled_at,
                 last_event_at=latest.last_event_at,
+                last_event_id=latest.last_event_id,
                 stream_status="stream.ended",
                 latest_thought_summary=latest.latest_thought_summary,
                 poll_count=max(0, int(latest.poll_count or 0)),
@@ -204,6 +213,7 @@ def start_research_stream_job(
     startup_timeout_sec: int = 15,
 ) -> ResearchJobRecord:
     startup_queue: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+    max_resume_attempts = 3
 
     def _worker() -> None:
         interaction_id = ""
@@ -224,6 +234,7 @@ def start_research_stream_job(
                     output_text="",
                     error="",
                     provider_status=status,
+                    last_event_id=str(getattr(stream, "last_event_id", "") or "").strip(),
                     stream_status="started",
                     timeout_minutes=max(1, int(timeout_minutes or 20)),
                 )
@@ -231,7 +242,54 @@ def start_research_stream_job(
             with _RESEARCH_MONITOR_LOCK:
                 _RESEARCH_MONITORS[interaction_id] = threading.current_thread()
             startup_queue.put(("ok", record))
-            consume_research_stream(interaction_id, getattr(stream, "events", None), hook_bus=hook_bus)
+            resume_attempts = 0
+            latest = record
+            while True:
+                latest = consume_research_stream(
+                    interaction_id,
+                    getattr(stream, "events", None),
+                    hook_bus=hook_bus,
+                    mark_unfinished_as_error=False,
+                ) or latest
+                if _is_terminal_research_status(latest.status):
+                    break
+                last_event_id = str(getattr(latest, "last_event_id", "") or "").strip()
+                if not last_event_id or not hasattr(client, "resume_research_stream"):
+                    consume_research_stream(
+                        interaction_id,
+                        iter(()),
+                        hook_bus=hook_bus,
+                        mark_unfinished_as_error=True,
+                    )
+                    break
+                if resume_attempts >= max_resume_attempts:
+                    save_research_job(
+                        ResearchJobRecord(
+                            interaction_id=latest.interaction_id,
+                            status="error",
+                            prompt=latest.prompt,
+                            agent=latest.agent,
+                            created_at=latest.created_at,
+                            updated_at=_now_iso(),
+                            summary="Research stream resume limit exceeded",
+                            output_text=latest.output_text,
+                            error=f"Stream ended without terminal event after {max_resume_attempts} resume attempts",
+                            provider_status=latest.provider_status or latest.status,
+                            last_polled_at=latest.last_polled_at,
+                            last_event_at=latest.last_event_at,
+                            last_event_id=latest.last_event_id,
+                            stream_status="stream.resume_exhausted",
+                            latest_thought_summary=latest.latest_thought_summary,
+                            poll_count=max(0, int(latest.poll_count or 0)),
+                            timeout_minutes=max(1, int(latest.timeout_minutes or 20)),
+                        )
+                    )
+                    break
+                resume_attempts += 1
+                stream = client.resume_research_stream(
+                    interaction_id,
+                    last_event_id=last_event_id,
+                )
         except Exception as e:
             if interaction_id:
                 existing = load_research_job(interaction_id)
@@ -250,6 +308,7 @@ def start_research_stream_job(
                             provider_status=existing.provider_status or existing.status,
                             last_polled_at=existing.last_polled_at,
                             last_event_at=existing.last_event_at,
+                            last_event_id=existing.last_event_id,
                             stream_status="error",
                             latest_thought_summary=existing.latest_thought_summary,
                             poll_count=max(0, int(existing.poll_count or 0)),
@@ -353,11 +412,13 @@ def _make_research_refresh_client(cfg=None):
 
     api_key = ""
     agent = ""
+    thinking_summaries = "auto"
     if cfg is not None:
         deep_cfg = getattr(getattr(cfg, "research", None), "google_deep_research", None)
         if deep_cfg is None or not bool(getattr(deep_cfg, "enabled", False)):
             return None
         agent = str(getattr(deep_cfg, "agent", "") or "").strip()
+        thinking_summaries = str(getattr(deep_cfg, "thinking_summaries", "auto") or "auto").strip().lower()
         llm_cfg = getattr(cfg, "llm", None)
         if str(getattr(llm_cfg, "provider", "") or "").strip().lower() == "google":
             api_key = str(getattr(llm_cfg, "api_key", "") or "").strip()
@@ -372,7 +433,7 @@ def _make_research_refresh_client(cfg=None):
         return None
 
     try:
-        kwargs = {"agent": agent} if agent else {}
+        kwargs = {"agent": agent, "thinking_summaries": thinking_summaries} if agent else {"thinking_summaries": thinking_summaries}
         return GoogleDeepResearchClient.from_api_key(api_key, **kwargs)
     except Exception:
         return None
@@ -506,6 +567,7 @@ def _reconcile_local_research_job(record: ResearchJobRecord, *, hook_bus=None) -
             provider_status=record.provider_status or record.status,
             last_polled_at=record.last_polled_at,
             last_event_at=record.last_event_at,
+            last_event_id=record.last_event_id,
             stream_status=record.stream_status or "stream.inactive",
             latest_thought_summary=record.latest_thought_summary,
             poll_count=max(0, int(record.poll_count or 0)),

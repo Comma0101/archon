@@ -313,6 +313,9 @@ class Agent:
         return GoogleDeepResearchClient.from_api_key(
             api_key,
             agent=str(getattr(deep_cfg, "agent", "") or "").strip(),
+            thinking_summaries=str(
+                getattr(deep_cfg, "thinking_summaries", "auto") or "auto"
+            ).strip().lower(),
         )
 
     def _next_turn_id(self) -> str:

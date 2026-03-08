@@ -116,9 +116,10 @@ def test_poll_research_job_uses_config_backed_google_client(tmp_path, monkeypatc
                 {"status": "completed", "output_text": "Final report", "interaction_id": interaction_id},
             )()
 
-    def _fake_from_api_key(api_key: str, *, agent: str = ""):
+    def _fake_from_api_key(api_key: str, *, agent: str = "", thinking_summaries: str = "auto"):
         captured["api_key"] = api_key
         captured["agent"] = agent
+        captured["thinking_summaries"] = thinking_summaries
         return _RefreshClient()
 
     monkeypatch.setattr(
@@ -134,6 +135,7 @@ def test_poll_research_job_uses_config_backed_google_client(tmp_path, monkeypatc
     assert captured == {
         "api_key": "cfg-google-key",
         "agent": "deep-research-pro-preview-12-2025",
+        "thinking_summaries": "auto",
     }
 
 
@@ -301,6 +303,77 @@ def test_start_research_stream_job_starts_stream_in_worker_and_persists_updates(
             break
         time.sleep(0.01)
 
+    assert reloaded is not None
+    assert reloaded.status == "completed"
+    assert reloaded.output_text == "Final answer"
+
+
+def test_start_research_stream_job_resumes_after_nonterminal_stream_end(tmp_path, monkeypatch):
+    monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path)
+
+    class _Stream:
+        def __init__(self, interaction_id: str, events):
+            self.interaction_id = interaction_id
+            self.status = "in_progress"
+            self.events = iter(events)
+
+    class _Event:
+        def __init__(self, event_type: str, **fields):
+            self.event_type = event_type
+            for key, value in fields.items():
+                setattr(self, key, value)
+
+    class _Client:
+        def __init__(self):
+            self.resume_calls = []
+
+        def start_research_stream(self, prompt: str):
+            return _Stream(
+                "stream-job-456",
+                [
+                    _Event(
+                        "content.delta",
+                        delta_type="thought_summary",
+                        text="Checking sources",
+                        event_id="evt-1",
+                    ),
+                ],
+            )
+
+        def resume_research_stream(self, interaction_id: str, *, last_event_id: str):
+            self.resume_calls.append((interaction_id, last_event_id))
+            return _Stream(
+                interaction_id,
+                [
+                    _Event(
+                        "interaction.complete",
+                        status="completed",
+                        text="Final answer",
+                        event_id="evt-2",
+                    ),
+                ],
+            )
+
+    client = _Client()
+
+    record = start_research_stream_job(
+        "test query",
+        client=client,
+        agent_name="deep-research-pro-preview-12-2025",
+        timeout_minutes=20,
+    )
+
+    assert record is not None
+    assert record.interaction_id == "stream-job-456"
+
+    reloaded = None
+    for _ in range(20):
+        reloaded = load_research_job("stream-job-456")
+        if reloaded is not None and reloaded.status == "completed":
+            break
+        time.sleep(0.01)
+
+    assert client.resume_calls == [("stream-job-456", "evt-1")]
     assert reloaded is not None
     assert reloaded.status == "completed"
     assert reloaded.output_text == "Final answer"

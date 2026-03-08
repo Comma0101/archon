@@ -63,6 +63,10 @@ def test_google_deep_research_client_starts_background_interaction():
             "input": "Research LA restaurant market",
             "background": True,
             "store": True,
+            "agent_config": {
+                "type": "deep-research",
+                "thinking_summaries": "auto",
+            },
             "tools": None,
         }
     ]
@@ -193,8 +197,88 @@ def test_google_deep_research_client_starts_streaming_interaction():
             "background": True,
             "store": True,
             "stream": True,
+            "agent_config": {
+                "type": "deep-research",
+                "thinking_summaries": "auto",
+            },
             "tools": None,
         }
+    ]
+
+
+def test_google_deep_research_client_stream_reads_nested_thought_summary_text():
+    class _StreamInteractionsClient:
+        def create(self, **kwargs):
+            return iter(
+                [
+                    {
+                        "event_type": "interaction.start",
+                        "interaction": {"id": "int-stream-123", "status": "in_progress"},
+                        "event_id": "evt-1",
+                    },
+                    {
+                        "event_type": "content.delta",
+                        "event_id": "evt-2",
+                        "delta": {
+                            "type": "thought_summary",
+                            "content": {"text": "Looking at sources"},
+                        },
+                    },
+                ]
+            )
+
+    client = GoogleDeepResearchClient(
+        _StreamInteractionsClient(),
+        agent="deep-research-pro-preview-12-2025",
+    )
+
+    stream = client.start_research_stream("Research LA restaurant market")
+    events = list(stream.events)
+
+    assert events[1].delta_type == "thought_summary"
+    assert events[1].text == "Looking at sources"
+    assert events[1].event_id == "evt-2"
+
+
+def test_google_deep_research_client_can_resume_stream_from_last_event_id():
+    class _ResumeInteractionsClient:
+        def __init__(self):
+            self.get_calls = []
+
+        def get(self, interaction_id: str, **kwargs):
+            self.get_calls.append((interaction_id, kwargs))
+            return iter(
+                [
+                    {
+                        "event_type": "content.delta",
+                        "event_id": "evt-3",
+                        "delta": {"type": "text", "text": "Final answer"},
+                    },
+                    {
+                        "event_type": "interaction.complete",
+                        "interaction": {"id": interaction_id, "status": "completed"},
+                        "event_id": "evt-4",
+                    },
+                ]
+            )
+
+    fake = _ResumeInteractionsClient()
+    client = GoogleDeepResearchClient(fake, agent="deep-research-pro-preview-12-2025")
+
+    stream = client.resume_research_stream("int-stream-123", last_event_id="evt-2")
+
+    assert [event.event_type for event in stream.events] == [
+        "content.delta",
+        "interaction.complete",
+    ]
+    assert fake.get_calls == [
+        (
+            "int-stream-123",
+            {
+                "stream": True,
+                "last_event_id": "evt-2",
+            },
+        )
     ]
 
 

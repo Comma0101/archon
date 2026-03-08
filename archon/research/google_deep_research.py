@@ -20,6 +20,7 @@ class DeepResearchInteraction:
 @dataclass(frozen=True)
 class DeepResearchStreamEvent:
     event_type: str
+    event_id: str = ""
     interaction_id: str = ""
     status: str = ""
     text: str = ""
@@ -49,10 +50,12 @@ class GoogleDeepResearchClient:
         interactions_client: object,
         *,
         agent: str = DEFAULT_DEEP_RESEARCH_AGENT,
+        thinking_summaries: str = "auto",
     ) -> None:
         self._client_ref = interactions_client  # Keep strong reference to prevent httpx client GC
         self._interactions = _resolve_interactions_client(interactions_client)
         self.agent = str(agent or DEFAULT_DEEP_RESEARCH_AGENT).strip() or DEFAULT_DEEP_RESEARCH_AGENT
+        self.thinking_summaries = str(thinking_summaries or "auto").strip().lower() or "auto"
 
     @classmethod
     def from_api_key(
@@ -60,6 +63,7 @@ class GoogleDeepResearchClient:
         api_key: str,
         *,
         agent: str = DEFAULT_DEEP_RESEARCH_AGENT,
+        thinking_summaries: str = "auto",
     ) -> "GoogleDeepResearchClient":
         key = str(api_key or "").strip()
         if not key:
@@ -67,7 +71,7 @@ class GoogleDeepResearchClient:
         from google import genai
 
         client = genai.Client(api_key=key)
-        return cls(client, agent=agent)
+        return cls(client, agent=agent, thinking_summaries=thinking_summaries)
 
     def start_research(
         self,
@@ -80,6 +84,7 @@ class GoogleDeepResearchClient:
             input=str(prompt or ""),
             background=True,
             store=True,
+            agent_config=self._agent_config(),
             tools=_validate_supported_tools(tools),
         )
         return _coerce_interaction(interaction)
@@ -96,6 +101,7 @@ class GoogleDeepResearchClient:
             background=True,
             store=True,
             stream=True,
+            agent_config=self._agent_config(),
             tools=_validate_supported_tools(tools),
         )
         events = _coerce_stream_events(stream)
@@ -108,6 +114,31 @@ class GoogleDeepResearchClient:
             events=_prepend_event(first, events),
         )
 
+    def resume_research_stream(
+        self,
+        interaction_id: str,
+        *,
+        last_event_id: str,
+    ) -> DeepResearchStream:
+        stream = self._interactions.get(
+            str(interaction_id or "").strip(),
+            stream=True,
+            last_event_id=str(last_event_id or "").strip(),
+        )
+        events = _coerce_stream_events(stream)
+        first = next(events, None)
+        if first is None:
+            return DeepResearchStream(
+                interaction_id=str(interaction_id or "").strip(),
+                status="unknown",
+                events=iter(()),
+            )
+        return DeepResearchStream(
+            interaction_id=first.interaction_id or str(interaction_id or "").strip(),
+            status=first.status or "unknown",
+            events=_prepend_event(first, events),
+        )
+
     def get_research(self, interaction_id: str) -> DeepResearchInteraction:
         interaction = self._interactions.get(str(interaction_id or "").strip())
         return _coerce_interaction(interaction)
@@ -115,6 +146,12 @@ class GoogleDeepResearchClient:
     def cancel_research(self, interaction_id: str) -> DeepResearchInteraction:
         interaction = self._interactions.cancel(str(interaction_id or "").strip())
         return _coerce_interaction(interaction)
+
+    def _agent_config(self) -> dict[str, str]:
+        return {
+            "type": "deep-research",
+            "thinking_summaries": self.thinking_summaries,
+        }
 
 
 def _resolve_interactions_client(client: object) -> object:
@@ -194,14 +231,22 @@ def _coerce_stream_events(stream: object):
 
 def _coerce_stream_event(event: object) -> DeepResearchStreamEvent:
     event_type = str(_field(event, "event_type") or "").strip()
+    event_id = str(_field(event, "event_id") or "").strip()
     interaction = _field(event, "interaction")
     delta = _field(event, "delta")
     interaction_id = str(_field(interaction, "id") or _field(interaction, "name") or "").strip()
     status = str(_field(interaction, "status") or _field(interaction, "state") or "").strip().lower()
-    text = str(_field(event, "text") or _field(delta, "text") or "").strip()
+    delta_content = _field(delta, "content")
+    text = str(
+        _field(event, "text")
+        or _field(delta, "text")
+        or _field(delta_content, "text")
+        or ""
+    ).strip()
     delta_type = str(_field(delta, "type") or "").strip().lower()
     return DeepResearchStreamEvent(
         event_type=event_type,
+        event_id=event_id,
         interaction_id=interaction_id,
         status=status,
         text=text,
