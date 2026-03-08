@@ -1,5 +1,7 @@
 """System prompt assembly from templates and runtime data."""
 
+import json
+import subprocess
 from pathlib import Path
 
 from archon.config import Config, ProfileConfig
@@ -13,6 +15,7 @@ from archon.memory import summary as memory_summary
 
 
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
+AGENT_CONTEXT_PATH = Path(__file__).parent.parent / "AGENT_CONTEXT.json"
 
 
 def load_template(name: str) -> str:
@@ -99,3 +102,57 @@ def build_runtime_capability_summary(config: Config, profile_name: str = "defaul
     if enabled_label != allowed_label:
         lines.append(f"Configured MCP servers: {enabled_label}")
     return "\n".join(lines)
+
+
+def _git_output(*args: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=Path(__file__).parent.parent,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return ""
+    return str(result.stdout or "").strip()
+
+
+def build_source_awareness_summary() -> str:
+    """Render a compact source-of-truth summary for capability grounding."""
+    lines: list[str] = ["[Source Awareness]"]
+
+    branch = _git_output("rev-parse", "--abbrev-ref", "HEAD")
+    if branch:
+        lines.append(f"Git branch: {branch}")
+    head = _git_output("rev-parse", "--short", "HEAD")
+    if head:
+        lines.append(f"Git head: {head}")
+
+    try:
+        payload = json.loads(AGENT_CONTEXT_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    project = str(payload.get("project", "") or "").strip()
+    version = str(payload.get("version", "") or "").strip()
+    if project and version:
+        lines.append(f"Project: {project} v{version}")
+    elif project:
+        lines.append(f"Project: {project}")
+
+    total_tests = payload.get("total_tests")
+    if isinstance(total_tests, int) and total_tests > 0:
+        lines.append(f"Verified tests: {total_tests}")
+
+    changelog = payload.get("changelog")
+    recent_changes = []
+    if isinstance(changelog, list):
+        recent_changes = [str(item).strip() for item in changelog if str(item).strip()][-2:]
+    if recent_changes:
+        lines.append("Recent changes:")
+        lines.extend(f"- {item}" for item in recent_changes)
+
+    return "\n".join(lines) if len(lines) > 1 else ""

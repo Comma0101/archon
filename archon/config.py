@@ -130,7 +130,7 @@ class MCPConfig:
 
 @dataclass
 class GoogleDeepResearchConfig:
-    enabled: bool = False
+    enabled: bool = True
     agent: str = "deep-research-pro-preview-12-2025"
     timeout_minutes: int = 20
     poll_interval_sec: int = 10

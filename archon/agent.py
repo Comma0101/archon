@@ -14,15 +14,18 @@ from typing import Callable, Generator, TypeVar, cast
 from archon import memory as memory_store
 from archon.control.hooks import HookBus
 from archon.control.orchestrator import (
-    build_route_payload,
-    classify_route,
     orchestrate_response,
     orchestrate_stream_response,
 )
 from archon.control.policy import evaluate_mcp_policy, evaluate_tool_policy
 from archon.llm import LLMClient, LLMResponse
 from archon.tools import ToolRegistry
-from archon.prompt import build_runtime_capability_summary, build_skill_guidance, build_system_prompt
+from archon.prompt import (
+    build_runtime_capability_summary,
+    build_skill_guidance,
+    build_source_awareness_summary,
+    build_system_prompt,
+)
 from archon.config import Config
 from archon.security.redaction import redact_secret_like_text
 
@@ -602,109 +605,6 @@ class Agent:
                 return cfg_profile
         return "default"
 
-    def _maybe_start_deep_research_job(
-        self,
-        turn_id: str,
-        user_message: str,
-        *,
-        active_profile: str,
-    ) -> str | None:
-        if self._orchestrator_mode() != "hybrid":
-            return None
-        lane, reason = classify_route(user_message)
-        if lane != "job" or reason != "deep_research_request":
-            return None
-        deep_cfg = getattr(getattr(self.config, "research", None), "google_deep_research", None)
-        if deep_cfg is None or not bool(getattr(deep_cfg, "enabled", False)):
-            return (
-                "Native Deep Research unavailable: disabled in config. "
-                "Enable [research.google_deep_research].enabled to use research jobs."
-            )
-        policy_decision = evaluate_tool_policy(
-            config=self.config,
-            tool_name="deep_research",
-            mode="implement",
-            profile_name=active_profile,
-        )
-        self._emit_hook(
-            "policy.decision",
-            {
-                "turn_id": turn_id,
-                "name": "deep_research",
-                "decision": policy_decision.decision,
-                "reason": policy_decision.reason,
-                "profile": policy_decision.profile,
-                "mode": policy_decision.mode,
-            },
-        )
-        if policy_decision.decision == "deny":
-            return (
-                "Error: Policy denied research job 'deep_research' "
-                f"({policy_decision.reason})"
-            )
-        try:
-            message = self._start_deep_research_job(turn_id, user_message)
-        except Exception as e:
-            self._emit_hook(
-                "research.failed",
-                {
-                    "turn_id": turn_id,
-                    "error_type": type(e).__name__,
-                    "error": str(e),
-                },
-            )
-            return (
-                "Native Deep Research failed to start: "
-                f"{type(e).__name__}: {e}"
-            )
-        self._emit_hook(
-            "orchestrator.route",
-            build_route_payload(
-                turn_id=turn_id,
-                mode="hybrid",
-                path="hybrid_deep_research_job_v0",
-                lane=lane,
-                reason=reason,
-            ),
-        )
-        return message
-
-    def _start_deep_research_job(self, turn_id: str, user_message: str) -> str:
-        from archon.research.models import ResearchJobRecord
-        from archon.research.store import save_research_job
-
-        deep_cfg = self.config.research.google_deep_research
-        client = self._create_google_deep_research_client()
-        interaction = client.start_research(user_message)
-        timestamp = _now_iso()
-        record = save_research_job(
-            ResearchJobRecord(
-                interaction_id=str(getattr(interaction, "interaction_id", "") or "").strip(),
-                status=str(getattr(interaction, "status", "") or "running").strip() or "running",
-                prompt=user_message,
-                agent=str(getattr(deep_cfg, "agent", "") or "").strip(),
-                created_at=timestamp,
-                updated_at=timestamp,
-                summary="Research job started",
-                output_text=str(getattr(interaction, "output_text", "") or ""),
-                error="",
-            )
-        )
-        job_id = f"research:{record.interaction_id}"
-        self._emit_hook(
-            "research.started",
-            {
-                "turn_id": turn_id,
-                "job_id": job_id,
-                "interaction_id": record.interaction_id,
-                "status": record.status,
-            },
-        )
-        return (
-            f"Research job started: {job_id}\n"
-            f"Use /jobs or /job {job_id} to inspect progress."
-        )
-
     def _create_google_deep_research_client(self):
         from archon.research.google_deep_research import GoogleDeepResearchClient
 
@@ -1170,6 +1070,9 @@ def _build_turn_system_prompt(
     capability_summary = build_runtime_capability_summary(config, profile_name=profile_name)
     if capability_summary:
         lines.extend(["", capability_summary])
+    source_awareness = build_source_awareness_summary()
+    if source_awareness:
+        lines.extend(["", source_awareness])
     if skill_guidance:
         lines.extend(["", skill_guidance])
 

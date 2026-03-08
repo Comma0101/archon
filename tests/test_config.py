@@ -21,7 +21,7 @@ def test_load_config_calls_defaults(monkeypatch, tmp_path):
     assert cfg.orchestrator.mode == "legacy"
     assert cfg.orchestrator.shadow_eval is True
     assert cfg.orchestrator.default_profile == "default"
-    assert cfg.research.google_deep_research.enabled is False
+    assert cfg.research.google_deep_research.enabled is True
     assert cfg.research.google_deep_research.agent == "deep-research-pro-preview-12-2025"
     assert cfg.research.google_deep_research.timeout_minutes == 20
     assert cfg.research.google_deep_research.poll_interval_sec == 10

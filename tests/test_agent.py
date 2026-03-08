@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import archon.control.orchestrator as orchestrator_module
+import archon.prompt as prompt_module
 from archon.agent import Agent, _chat_with_retry, _print_tool_call, _print_tool_result
 from archon.llm import LLMResponse, ToolCall
 from archon.tools import ToolRegistry
@@ -1485,6 +1486,70 @@ class TestAgentLoop:
         assert "exa" in system_prompt_arg
         assert "Effective tool scope: all tools" in system_prompt_arg
         assert "Active skill: none" in system_prompt_arg
+
+    def test_source_awareness_summary_uses_git_and_agent_context(self, monkeypatch, tmp_path):
+        context_path = tmp_path / "AGENT_CONTEXT.json"
+        context_path.write_text(
+            """
+{
+  "project": "archon",
+  "version": "0.1.0",
+  "total_tests": 537,
+  "changelog": [
+    "older change",
+    "new routing update",
+    "research job inspection tools"
+  ]
+}
+""".strip()
+        )
+        monkeypatch.setattr(prompt_module, "AGENT_CONTEXT_PATH", context_path, raising=False)
+        monkeypatch.setattr(
+            prompt_module,
+            "_git_output",
+            lambda *args: "master" if "--abbrev-ref" in args else "f8f7106",
+            raising=False,
+        )
+
+        summary_fn = getattr(prompt_module, "build_source_awareness_summary", None)
+        assert callable(summary_fn)
+        summary = summary_fn()
+
+        assert "[Source Awareness]" in summary
+        assert "Git branch: master" in summary
+        assert "Git head: f8f7106" in summary
+        assert "Project: archon v0.1.0" in summary
+        assert "Verified tests: 537" in summary
+        assert "new routing update" in summary
+        assert "research job inspection tools" in summary
+        assert "older change" not in summary
+
+    def test_run_appends_source_awareness_to_turn_prompt(self, monkeypatch):
+        responses = [
+            LLMResponse(
+                text="ok",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "ok"}],
+                input_tokens=10,
+                output_tokens=5,
+            ),
+        ]
+        agent = make_agent(responses)
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        monkeypatch.setattr(
+            "archon.agent.build_source_awareness_summary",
+            lambda: "[Source Awareness]\nGit branch: master\nVerified tests: 537",
+            raising=False,
+        )
+
+        result = agent.run("what changed recently?")
+
+        assert result == "ok"
+        system_prompt_arg = agent.llm.chat.call_args[0][0]
+        assert "[Source Awareness]" in system_prompt_arg
+        assert "Git branch: master" in system_prompt_arg
+        assert "Verified tests: 537" in system_prompt_arg
 
     def test_run_stream_appends_skill_guidance_for_non_default_skill_profile(self, monkeypatch):
         final_resp = LLMResponse(
