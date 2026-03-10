@@ -1,5 +1,7 @@
 """Filesystem/basic local tool registrations."""
 
+import fnmatch
+import re
 import subprocess
 from pathlib import Path
 
@@ -226,3 +228,49 @@ def register_filesystem_tools(registry) -> None:
         },
         "required": ["pattern"],
     }, glob_files)
+
+    # 7. grep
+    def grep_files(pattern: str, root: str = ".", glob: str = "", limit: int = 200) -> str:
+        root_path = Path(root).expanduser().resolve()
+        if not root_path.exists():
+            return f"Error: Directory not found: {root_path}"
+        if not root_path.is_dir():
+            return f"Error: Not a directory: {root_path}"
+        rejected = _confirm_read_operation(registry, f"Grep files: {root_path}")
+        if rejected is not None:
+            return rejected
+        max_results = max(1, min(int(limit or 200), 1000))
+        try:
+            matcher = re.compile(pattern)
+        except re.error as e:
+            return f"Error: Invalid regex: {e}"
+
+        file_glob = str(glob or "").strip()
+        matches: list[str] = []
+        for path in root_path.rglob("*"):
+            if len(matches) >= max_results:
+                break
+            if not path.is_file():
+                continue
+            if file_glob and not fnmatch.fnmatch(path.name, file_glob):
+                continue
+            try:
+                lines = path.read_text(errors="ignore").splitlines()
+            except Exception:
+                continue
+            for line_no, line in enumerate(lines, start=1):
+                if matcher.search(line):
+                    matches.append(f"{path.resolve()}:{line_no}:{line}")
+                    if len(matches) >= max_results:
+                        break
+        return "\n".join(matches) if matches else "(no matches)"
+
+    registry.register("grep", "Search file contents under a root for a regex pattern", {
+        "properties": {
+            "pattern": {"type": "string", "description": "Regex pattern to search for"},
+            "root": {"type": "string", "description": "Directory root to search", "default": "."},
+            "glob": {"type": "string", "description": "Optional filename filter (e.g. *.py)", "default": ""},
+            "limit": {"type": "integer", "description": "Maximum number of matches to return", "default": 200},
+        },
+        "required": ["pattern"],
+    }, grep_files)

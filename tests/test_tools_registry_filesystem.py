@@ -24,15 +24,15 @@ def make_registry_allow_all():
     )
 
 class TestRegistry:
-    def test_schemas_has_35_tools(self):
+    def test_schemas_has_36_tools(self):
         reg = make_registry()
-        assert len(reg.get_schemas()) == 35
+        assert len(reg.get_schemas()) == 36
 
     def test_schema_names(self):
         reg = make_registry()
         names = {t["name"] for t in reg.get_schemas()}
         assert names == {"shell", "read_file", "write_file", "edit_file",
-                        "list_dir", "glob", "memory_read", "memory_write", "memory_lookup",
+                        "list_dir", "glob", "grep", "memory_read", "memory_write", "memory_lookup",
                         "memory_inbox_add", "memory_inbox_list", "memory_inbox_decide", "news_brief",
                         "deep_research", "check_research_job", "list_research_jobs",
                         "mcp_call",
@@ -135,6 +135,38 @@ class TestGlob:
 
         assert str(src / "one.py") in result
         assert str(nested / "three.py") in result
+        assert str(src / "two.txt") not in result
+
+
+class TestGrep:
+    def test_grep_matches_lines_under_root(self, tmp_path):
+        reg = make_registry_allow_all()
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "one.py").write_text("alpha\nbeta\n")
+        (src / "two.txt").write_text("beta\ngamma\n")
+
+        result = reg.execute(
+            "grep",
+            {"pattern": "beta", "root": str(src)},
+        )
+
+        assert f"{src / 'one.py'}:2:beta" in result
+        assert f"{src / 'two.txt'}:1:beta" in result
+
+    def test_grep_respects_filename_glob_filter(self, tmp_path):
+        reg = make_registry_allow_all()
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "one.py").write_text("beta\n")
+        (src / "two.txt").write_text("beta\n")
+
+        result = reg.execute(
+            "grep",
+            {"pattern": "beta", "root": str(src), "glob": "*.py"},
+        )
+
+        assert f"{src / 'one.py'}:1:beta" in result
         assert str(src / "two.txt") not in result
 
 class TestShell:
