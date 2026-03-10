@@ -75,9 +75,10 @@ class TestWorkerRuntime:
                 exec_observer.on_process_exit(0)
             return WorkerResult(worker="codex", status="ok", summary="done", repo_path=task.repo_path)
 
-        def fake_record_worker_run(task, result, requested_worker):
+        def fake_record_worker_run(task, result, requested_worker, hook_bus=None):
             calls["record"] += 1
             assert task.archon_session_id == "sess-bg-1"
+            assert hook_bus is None
             return type("Rec", (), {"session_id": "sess-bg-1"})()
 
         monkeypatch.setattr("archon.workers.runtime.run_worker_task", fake_run_worker_task)

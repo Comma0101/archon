@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+from archon.control.hooks import HookBus
 import archon.workers.session_store as session_store
 from archon.workers.base import WorkerEvent, WorkerResult, WorkerTask
 from archon.workers.session_store import (
@@ -26,6 +27,42 @@ from archon.workers.session_store import (
 
 
 class TestWorkerSessionStore:
+    def test_record_worker_run_emits_completion_via_explicit_hook_bus(self, monkeypatch, tmp_path):
+        sessions_dir = tmp_path / "workers" / "sessions"
+        events_dir = tmp_path / "workers" / "events"
+        monkeypatch.setattr("archon.workers.session_store.WORKER_SESSIONS_DIR", sessions_dir)
+        monkeypatch.setattr("archon.workers.session_store.WORKER_EVENTS_DIR", events_dir)
+        monkeypatch.delattr(session_store._emit_job_completed_event, "_hook_bus", raising=False)
+
+        hook_bus = HookBus()
+        seen = []
+        hook_bus.register("ux.job_completed", lambda event: seen.append(event.payload["event"]))
+
+        task = WorkerTask(
+            task="Review repo",
+            worker="auto",
+            mode="review",
+            repo_path=str(tmp_path),
+            timeout_sec=60,
+            constraints="Read-only",
+        )
+        result = WorkerResult(
+            worker="codex",
+            status="ok",
+            summary="Looks good",
+            repo_path=str(tmp_path),
+            exit_code=0,
+        )
+
+        record = record_worker_run(task, result, requested_worker="auto", hook_bus=hook_bus)
+
+        assert record.status == "ok"
+        assert len(seen) == 1
+        assert seen[0].kind == "job_completed"
+        assert seen[0].data["job_id"] == record.session_id
+        assert seen[0].data["status"] == "ok"
+        assert not hasattr(session_store._emit_job_completed_event, "_hook_bus")
+
     def test_record_and_load_roundtrip(self, monkeypatch, tmp_path):
         sessions_dir = tmp_path / "workers" / "sessions"
         events_dir = tmp_path / "workers" / "events"

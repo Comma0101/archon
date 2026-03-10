@@ -33,7 +33,7 @@ _RUNS: dict[str, ActiveWorkerRun] = {}
 _PROCESSES: dict[str, subprocess.Popen] = {}
 
 
-def start_background_worker(task: WorkerTask, requested_worker: str) -> ActiveWorkerRun:
+def start_background_worker(task: WorkerTask, requested_worker: str, *, hook_bus=None) -> ActiveWorkerRun:
     """Reserve an Archon worker session and execute the delegated run in a background thread."""
     reserved = reserve_worker_session(task, requested_worker=requested_worker)
     task.archon_session_id = reserved.session_id
@@ -48,7 +48,7 @@ def start_background_worker(task: WorkerTask, requested_worker: str) -> ActiveWo
     )
     thread = threading.Thread(
         target=_background_run_main,
-        args=(reserved.session_id, task, requested_worker),
+        args=(reserved.session_id, task, requested_worker, hook_bus),
         daemon=True,
         name=f"archon-worker-{reserved.session_id[:8]}",
     )
@@ -111,7 +111,7 @@ def request_background_cancel(session_id: str) -> bool:
     return True
 
 
-def _background_run_main(session_id: str, task: WorkerTask, requested_worker: str):
+def _background_run_main(session_id: str, task: WorkerTask, requested_worker: str, hook_bus=None):
     _update_run(session_id, state="running")
     observer = _RuntimeExecObserver(session_id)
     try:
@@ -125,7 +125,7 @@ def _background_run_main(session_id: str, task: WorkerTask, requested_worker: st
             error=str(e),
         )
     try:
-        record_worker_run(task, result, requested_worker=requested_worker)
+        record_worker_run(task, result, requested_worker=requested_worker, hook_bus=hook_bus)
     except Exception as e:
         _update_run(session_id, state="failed", error=f"record_worker_run failed: {type(e).__name__}: {e}")
         _clear_process(session_id)

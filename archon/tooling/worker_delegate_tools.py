@@ -35,6 +35,7 @@ def register_delegate_tool(registry, ns, worker_send):
         existing_session_id: str = "",
         model: str = "",
     ) -> str:
+        hook_bus = getattr(registry, "hook_bus", None)
         level = Level.SAFE if mode_value in {"review", "analyze"} else Level.DANGEROUS
         task_preview = " ".join(task.split())
         if len(task_preview) > 140:
@@ -55,7 +56,7 @@ def register_delegate_tool(registry, ns, worker_send):
         )
         if background:
             try:
-                active = start_background_worker(task_obj, requested_worker=worker)
+                active = start_background_worker(task_obj, requested_worker=worker, hook_bus=hook_bus)
             except Exception as e:
                 return f"Error: failed to start background worker ({type(e).__name__}: {e})"
             registry._set_worker_session_affinity(active.session_id, str(repo), worker)
@@ -77,7 +78,7 @@ def register_delegate_tool(registry, ns, worker_send):
             return f"Error: failed to reserve worker session ({type(e).__name__}: {e})"
         result = run_worker_task(task_obj)
         try:
-            session_record = record_worker_run(task_obj, result, requested_worker=worker)
+            session_record = record_worker_run(task_obj, result, requested_worker=worker, hook_bus=hook_bus)
         except Exception as e:
             return (
                 format_worker_result(result)

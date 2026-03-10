@@ -27,7 +27,13 @@ WORKER_EVENTS_DIR = WORKERS_STATE_DIR / "events"
 _STORE_LOCK = threading.RLock()
 
 
-def record_worker_run(task: WorkerTask, result: WorkerResult, requested_worker: str) -> WorkerSessionRecord:
+def record_worker_run(
+    task: WorkerTask,
+    result: WorkerResult,
+    requested_worker: str,
+    *,
+    hook_bus=None,
+) -> WorkerSessionRecord:
     """Persist a completed delegated worker run and return its Archon session record."""
     with _STORE_LOCK:
         _ensure_dirs()
@@ -96,6 +102,7 @@ def record_worker_run(task: WorkerTask, result: WorkerResult, requested_worker: 
             job_id=record.session_id,
             status=record.status,
             summary=record.summary,
+            hook_bus=hook_bus,
         )
         return record
 
@@ -640,18 +647,15 @@ def _emit_job_completed_event(
     job_id: str,
     status: str,
     summary: str,
+    hook_bus=None,
 ) -> None:
     """Best-effort cross-surface notification when a worker job completes."""
     try:
         from archon.ux.events import job_completed as _make_event
-        from archon.control.hooks import HookBus
+        from archon.control.contracts import HookEvent
 
         event = _make_event(job_kind=job_kind, job_id=job_id, status=status, summary=summary)
-        # Emit through global hook bus if available; surfaces subscribe there.
-        _global_hook_bus = getattr(_emit_job_completed_event, "_hook_bus", None)
-        if isinstance(_global_hook_bus, HookBus):
-            from archon.control.contracts import HookEvent
-
-            _global_hook_bus.emit(HookEvent(kind="ux.job_completed", payload={"event": event}))
+        if hook_bus is not None and hasattr(hook_bus, "emit"):
+            hook_bus.emit(HookEvent(kind="ux.job_completed", payload={"event": event}))
     except Exception:
         pass

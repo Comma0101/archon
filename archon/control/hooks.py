@@ -17,6 +17,7 @@ class HookBus:
 
     def __init__(self):
         self._handlers: dict[str, list[HookHandler]] = defaultdict(list)
+        self._failures: list[dict[str, str]] = []
         self._lock = RLock()
 
     def register(self, kind: str, handler: HookHandler) -> None:
@@ -37,6 +38,26 @@ class HookBus:
         for handler in [*handlers, *wildcard]:
             try:
                 handler(event)
-            except Exception:
+            except Exception as e:
                 # Hooks must never affect agent/tool execution.
+                self._record_failure(kind, handler, e)
                 continue
+
+    def get_failures(self) -> list[dict[str, str]]:
+        with self._lock:
+            return [dict(entry) for entry in self._failures]
+
+    def _record_failure(self, kind: str, handler: HookHandler, error: Exception) -> None:
+        try:
+            entry = {
+                "kind": str(kind or ""),
+                "handler": getattr(handler, "__name__", "") or repr(handler),
+                "error_type": type(error).__name__,
+                "error": str(error),
+            }
+        except Exception:
+            return
+        with self._lock:
+            self._failures.append(entry)
+            if len(self._failures) > 50:
+                del self._failures[:-50]
