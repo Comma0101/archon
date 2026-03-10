@@ -28,6 +28,15 @@ def _should_confirm_write(registry) -> bool:
     return mode != 'auto'
 
 
+def _should_confirm_read(registry) -> bool:
+    """Check if read-only filesystem operations need confirmation."""
+    config = getattr(registry, 'config', None)
+    if config is None:
+        return True
+    mode = getattr(getattr(config, 'safety', None), 'permission_mode', 'confirm_all')
+    return mode == 'confirm_all'
+
+
 def register_filesystem_tools(registry) -> None:
     # 1. shell
     def shell(command: str, timeout: int = 30) -> str:
@@ -61,6 +70,9 @@ def register_filesystem_tools(registry) -> None:
             return f"Error: File not found: {p}"
         if not p.is_file():
             return f"Error: Not a file: {p}"
+        if _should_confirm_read(registry):
+            if not registry.confirmer(f"Read file: {p}", Level.SAFE):
+                return "Read rejected by safety gate."
         try:
             lines = p.read_text().splitlines()
             selected = lines[offset:offset + limit]
@@ -156,6 +168,9 @@ def register_filesystem_tools(registry) -> None:
             return f"Error: Directory not found: {p}"
         if not p.is_dir():
             return f"Error: Not a directory: {p}"
+        if _should_confirm_read(registry):
+            if not registry.confirmer(f"List directory: {p}", Level.SAFE):
+                return "List rejected by safety gate."
         entries = sorted(p.iterdir())
         lines = []
         for entry in entries[:500]:

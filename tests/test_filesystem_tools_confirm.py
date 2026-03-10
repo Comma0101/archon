@@ -166,3 +166,81 @@ def test_write_file_auto_mode_still_confirms_self_modification(tmp_path, monkeyp
     call_args = registry.confirmer.call_args
     assert "own source" in call_args[0][0].lower()
     assert not target.exists()
+
+
+def test_read_file_confirms_in_confirm_all_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    registry = _make_registry(confirm_result=True, permission_mode="confirm_all")
+
+    from archon.tooling.filesystem_tools import register_filesystem_tools
+    register_filesystem_tools(registry)
+
+    calls = registry.register.call_args_list
+    read_call = [c for c in calls if c[0][0] == "read_file"][0]
+    handler = read_call[0][3]
+
+    target = tmp_path / "readme.txt"
+    target.write_text("hello")
+
+    result = handler(path=str(target))
+
+    registry.confirmer.assert_called_once()
+    assert "hello" in result
+
+
+def test_read_file_skips_confirmation_in_accept_reads_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    registry = _make_registry(confirm_result=False, permission_mode="accept_reads")
+
+    from archon.tooling.filesystem_tools import register_filesystem_tools
+    register_filesystem_tools(registry)
+
+    calls = registry.register.call_args_list
+    read_call = [c for c in calls if c[0][0] == "read_file"][0]
+    handler = read_call[0][3]
+
+    target = tmp_path / "readme.txt"
+    target.write_text("hello")
+
+    result = handler(path=str(target))
+
+    registry.confirmer.assert_not_called()
+    assert "hello" in result
+
+
+def test_list_dir_confirms_in_confirm_all_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    registry = _make_registry(confirm_result=True, permission_mode="confirm_all")
+
+    from archon.tooling.filesystem_tools import register_filesystem_tools
+    register_filesystem_tools(registry)
+
+    calls = registry.register.call_args_list
+    list_call = [c for c in calls if c[0][0] == "list_dir"][0]
+    handler = list_call[0][3]
+
+    (tmp_path / "one.txt").write_text("1")
+
+    result = handler(path=str(tmp_path))
+
+    registry.confirmer.assert_called_once()
+    assert "one.txt" in result
+
+
+def test_list_dir_skips_confirmation_in_accept_reads_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    registry = _make_registry(confirm_result=False, permission_mode="accept_reads")
+
+    from archon.tooling.filesystem_tools import register_filesystem_tools
+    register_filesystem_tools(registry)
+
+    calls = registry.register.call_args_list
+    list_call = [c for c in calls if c[0][0] == "list_dir"][0]
+    handler = list_call[0][3]
+
+    (tmp_path / "one.txt").write_text("1")
+
+    result = handler(path=str(tmp_path))
+
+    registry.confirmer.assert_not_called()
+    assert "one.txt" in result
