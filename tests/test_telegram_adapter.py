@@ -426,38 +426,53 @@ class TestTelegramAdapterCommands:
         assert sent == [(99, "ok")]
         assert ("telegram", "voice reply failed for 99: RuntimeError: tts unavailable") in events
 
-    def test_voice_message_voice_upload_falls_back_to_wav_document(self, monkeypatch):
-        adapter = _adapter()
-        sent = []
-        sent_docs = []
-        monkeypatch.setattr(adapter, "_send_typing", lambda chat_id: None)
-        monkeypatch.setattr(adapter._bot, "get_file", lambda file_id, timeout=10: {"file_path": "voice/a.ogg"})
-        monkeypatch.setattr(adapter._bot, "download_file", lambda file_path, timeout=20: b"audio-data")
-        monkeypatch.setattr("archon.adapters.telegram.transcribe_audio_bytes", lambda data, mime_type: "hello")
-        monkeypatch.setattr("archon.adapters.telegram.synthesize_speech_wav", lambda text: (b"RIFF....WAVE", "audio/wav"))
-        monkeypatch.setattr(
-            "archon.adapters.telegram.convert_wav_to_ogg_opus",
-            lambda data: (_ for _ in ()).throw(RuntimeError("ffmpeg failed")),
-        )
-        monkeypatch.setattr(
-            adapter._bot,
-            "send_document_bytes",
-            lambda chat_id, filename, data, **kwargs: sent_docs.append((chat_id, filename, data, kwargs))
-            or {"message_id": 901},
-        )
-        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+def test_voice_message_voice_upload_falls_back_to_wav_document(monkeypatch):
+    adapter = _adapter()
+    sent = []
+    sent_docs = []
+    monkeypatch.setattr(adapter, "_send_typing", lambda chat_id: None)
+    monkeypatch.setattr(adapter._bot, "get_file", lambda file_id, timeout=10: {"file_path": "voice/a.ogg"})
+    monkeypatch.setattr(adapter._bot, "download_file", lambda file_path, timeout=20: b"audio-data")
+    monkeypatch.setattr("archon.adapters.telegram.transcribe_audio_bytes", lambda data, mime_type: "hello")
+    monkeypatch.setattr("archon.adapters.telegram.synthesize_speech_wav", lambda text: (b"RIFF....WAVE", "audio/wav"))
+    monkeypatch.setattr(
+        "archon.adapters.telegram.convert_wav_to_ogg_opus",
+        lambda data: (_ for _ in ()).throw(RuntimeError("ffmpeg failed")),
+    )
+    monkeypatch.setattr(
+        adapter._bot,
+        "send_document_bytes",
+        lambda chat_id, filename, data, **kwargs: sent_docs.append((chat_id, filename, data, kwargs))
+        or {"message_id": 901},
+    )
+    adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
 
-        adapter._handle_message(
-            {
-                "voice": {"file_id": "f1", "mime_type": "audio/ogg"},
-                "chat": {"id": 99},
-                "from": {"id": 42},
-            }
-        )
+    adapter._handle_message(
+        {
+            "voice": {"file_id": "f1", "mime_type": "audio/ogg"},
+            "chat": {"id": 99},
+            "from": {"id": 42},
+        }
+    )
 
-        assert sent == [(99, "ok")]
-        assert sent_docs
-        assert sent_docs[0][1].endswith(".wav")
+    assert sent == [(99, "ok")]
+    assert sent_docs
+    assert sent_docs[0][1].endswith(".wav")
+
+
+def test_chat_agent_wires_terminal_feed_proxy_from_activity_sink():
+    events = []
+    adapter = TelegramAdapter(
+        token="token",
+        allowed_user_ids=[42],
+        agent_factory=_DummyAgent,
+    )
+    adapter.set_activity_sink(lambda event: events.append((event.source, event.message)))
+
+    agent = adapter._get_or_create_chat_agent(99)
+    agent.terminal_activity_feed.emit_text("[telegram chat=99 turn=t001] > news_brief")
+
+    assert ("telegram", "[telegram chat=99 turn=t001] > news_brief") in events
 
     def test_voice_message_missing_file_id_returns_clear_error(self, monkeypatch):
         adapter = _adapter()

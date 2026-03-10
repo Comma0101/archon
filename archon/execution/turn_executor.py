@@ -152,12 +152,21 @@ def execute_turn(
                         "arguments": call.arguments,
                     },
                 )
-                _print_tool_call(call.name, call.arguments, prefix=log_prefix)
+                _print_tool_call(
+                    call.name,
+                    call.arguments,
+                    prefix=log_prefix,
+                    activity_feed=getattr(agent, "terminal_activity_feed", None),
+                )
                 if agent.on_tool_call:
                     agent.on_tool_call(call.name, call.arguments)
                 result = agent.tools.execute(call.name, call.arguments)
                 result_text = redact_secret_like_text(str(result))
-                _print_tool_result(result_text, prefix=log_prefix)
+                _print_tool_result(
+                    result_text,
+                    prefix=log_prefix,
+                    activity_feed=getattr(agent, "terminal_activity_feed", None),
+                )
                 history_result = agent._truncate_tool_result_for_history(
                     call.name,
                     result_text,
@@ -357,12 +366,21 @@ def execute_turn_stream(
                         "arguments": call.arguments,
                     },
                 )
-                _print_tool_call(call.name, call.arguments, prefix=log_prefix)
+                _print_tool_call(
+                    call.name,
+                    call.arguments,
+                    prefix=log_prefix,
+                    activity_feed=getattr(agent, "terminal_activity_feed", None),
+                )
                 if agent.on_tool_call:
                     agent.on_tool_call(call.name, call.arguments)
                 result = agent.tools.execute(call.name, call.arguments)
                 result_text = redact_secret_like_text(str(result))
-                _print_tool_result(result_text, prefix=log_prefix)
+                _print_tool_result(
+                    result_text,
+                    prefix=log_prefix,
+                    activity_feed=getattr(agent, "terminal_activity_feed", None),
+                )
                 history_result = agent._truncate_tool_result_for_history(
                     call.name,
                     result_text,

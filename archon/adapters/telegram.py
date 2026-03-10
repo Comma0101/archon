@@ -70,6 +70,19 @@ _TELEGRAM_BOT_COMMANDS: tuple[tuple[str, str], ...] = (
 )
 
 
+class _ActivitySinkTextProxy:
+    """Adapter to route free-form text notices through the ActivityEvent sink."""
+
+    def __init__(self, sink: Callable[[ActivityEvent], None]):
+        self._sink = sink
+
+    def emit_text(self, text: str) -> None:
+        try:
+            self._sink(ActivityEvent(source="telegram", message=text))
+        except Exception:
+            return
+
+
 def headless_confirmer(command: str, level: Level) -> bool:
     """Confirmer for non-interactive transports: allow safe, block everything else."""
     if level == Level.SAFE:
@@ -514,11 +527,15 @@ class TelegramAdapter:
         if agent is None:
             agent = self.agent_factory()
             agent.log_label = f"telegram chat={chat_id}"
+            if callable(self._activity_sink):
+                agent.terminal_activity_feed = _ActivitySinkTextProxy(self._activity_sink)
             self._wire_chat_confirmer(agent, chat_id)
             self._wire_chat_route_progress(agent, chat_id)
             self._agents[chat_id] = agent
         else:
             agent.log_label = f"telegram chat={chat_id}"
+            if callable(self._activity_sink):
+                agent.terminal_activity_feed = _ActivitySinkTextProxy(self._activity_sink)
         return agent
 
     def _handle_voice_or_audio_message(

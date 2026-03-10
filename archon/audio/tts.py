@@ -7,6 +7,7 @@ import io
 import os
 import re
 import subprocess
+import time
 import wave
 from typing import Any
 
@@ -16,6 +17,8 @@ from archon.config import load_config
 DEFAULT_GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
 DEFAULT_GEMINI_TTS_VOICE = "Kore"
 DEFAULT_PCM_SAMPLE_RATE = 24000
+DEFAULT_TTS_RETRY_ATTEMPTS = 3
+DEFAULT_TTS_RETRY_DELAY_SEC = 0.75
 
 
 def synthesize_speech_wav(
@@ -26,6 +29,8 @@ def synthesize_speech_wav(
     api_key: str | None = None,
     client: Any = None,
     types_module: Any = None,
+    retry_attempts: int = DEFAULT_TTS_RETRY_ATTEMPTS,
+    retry_delay_sec: float = DEFAULT_TTS_RETRY_DELAY_SEC,
 ) -> tuple[bytes, str]:
     """Synthesize speech with Gemini and return WAV bytes + mime type."""
     prompt = str(text or "").strip()
@@ -50,7 +55,21 @@ def synthesize_speech_wav(
         response_modalities=["AUDIO"],
         speech_config=speech_config,
     )
-    response = client.models.generate_content(model=model, contents=prompt, config=config)
+    attempts = max(1, int(retry_attempts))
+    last_error: Exception | None = None
+    response = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = client.models.generate_content(model=model, contents=prompt, config=config)
+            break
+        except Exception as e:
+            last_error = e
+            if attempt >= attempts or not _looks_like_transient_tts_error(e):
+                raise
+            time.sleep(max(0.0, float(retry_delay_sec)) * attempt)
+
+    if response is None and last_error is not None:
+        raise last_error
 
     audio_bytes, source_mime = _extract_inline_audio(response)
     if not audio_bytes:
@@ -169,6 +188,13 @@ def _extract_sample_rate(mime: str) -> int | None:
         return int(match.group(1))
     except ValueError:
         return None
+
+
+def _looks_like_transient_tts_error(error: Exception) -> bool:
+    text = str(error or "").lower()
+    if not text:
+        return False
+    return any(token in text for token in ("500", "503", "internal", "unavailable", "deadline exceeded"))
 
 
 def _pcm16_mono_to_wav(pcm_bytes: bytes, *, sample_rate: int) -> bytes:

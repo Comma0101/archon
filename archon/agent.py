@@ -485,73 +485,86 @@ class Agent:
         return artifacts
 
 
-def _print_tool_call(name: str, args: dict, prefix: str = ""):
-    """Print tool call info to stderr."""
+def _emit_tool_trace_line(text: str, *, activity_feed=None, ansi: str = "") -> None:
+    emitter = getattr(activity_feed, "emit_text", None)
+    if callable(emitter):
+        emitter(text)
+        return
+    rendered = f"{ansi}{text}{ANSI_RESET}" if ansi else text
+    print(rendered, file=sys.stderr)
+
+
+def _print_tool_call(name: str, args: dict, prefix: str = "", activity_feed=None):
+    """Print tool call info to stderr or the terminal activity feed."""
     pfx = f"{prefix} " if prefix else ""
     if name == "shell":
         command = redact_secret_like_text(str(args.get("command", "") or ""))
-        print(f"{ANSI_TOOL_CALL}{pfx}> {command}{ANSI_RESET}", file=sys.stderr)
+        _emit_tool_trace_line(f"{pfx}> {command}", activity_feed=activity_feed, ansi=ANSI_TOOL_CALL)
     elif name == "read_file":
         path = redact_secret_like_text(str(args.get("path", "") or ""))
-        print(
-            f"{ANSI_TOOL_CALL}{pfx}> read_file: {path} "
-            f"(offset={args.get('offset', 0)} limit={args.get('limit', 2000)}){ANSI_RESET}",
-            file=sys.stderr,
+        _emit_tool_trace_line(
+            f"{pfx}> read_file: {path} (offset={args.get('offset', 0)} limit={args.get('limit', 2000)})",
+            activity_feed=activity_feed,
+            ansi=ANSI_TOOL_CALL,
         )
     elif name == "list_dir":
         path = redact_secret_like_text(str(args.get("path", "") or ""))
-        print(f"{ANSI_TOOL_CALL}{pfx}> {name}: {path}{ANSI_RESET}", file=sys.stderr)
+        _emit_tool_trace_line(f"{pfx}> {name}: {path}", activity_feed=activity_feed, ansi=ANSI_TOOL_CALL)
     elif name == "write_file":
         path = redact_secret_like_text(str(args.get("path", "") or ""))
-        print(
-            f"{ANSI_TOOL_CALL}{pfx}> write_file: {path} "
-            f"({len(args.get('content', ''))} chars){ANSI_RESET}",
-            file=sys.stderr,
+        _emit_tool_trace_line(
+            f"{pfx}> write_file: {path} ({len(args.get('content', ''))} chars)",
+            activity_feed=activity_feed,
+            ansi=ANSI_TOOL_CALL,
         )
     elif name == "edit_file":
         path = redact_secret_like_text(str(args.get("path", "") or ""))
-        print(f"{ANSI_TOOL_CALL}{pfx}> edit_file: {path}{ANSI_RESET}", file=sys.stderr)
+        _emit_tool_trace_line(f"{pfx}> edit_file: {path}", activity_feed=activity_feed, ansi=ANSI_TOOL_CALL)
     elif name == "delegate_code_task":
         worker = str(args.get("worker", "auto") or "auto")
         mode = str(args.get("mode", "implement") or "implement")
         execution_mode = str(args.get("execution_mode", "auto") or "auto")
-        print(
-            f"{ANSI_TOOL_CALL}{pfx}> delegate_code_task: worker={worker} mode={mode} execution={execution_mode}{ANSI_RESET}",
-            file=sys.stderr,
+        _emit_tool_trace_line(
+            f"{pfx}> delegate_code_task: worker={worker} mode={mode} execution={execution_mode}",
+            activity_feed=activity_feed,
+            ansi=ANSI_TOOL_CALL,
         )
     elif name == "worker_start":
         worker = str(args.get("worker", "auto") or "auto")
         mode = str(args.get("mode", "review") or "review")
-        print(
-            f"{ANSI_TOOL_CALL}{pfx}> worker_start: worker={worker} mode={mode}{ANSI_RESET}",
-            file=sys.stderr,
+        _emit_tool_trace_line(
+            f"{pfx}> worker_start: worker={worker} mode={mode}",
+            activity_feed=activity_feed,
+            ansi=ANSI_TOOL_CALL,
         )
     elif name == "worker_send":
         session_id = str(args.get("session_id", "") or "")
         background = bool(args.get("background", False))
-        print(
-            f"{ANSI_TOOL_CALL}{pfx}> worker_send: session={session_id} background={background}{ANSI_RESET}",
-            file=sys.stderr,
+        _emit_tool_trace_line(
+            f"{pfx}> worker_send: session={session_id} background={background}",
+            activity_feed=activity_feed,
+            ansi=ANSI_TOOL_CALL,
         )
     elif name.startswith("memory_"):
         path = redact_secret_like_text(str(args.get("path", "") or ""))
-        print(f"{ANSI_TOOL_CALL}{pfx}> {name}: {path}{ANSI_RESET}", file=sys.stderr)
+        _emit_tool_trace_line(f"{pfx}> {name}: {path}", activity_feed=activity_feed, ansi=ANSI_TOOL_CALL)
     else:
-        print(f"{ANSI_TOOL_CALL}{pfx}> {name}{ANSI_RESET}", file=sys.stderr)
+        _emit_tool_trace_line(f"{pfx}> {name}", activity_feed=activity_feed, ansi=ANSI_TOOL_CALL)
 
 
-def _print_tool_result(result: str, prefix: str = ""):
-    """Print compact tool result to stderr: first line + line count summary."""
+def _print_tool_result(result: str, prefix: str = "", activity_feed=None):
+    """Print compact tool result to stderr or the terminal activity feed."""
     lines = result.splitlines()
     pfx = f"{prefix} " if prefix else ""
     if not lines:
         return
     first = lines[0][:200]
-    print(f"{ANSI_TOOL_RESULT}{pfx}  {first}{ANSI_RESET}", file=sys.stderr)
+    _emit_tool_trace_line(f"{pfx}  {first}", activity_feed=activity_feed, ansi=ANSI_TOOL_RESULT)
     if len(lines) > 1:
-        print(
-            f"{ANSI_TOOL_RESULT_META}{pfx}  ... ({len(lines) - 1} more lines){ANSI_RESET}",
-            file=sys.stderr,
+        _emit_tool_trace_line(
+            f"{pfx}  ... ({len(lines) - 1} more lines)",
+            activity_feed=activity_feed,
+            ansi=ANSI_TOOL_RESULT_META,
         )
 
 

@@ -2644,6 +2644,34 @@ class TestAgentLoop:
         assert "sk-second-secret" not in err
         assert err.count("[REDACTED]") >= 2
 
+    def test_tool_trace_uses_terminal_activity_feed_when_available(self, capsys):
+        messages = []
+
+        class _Feed:
+            def emit_text(self, text: str) -> None:
+                messages.append(text)
+
+        feed = _Feed()
+
+        _print_tool_call(
+            "shell",
+            {"command": "echo hi"},
+            prefix="[telegram chat=99 turn=t001]",
+            activity_feed=feed,
+        )
+        _print_tool_result(
+            "ok\nsecond line",
+            prefix="[telegram chat=99 turn=t001]",
+            activity_feed=feed,
+        )
+
+        assert messages == [
+            "[telegram chat=99 turn=t001] > echo hi",
+            "[telegram chat=99 turn=t001]   ok",
+            "[telegram chat=99 turn=t001]   ... (1 more lines)",
+        ]
+        assert capsys.readouterr().err == ""
+
     def test_run_trims_history_at_turn_start(self, monkeypatch):
         responses = [
             LLMResponse(
