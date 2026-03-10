@@ -195,3 +195,35 @@ def test_synthesize_speech_wav_retries_transient_internal_errors(monkeypatch):
     assert wav_bytes[:4] == b"RIFF"
     assert client.models.calls == 2
     assert sleeps
+
+
+def test_synthesize_speech_wav_removes_urls_before_synthesis():
+    from archon.audio import tts
+
+    pcm = b"\x00\x00\x01\x00" * 10
+    response = pytypes.SimpleNamespace(
+        candidates=[
+            pytypes.SimpleNamespace(
+                content=pytypes.SimpleNamespace(
+                    parts=[
+                        pytypes.SimpleNamespace(
+                            inline_data=pytypes.SimpleNamespace(
+                                data=pcm,
+                                mime_type="audio/pcm;rate=24000",
+                            )
+                        )
+                    ]
+                )
+            )
+        ]
+    )
+    client = _FakeClient(response)
+
+    tts.synthesize_speech_wav(
+        "Read this https://example.com and also http://openai.com/docs right now.",
+        api_key="key",
+        client=client,
+        types_module=_FakeTypesModule,
+    )
+
+    assert client.models.calls[0]["contents"] == "Read this and also right now."

@@ -19,6 +19,7 @@ DEFAULT_GEMINI_TTS_VOICE = "Kore"
 DEFAULT_PCM_SAMPLE_RATE = 24000
 DEFAULT_TTS_RETRY_ATTEMPTS = 3
 DEFAULT_TTS_RETRY_DELAY_SEC = 0.75
+_URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
 
 
 def synthesize_speech_wav(
@@ -33,7 +34,7 @@ def synthesize_speech_wav(
     retry_delay_sec: float = DEFAULT_TTS_RETRY_DELAY_SEC,
 ) -> tuple[bytes, str]:
     """Synthesize speech with Gemini and return WAV bytes + mime type."""
-    prompt = str(text or "").strip()
+    prompt = normalize_tts_text(text)
     if not prompt:
         raise ValueError("Text is required for speech synthesis")
 
@@ -141,6 +142,16 @@ def _resolve_google_api_key(explicit_api_key: str | None) -> str:
         return key
 
     raise ValueError("Missing Google API key for speech synthesis (set GEMINI_API_KEY or [llm].api_key).")
+
+
+def normalize_tts_text(text: str) -> str:
+    """Normalize reply text for speech while preserving natural punctuation."""
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    no_urls = _URL_RE.sub("", raw)
+    # Keep sentence punctuation for prosody, just collapse whitespace left by removals.
+    return " ".join(no_urls.split()).strip()
 
 
 def _extract_inline_audio(response: Any) -> tuple[bytes, str]:
