@@ -164,7 +164,7 @@ class TestDelegateCodeTask:
 
         monkeypatch.setattr(
             "archon.tooling.worker_tools.record_worker_run",
-            lambda task, result, requested_worker: WorkerSessionRecord(
+            lambda task, result, requested_worker, hook_bus=None: WorkerSessionRecord(
                 session_id="sess-123",
                 created_at="2026-02-24T00:00:00Z",
                 updated_at="2026-02-24T00:00:00Z",
@@ -252,7 +252,7 @@ class TestDelegateCodeTask:
 
         monkeypatch.setattr(
             "archon.tooling.worker_tools.start_background_worker",
-            lambda task, requested_worker: ActiveWorkerRun(
+            lambda task, requested_worker, hook_bus=None: ActiveWorkerRun(
                 session_id="sess-deep",
                 requested_worker=requested_worker,
                 state="starting",
@@ -316,7 +316,7 @@ class TestDelegateCodeTask:
         monkeypatch.setattr("archon.tooling.worker_tools.run_worker_task", fake_run)
         monkeypatch.setattr(
             "archon.tooling.worker_tools.record_worker_run",
-            lambda task, result, requested_worker: WorkerSessionRecord(
+            lambda task, result, requested_worker, hook_bus=None: WorkerSessionRecord(
                 session_id="sess-oneshot",
                 created_at="2026-02-24T00:00:00Z",
                 updated_at="2026-02-24T00:00:10Z",
@@ -498,7 +498,7 @@ class TestDelegateCodeTask:
         monkeypatch.setattr("archon.tooling.worker_tools.load_worker_task", lambda sid: base_task if sid == "sess-sticky" else None)
         monkeypatch.setattr("archon.tooling.worker_tools.list_worker_approvals", lambda sid, pending_only=True: [])
 
-        def fake_start_background(task, requested_worker):
+        def fake_start_background(task, requested_worker, hook_bus=None):
             captured["task"] = task
             return ActiveWorkerRun(
                 session_id="sess-sticky",
@@ -537,7 +537,7 @@ class TestDelegateCodeTask:
 
         monkeypatch.setattr(
             "archon.tooling.worker_tools.start_background_worker",
-            lambda task, requested_worker: ActiveWorkerRun(
+            lambda task, requested_worker, hook_bus=None: ActiveWorkerRun(
                 session_id="sess-new",
                 requested_worker=requested_worker,
                 state="starting",
@@ -1146,7 +1146,7 @@ class TestDelegateCodeTask:
 
         monkeypatch.setattr(
             "archon.tooling.worker_tools.start_background_worker",
-            lambda task, requested_worker: ActiveWorkerRun(
+            lambda task, requested_worker, hook_bus=None: ActiveWorkerRun(
                 session_id="sess-bg",
                 requested_worker=requested_worker,
                 state="starting",
