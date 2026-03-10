@@ -8,6 +8,7 @@ from archon.config import Config, MCPServerConfig, ProfileConfig
 from archon.slash_palette import (
     build_palette_items,
     filter_palette_items,
+    read_interactive_input,
     run_live_slash_palette,
 )
 
@@ -72,6 +73,9 @@ class _FakeInputStream:
     def fileno(self):
         return 0
 
+    def isatty(self):
+        return True
+
 
 def test_run_live_slash_palette_drills_into_top_level_command_before_executing(monkeypatch):
     items = build_palette_items(
@@ -133,3 +137,74 @@ def test_run_live_slash_palette_drills_from_root_selection_into_subcommands(monk
     )
 
     assert result == "/permissions status"
+
+
+class _FakeReadline:
+    def __init__(self):
+        self._startup_hook = None
+        self.inserted = []
+
+    def set_startup_hook(self, hook):
+        self._startup_hook = hook
+
+    def insert_text(self, text):
+        self.inserted.append(text)
+
+    def redisplay(self):
+        return None
+
+
+def test_read_interactive_input_tracks_and_clears_transient_first_character(monkeypatch):
+    events = []
+    readline = _FakeReadline()
+
+    monkeypatch.setattr("archon.slash_palette.termios.tcgetattr", lambda _fd: [0])
+    monkeypatch.setattr("archon.slash_palette.termios.tcsetattr", lambda *_args: None)
+    monkeypatch.setattr("archon.slash_palette.tty.setraw", lambda _fd: None)
+    monkeypatch.setattr("archon.slash_palette.os.read", lambda _fd, _n: b"h")
+
+    def _fallback_read(_prompt):
+        assert callable(readline._startup_hook)
+        readline._startup_hook()
+        return "hello"
+
+    result, used_palette = read_interactive_input(
+        prompt="you> ",
+        fallback_read_fn=_fallback_read,
+        readline_module=readline,
+        slash_commands=build_slash_commands(),
+        slash_subvalues=build_slash_subvalues(MODEL_CATALOG, _config()),
+        input_stream=_FakeInputStream(),
+        output_stream=io.StringIO(),
+        set_visible_input_fn=events.append,
+    )
+
+    assert (result, used_palette) == ("hello", False)
+    assert events == ["h", None]
+
+
+def test_run_live_slash_palette_clears_visible_query_when_backspacing_from_root(monkeypatch):
+    items = build_palette_items(
+        build_slash_commands(),
+        build_slash_subvalues(MODEL_CATALOG, _config()),
+    )
+    reads = iter([b"\x7f"])
+    visible_queries = []
+
+    monkeypatch.setattr("archon.slash_palette.termios.tcgetattr", lambda _fd: [0])
+    monkeypatch.setattr("archon.slash_palette.termios.tcsetattr", lambda *_args: None)
+    monkeypatch.setattr("archon.slash_palette.tty.setraw", lambda _fd: None)
+    monkeypatch.setattr("archon.slash_palette.os.get_terminal_size", lambda _fd: os.terminal_size((120, 40)))
+    monkeypatch.setattr("archon.slash_palette.os.read", lambda _fd, _n: next(reads))
+
+    result = run_live_slash_palette(
+        prompt="you> ",
+        items=items,
+        input_stream=_FakeInputStream(),
+        output_stream=io.StringIO(),
+        initial_query="/",
+        set_visible_input_fn=visible_queries.append,
+    )
+
+    assert result == ""
+    assert visible_queries == ["/", None]

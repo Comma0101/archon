@@ -90,6 +90,7 @@ def read_interactive_input(
     slash_subvalues: dict[str, list[tuple[str, str]]],
     input_stream=None,
     output_stream=None,
+    set_visible_input_fn=None,
 ) -> tuple[str, bool]:
     """Read one interactive line, entering live slash mode on an initial `/`."""
     input_stream = input_stream or sys.stdin
@@ -100,7 +101,9 @@ def read_interactive_input(
         fd = input_stream.fileno()
     except (AttributeError, OSError, ValueError):
         return fallback_read_fn(prompt), False
-    if not os.isatty(fd):
+    is_tty_fn = getattr(input_stream, "isatty", None)
+    is_tty = bool(is_tty_fn()) if callable(is_tty_fn) else os.isatty(fd)
+    if not is_tty:
         return fallback_read_fn(prompt), False
 
     output_stream.write(prompt_text)
@@ -131,6 +134,7 @@ def read_interactive_input(
                 output_stream=output_stream,
                 initial_query="/",
                 prompt_rendered=True,
+                set_visible_input_fn=set_visible_input_fn,
             ),
             True,
         )
@@ -140,11 +144,15 @@ def read_interactive_input(
     hook_clear = getattr(readline_module, "set_startup_hook", None)
     insert_text = getattr(readline_module, "insert_text", None)
     redisplay = getattr(readline_module, "redisplay", None)
+    if callable(set_visible_input_fn):
+        set_visible_input_fn(first_text)
     if callable(hook_set) and callable(insert_text):
         def _startup_hook() -> None:
             insert_text(first_text)
             if callable(redisplay):
                 redisplay()
+            if callable(set_visible_input_fn):
+                set_visible_input_fn(None)
             try:
                 if callable(hook_clear):
                     hook_clear(None)
@@ -154,7 +162,11 @@ def read_interactive_input(
         hook_set(_startup_hook)
         return fallback_read_fn(""), False
 
-    return first_text + fallback_read_fn(""), False
+    try:
+        return first_text + fallback_read_fn(""), False
+    finally:
+        if callable(set_visible_input_fn):
+            set_visible_input_fn(None)
 
 
 def run_live_slash_palette(
@@ -165,6 +177,7 @@ def run_live_slash_palette(
     output_stream=None,
     initial_query: str = "/",
     prompt_rendered: bool = False,
+    set_visible_input_fn=None,
 ) -> str:
     """Run the slash palette until a command or raw slash text is returned."""
     input_stream = input_stream or sys.stdin
@@ -174,6 +187,15 @@ def run_live_slash_palette(
     selected = 0
     rendered_lines = 0
     old = termios.tcgetattr(fd)
+    visible_value: str | None = None
+
+    def _publish_visible(value: str | None) -> None:
+        nonlocal visible_value
+        if visible_value == value:
+            return
+        visible_value = value
+        if callable(set_visible_input_fn):
+            set_visible_input_fn(value)
 
     def _clamp_selected(matches: list[tuple[str, str]]) -> None:
         nonlocal selected
@@ -251,6 +273,7 @@ def run_live_slash_palette(
         if not prompt_rendered:
             output_stream.write(prompt)
             output_stream.flush()
+        _publish_visible(query)
         matches = _render()
         while True:
             ch = os.read(fd, 1)
@@ -258,23 +281,29 @@ def run_live_slash_palette(
                 chosen = matches[selected][0] if matches else query
                 if _selection_has_children(chosen) and " " not in str(query or "").strip():
                     query = f"{chosen} "
+                    _publish_visible(query)
                     selected = 0
                     matches = _render()
                     _clamp_selected(matches)
                     continue
                 _clear()
+                _publish_visible(None)
                 return chosen
             if ch in (b"\x03",):
                 _clear()
+                _publish_visible(None)
                 raise KeyboardInterrupt
             if ch in (b"\x04",):
                 _clear()
+                _publish_visible(None)
                 raise EOFError
             if ch in (b"\x7f", b"\b"):
                 query = query[:-1]
                 if not query:
                     _clear()
+                    _publish_visible(None)
                     return ""
+                _publish_visible(query)
                 matches = _render()
                 _clamp_selected(matches)
                 continue
@@ -294,6 +323,7 @@ def run_live_slash_palette(
                             matches = _render()
                             continue
                 _clear()
+                _publish_visible(None)
                 return query
             try:
                 decoded = ch.decode("utf-8", errors="ignore")
@@ -301,10 +331,12 @@ def run_live_slash_palette(
                 decoded = ""
             if decoded and decoded.isprintable():
                 query += decoded
+                _publish_visible(query)
                 matches = _render()
                 _clamp_selected(matches)
                 continue
     finally:
+        _publish_visible(None)
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 

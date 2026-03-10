@@ -70,17 +70,24 @@ def chat_cmd(
     telegram_adapter = None
     session_id = new_session_id_fn()
     prompt_state = {"value": ""}
+    visible_input_state = {"value": None}
 
     def current_prompt() -> str:
         return str(prompt_state.get("value") or "")
 
     def current_input() -> str:
+        visible = visible_input_state.get("value")
+        if visible is not None:
+            return str(visible)
         if not hasattr(readline_module, "get_line_buffer"):
             return ""
         try:
             return str(readline_module.get_line_buffer() or "")
         except Exception:
             return ""
+
+    def set_visible_input(value: str | None) -> None:
+        visible_input_state["value"] = None if value is None else str(value)
 
     terminal_activity_feed = (
         make_terminal_activity_feed_fn(current_prompt, current_input)
@@ -257,18 +264,27 @@ def chat_cmd(
             return input_fn(prompt)
         finally:
             prompt_state["value"] = ""
+            set_visible_input(None)
 
     def read_interactive_input(prompt: str) -> tuple[str, bool]:
         prompt_state["value"] = prompt or ""
         try:
             if callable(read_interactive_input_fn):
-                return read_interactive_input_fn(
-                    prompt=prompt,
-                    fallback_read_fn=input_fn,
-                )
+                try:
+                    return read_interactive_input_fn(
+                        prompt=prompt,
+                        fallback_read_fn=input_fn,
+                        set_visible_input_fn=set_visible_input,
+                    )
+                except TypeError:
+                    return read_interactive_input_fn(
+                        prompt=prompt,
+                        fallback_read_fn=input_fn,
+                    )
             return input_fn(prompt), False
         finally:
             prompt_state["value"] = ""
+            set_visible_input(None)
 
     def pick_slash_command(query: str | None = None) -> str | None:
         if query is None:

@@ -1948,6 +1948,88 @@ class TestCliCommands:
 
         assert captured == {"prompt": "you> ", "input": "partial input"}
 
+    def test_chat_cmd_uses_transient_visible_input_for_terminal_feed(self):
+        class _Agent:
+            def __init__(self):
+                self.hooks = HookBus()
+                self.config = Config()
+                self.config.llm.model = "test-model"
+                self.total_input_tokens = 0
+                self.total_output_tokens = 0
+                self.log_label = ""
+                self.policy_profile = "default"
+                self.on_thinking = None
+                self.on_tool_call = None
+                self.terminal_activity_feed = None
+
+            def run(self, _text):
+                raise AssertionError("agent.run should not be called for this test")
+
+            def reset(self):
+                return None
+
+        class _FeedReadline(_FakeReadline):
+            def get_line_buffer(self):
+                return ""
+
+        agent = _Agent()
+        captured = {}
+        session_ids = iter(["sess-1"])
+
+        class _RecordingFeed:
+            def __init__(self, prompt_fn, input_fn):
+                self._prompt_fn = prompt_fn
+                self._input_fn = input_fn
+
+            def emit(self, _event):
+                captured["prompt"] = self._prompt_fn()
+                captured["input"] = self._input_fn()
+
+        def _make_feed(prompt_fn, input_fn):
+            return _RecordingFeed(prompt_fn, input_fn)
+
+        def _fake_read_interactive_input(*, prompt, fallback_read_fn, set_visible_input_fn=None):
+            assert prompt == "you> "
+            assert callable(set_visible_input_fn)
+            set_visible_input_fn("h")
+            agent.terminal_activity_feed.emit(
+                ActivityEvent(source="telegram", message="message received")
+            )
+            set_visible_input_fn(None)
+            return "quit", False
+
+        _chat_cmd(
+            make_agent_fn=lambda: agent,
+            make_telegram_adapter_fn=lambda _cfg: None,
+            new_session_id_fn=lambda: next(session_ids),
+            save_exchange_fn=lambda *_args: None,
+            slash_completer_fn=lambda *_args: None,
+            pick_slash_command_fn=lambda: None,
+            is_bracketed_paste_start_fn=lambda _text: False,
+            collect_bracketed_paste_fn=lambda *_args, **_kwargs: "",
+            is_paste_command_fn=lambda _text: False,
+            collect_paste_message_fn=lambda *_args, **_kwargs: "",
+            handle_repl_command_fn=_handle_repl_command,
+            is_model_runtime_error_fn=lambda _err: False,
+            format_session_summary_fn=_format_session_summary,
+            format_chat_response_fn=lambda text: text,
+            format_turn_stats_fn=_format_turn_stats,
+            make_readline_prompt_fn=lambda label, _ansi: f"{label} ",
+            spinner_cls=_FakeSpinner,
+            ansi_prompt_user="",
+            ansi_error="",
+            ansi_reset="",
+            click_echo_fn=lambda *_args, **_kwargs: None,
+            input_fn=lambda _prompt: "quit",
+            readline_module=_FeedReadline(),
+            time_time_fn=lambda: 0.0,
+            version="test",
+            make_terminal_activity_feed_fn=_make_feed,
+            read_interactive_input_fn=_fake_read_interactive_input,
+        )
+
+        assert captured == {"prompt": "you> ", "input": "h"}
+
     def test_chat_cmd_registers_terminal_feed_with_telegram_adapter(self):
         class _Agent:
             def __init__(self):
