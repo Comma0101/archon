@@ -445,7 +445,6 @@ def test_load_research_job_emits_progress_event_on_nonterminal_refresh(tmp_path,
     events = []
     hook_bus = HookBus()
     hook_bus.register("ux.job_progress", lambda event: events.append(event))
-    monkeypatch.setattr(research_store._emit_job_progress_event, "_hook_bus", hook_bus, raising=False)
 
     class _RefreshClient:
         def get_research(self, interaction_id: str):
@@ -455,7 +454,7 @@ def test_load_research_job_emits_progress_event_on_nonterminal_refresh(tmp_path,
                 output_text="",
             )
 
-    record = load_research_job("abc", refresh_client=_RefreshClient())
+    record = load_research_job("abc", refresh_client=_RefreshClient(), hook_bus=hook_bus)
 
     assert record is not None
     assert events
@@ -463,6 +462,22 @@ def test_load_research_job_emits_progress_event_on_nonterminal_refresh(tmp_path,
     rendered = payload["event"].render_text()
     assert "research:abc" in rendered
     assert "in progress" in rendered.lower()
+
+
+def test_agent_init_does_not_mutate_global_research_hook_bus(monkeypatch):
+    monkeypatch.delattr(research_store._emit_job_progress_event, "_hook_bus", raising=False)
+    monkeypatch.delattr(research_store._emit_job_completed_event, "_hook_bus", raising=False)
+
+    from archon.agent import Agent
+    from archon.config import Config
+    from archon.tools import ToolRegistry
+
+    llm = SimpleNamespace()
+    Agent(llm, ToolRegistry(archon_source_dir=None), Config())
+    Agent(llm, ToolRegistry(archon_source_dir=None), Config())
+
+    assert not hasattr(research_store._emit_job_progress_event, "_hook_bus")
+    assert not hasattr(research_store._emit_job_completed_event, "_hook_bus")
 
 
 def test_load_research_job_times_out_overdue_nonterminal_job_and_attempts_remote_cancel(tmp_path, monkeypatch):

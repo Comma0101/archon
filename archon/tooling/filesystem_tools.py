@@ -1,12 +1,22 @@
 """Filesystem/basic local tool registrations."""
 
-import os
 import subprocess
 from pathlib import Path
 
 from archon.safety import Level, classify
 
 from .common import auto_commit, truncate_text
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        return path.is_relative_to(root)
+    except AttributeError:
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            return False
 
 
 def _should_confirm_write(registry) -> bool:
@@ -74,15 +84,16 @@ def register_filesystem_tools(registry) -> None:
     # 3. write_file
     def write_file(path: str, content: str) -> str:
         p = Path(path).expanduser().resolve()
-        home = Path.home()
+        home = Path.home().resolve()
+        source_root = Path(registry.archon_source_dir).resolve() if registry.archon_source_dir else None
         if _should_confirm_write(registry):
-            if not str(p).startswith(str(home)):
+            if not _is_relative_to(p, home):
                 if not registry.confirmer(f"Write to {p} (outside $HOME)", Level.DANGEROUS):
                     return "Write rejected by safety gate."
             else:
                 if not registry.confirmer(f"Write file: {p}", Level.DANGEROUS):
                     return "Write rejected by safety gate."
-        if registry.archon_source_dir and str(p).startswith(registry.archon_source_dir):
+        if source_root and _is_relative_to(p, source_root):
             if not registry.confirmer(f"Write to own source: {p}", Level.DANGEROUS):
                 return "Self-modification rejected."
             auto_commit(registry.archon_source_dir)
@@ -103,17 +114,18 @@ def register_filesystem_tools(registry) -> None:
         p = Path(path).expanduser().resolve()
         if not p.exists():
             return f"Error: File not found: {p}"
-        home = Path.home()
+        home = Path.home().resolve()
+        source_root = Path(registry.archon_source_dir).resolve() if registry.archon_source_dir else None
         if _should_confirm_write(registry):
-            if not str(p).startswith(str(home)):
+            if not _is_relative_to(p, home):
                 if not registry.confirmer(f"Edit {p} (outside $HOME)", Level.DANGEROUS):
                     return "Edit rejected by safety gate."
             else:
                 if not registry.confirmer(f"Edit file: {p}", Level.DANGEROUS):
                     return "Edit rejected by safety gate."
-        if registry.archon_source_dir and str(p).startswith(registry.archon_source_dir):
-            safety_path = os.path.join(registry.archon_source_dir, "safety.py")
-            if str(p) == safety_path:
+        if source_root and _is_relative_to(p, source_root):
+            safety_path = source_root / "safety.py"
+            if p == safety_path:
                 return "FORBIDDEN: Cannot modify safety.py through the agent."
             if not registry.confirmer(f"Edit own source: {p}", Level.DANGEROUS):
                 return "Self-modification rejected."

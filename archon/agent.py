@@ -104,8 +104,6 @@ class Agent:
         self._pending_compactions: list[dict] = []
         self.tools.hook_bus = self.hooks
         self.tools.set_execute_event_handler(self._on_tool_execute_event)
-        setattr(research_store._emit_job_completed_event, "_hook_bus", self.hooks)
-        setattr(research_store._emit_job_progress_event, "_hook_bus", self.hooks)
 
     @property
     def system_prompt(self) -> str:

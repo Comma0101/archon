@@ -679,16 +679,6 @@ def _monitor_research_job_loop(
                 _RESEARCH_MONITORS.pop(interaction_id, None)
 
 
-def _resolve_hook_bus(explicit_hook_bus=None, *, fallback_fn=None):
-    if explicit_hook_bus is not None:
-        return explicit_hook_bus
-    if fallback_fn is not None:
-        resolved = getattr(fallback_fn, "_hook_bus", None)
-        if resolved is not None:
-            return resolved
-    return getattr(_emit_job_completed_event, "_hook_bus", None)
-
-
 def _emit_job_progress_event(
     *,
     job_kind: str,
@@ -704,9 +694,8 @@ def _emit_job_progress_event(
         from archon.control.contracts import HookEvent
 
         event = _make_event(job_kind=job_kind, job_id=job_id, status=status, summary=summary)
-        resolved = _resolve_hook_bus(hook_bus, fallback_fn=_emit_job_progress_event)
-        if isinstance(resolved, HookBus):
-            resolved.emit(HookEvent(kind="ux.job_progress", payload={"event": event}))
+        if isinstance(hook_bus, HookBus):
+            hook_bus.emit(HookEvent(kind="ux.job_progress", payload={"event": event}))
     except Exception:
         pass
 
@@ -726,8 +715,7 @@ def _emit_job_completed_event(
         from archon.control.contracts import HookEvent
 
         event = _make_event(job_kind=job_kind, job_id=job_id, status=status, summary=summary)
-        resolved = _resolve_hook_bus(hook_bus, fallback_fn=_emit_job_completed_event)
-        if isinstance(resolved, HookBus):
-            resolved.emit(HookEvent(kind="ux.job_completed", payload={"event": event}))
+        if isinstance(hook_bus, HookBus):
+            hook_bus.emit(HookEvent(kind="ux.job_completed", payload={"event": event}))
     except Exception:
         pass
