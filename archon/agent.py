@@ -104,6 +104,10 @@ class Agent:
         self._pending_compactions: list[dict] = []
         self.tools.hook_bus = self.hooks
         self.tools.set_execute_event_handler(self._on_tool_execute_event)
+        try:
+            research_store.ensure_research_recovery_started(cfg=self.config, hook_bus=self.hooks)
+        except Exception:
+            pass
 
     @property
     def system_prompt(self) -> str:

@@ -9,6 +9,7 @@ from archon.research.models import ResearchJobRecord
 from archon.research.store import (
     consume_research_stream,
     start_research_stream_job,
+    ensure_research_recovery_started,
     save_research_job,
     cancel_research_job,
     load_research_job,
@@ -377,3 +378,108 @@ def test_start_research_stream_job_resumes_after_nonterminal_stream_end(tmp_path
     assert reloaded is not None
     assert reloaded.status == "completed"
     assert reloaded.output_text == "Final answer"
+
+
+def test_ensure_research_recovery_started_resumes_nonterminal_stream_job(tmp_path, monkeypatch):
+    monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path)
+    monkeypatch.setattr("archon.research.store._RESEARCH_MONITORS", {})
+    monkeypatch.setattr("archon.research.store._RESEARCH_RECOVERY_STARTED", False, raising=False)
+
+    save_research_job(
+        ResearchJobRecord(
+            interaction_id="resume-123",
+            status="in_progress",
+            prompt="test query",
+            agent="deep-research-pro-preview-12-2025",
+            created_at="2099-01-01T00:00:00Z",
+            updated_at="2099-01-01T00:00:00Z",
+            summary="Research in progress",
+            output_text="",
+            error="",
+            provider_status="in_progress",
+            last_event_at="2099-01-01T00:00:00Z",
+            last_event_id="evt-1",
+            stream_status="interaction.status_update",
+            poll_count=1,
+            timeout_minutes=60,
+        )
+    )
+
+    class _Event:
+        def __init__(self, event_type: str, **fields):
+            self.event_type = event_type
+            for key, value in fields.items():
+                setattr(self, key, value)
+
+    class _Stream:
+        def __init__(self, interaction_id: str):
+            self.interaction_id = interaction_id
+            self.status = "in_progress"
+            self.events = iter(
+                [
+                    _Event(
+                        "interaction.complete",
+                        status="completed",
+                        text="Recovered final answer",
+                        event_id="evt-2",
+                    )
+                ]
+            )
+
+    class _Client:
+        def __init__(self):
+            self.resume_calls = []
+
+        def resume_research_stream(self, interaction_id: str, *, last_event_id: str):
+            self.resume_calls.append((interaction_id, last_event_id))
+            return _Stream(interaction_id)
+
+    client = _Client()
+    started = ensure_research_recovery_started(cfg=Config(), hook_bus=None, client=client)
+
+    assert started is True
+    reloaded = None
+    for _ in range(20):
+        reloaded = load_research_job("resume-123")
+        if reloaded is not None and reloaded.status == "completed":
+            break
+        time.sleep(0.01)
+
+    assert client.resume_calls == [("resume-123", "evt-1")]
+    assert reloaded is not None
+    assert reloaded.status == "completed"
+    assert reloaded.output_text == "Recovered final answer"
+
+
+def test_ensure_research_recovery_started_marks_missing_last_event_id_as_error(tmp_path, monkeypatch):
+    monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path)
+    monkeypatch.setattr("archon.research.store._RESEARCH_MONITORS", {})
+    monkeypatch.setattr("archon.research.store._RESEARCH_RECOVERY_STARTED", False, raising=False)
+
+    save_research_job(
+        ResearchJobRecord(
+            interaction_id="resume-456",
+            status="in_progress",
+            prompt="test query",
+            agent="deep-research-pro-preview-12-2025",
+            created_at="2099-01-01T00:00:00Z",
+            updated_at="2099-01-01T00:00:00Z",
+            summary="Research in progress",
+            output_text="",
+            error="",
+            provider_status="in_progress",
+            last_event_at="2099-01-01T00:00:00Z",
+            stream_status="interaction.status_update",
+            poll_count=1,
+            timeout_minutes=60,
+        )
+    )
+
+    started = ensure_research_recovery_started(cfg=Config(), hook_bus=None, client=object())
+
+    assert started is True
+    reloaded = load_research_job("resume-456")
+    assert reloaded is not None
+    assert reloaded.status == "error"
+    assert reloaded.summary == "Research recovery unavailable"
+    assert "Missing last_event_id" in reloaded.error

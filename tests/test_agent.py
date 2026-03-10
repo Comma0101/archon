@@ -10,6 +10,7 @@ import pytest
 import archon.agent as agent_module
 import archon.control.orchestrator as orchestrator_module
 import archon.prompt as prompt_module
+from archon.research import store as research_store
 from archon.agent import (
     Agent,
     _chat_stream_collect_with_retry,
@@ -117,6 +118,23 @@ def capture_non_stream_trace(agent: Agent, user_message: str, policy_profile: st
         "input_tokens": agent.total_input_tokens,
         "output_tokens": agent.total_output_tokens,
     }
+
+
+def test_agent_bootstraps_deep_research_recovery_once(monkeypatch):
+    monkeypatch.setattr(research_store, "_RESEARCH_RECOVERY_STARTED", False, raising=False)
+    calls = []
+    monkeypatch.setattr(research_store, "_make_research_refresh_client", lambda cfg=None: object())
+    monkeypatch.setattr(
+        research_store,
+        "recover_incomplete_research_jobs",
+        lambda *, client, hook_bus=None: calls.append((client, hook_bus)) or 0,
+    )
+
+    llm = MagicMock()
+    Agent(llm, ToolRegistry(archon_source_dir=None), Config())
+    Agent(llm, ToolRegistry(archon_source_dir=None), Config())
+
+    assert len(calls) == 1
 
 
 def capture_non_stream_executor_trace(
