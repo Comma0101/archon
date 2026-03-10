@@ -19,7 +19,11 @@ DEFAULT_GEMINI_TTS_VOICE = "Kore"
 DEFAULT_PCM_SAMPLE_RATE = 24000
 DEFAULT_TTS_RETRY_ATTEMPTS = 3
 DEFAULT_TTS_RETRY_DELAY_SEC = 0.75
+DEFAULT_TTS_MAX_CHARS = 600
 _URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
+_MARKDOWN_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+")
+_MARKDOWN_BULLET_RE = re.compile(r"^\s*(?:[-*•]+|\d+[.)])\s+")
+_MARKDOWN_FENCE_RE = re.compile(r"^\s*```")
 
 
 def synthesize_speech_wav(
@@ -150,8 +154,41 @@ def normalize_tts_text(text: str) -> str:
     if not raw:
         return ""
     no_urls = _URL_RE.sub("", raw)
-    # Keep sentence punctuation for prosody, just collapse whitespace left by removals.
-    return " ".join(no_urls.split()).strip()
+    parts: list[str] = []
+    in_code_block = False
+
+    for line in no_urls.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if _MARKDOWN_FENCE_RE.match(stripped):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+        cleaned = _MARKDOWN_HEADING_RE.sub("", stripped)
+        cleaned = _MARKDOWN_BULLET_RE.sub("", cleaned)
+        cleaned = cleaned.replace("**", "").replace("__", "").replace("`", "").replace("~~", "")
+        cleaned = " ".join(cleaned.split()).strip()
+        if not cleaned:
+            continue
+        if cleaned[-1] not in ".!?":
+            cleaned += "."
+        parts.append(cleaned)
+
+    normalized = " ".join(parts).strip()
+    if not normalized:
+        return ""
+    if len(normalized) <= DEFAULT_TTS_MAX_CHARS:
+        return normalized
+    truncated = normalized[:DEFAULT_TTS_MAX_CHARS].rstrip()
+    cut_points = [truncated.rfind(". "), truncated.rfind("! "), truncated.rfind("? "), truncated.rfind(" ")]
+    cut = max(cut_points)
+    if cut > 0:
+        truncated = truncated[:cut].rstrip(" .!?")
+    else:
+        truncated = truncated.rstrip(" .!?")
+    return truncated + "..."
 
 
 def _extract_inline_audio(response: Any) -> tuple[bytes, str]:

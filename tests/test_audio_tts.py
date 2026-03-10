@@ -227,3 +227,26 @@ def test_synthesize_speech_wav_removes_urls_before_synthesis():
     )
 
     assert client.models.calls[0]["contents"] == "Read this and also right now."
+
+
+def test_normalize_tts_text_flattens_markdown_bullets_into_sentences():
+    from archon.audio import tts
+
+    text = """# Summary
+
+- **First** item
+- Second `code` item
+"""
+
+    assert tts.normalize_tts_text(text) == "Summary. First item. Second code item."
+
+
+def test_normalize_tts_text_truncates_long_output_cleanly():
+    from archon.audio import tts
+
+    text = "Sentence one. " * 200
+
+    normalized = tts.normalize_tts_text(text)
+
+    assert len(normalized) <= tts.DEFAULT_TTS_MAX_CHARS
+    assert normalized.endswith("...")
