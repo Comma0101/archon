@@ -241,12 +241,48 @@ def test_normalize_tts_text_flattens_markdown_bullets_into_sentences():
     assert tts.normalize_tts_text(text) == "Summary. First item. Second code item."
 
 
-def test_normalize_tts_text_truncates_long_output_cleanly():
+def test_split_tts_segments_preserves_long_output_without_truncation():
     from archon.audio import tts
 
     text = "Sentence one. " * 200
 
+    segments = tts.split_tts_segments(text, max_chars=120)
     normalized = tts.normalize_tts_text(text)
 
-    assert len(normalized) <= tts.DEFAULT_TTS_MAX_CHARS
-    assert normalized.endswith("...")
+    assert len(segments) > 1
+    assert all(len(segment) <= 120 for segment in segments)
+    assert " ".join(segments) == normalized
+
+
+def test_synthesize_speech_wav_stitches_multiple_segments(monkeypatch):
+    from archon.audio import tts
+
+    pcm = b"\x00\x00\x01\x00" * 10
+    response = pytypes.SimpleNamespace(
+        candidates=[
+            pytypes.SimpleNamespace(
+                content=pytypes.SimpleNamespace(
+                    parts=[
+                        pytypes.SimpleNamespace(
+                            inline_data=pytypes.SimpleNamespace(
+                                data=pcm,
+                                mime_type="audio/pcm;rate=24000",
+                            )
+                        )
+                    ]
+                )
+            )
+        ]
+    )
+    client = _FakeClient(response)
+
+    wav_bytes, mime_type = tts.synthesize_speech_wav(
+        "Sentence one. " * 200,
+        api_key="key",
+        client=client,
+        types_module=_FakeTypesModule,
+    )
+
+    assert mime_type == "audio/wav"
+    assert wav_bytes[:4] == b"RIFF"
+    assert len(client.models.calls) > 1

@@ -19,11 +19,13 @@ DEFAULT_GEMINI_TTS_VOICE = "Kore"
 DEFAULT_PCM_SAMPLE_RATE = 24000
 DEFAULT_TTS_RETRY_ATTEMPTS = 3
 DEFAULT_TTS_RETRY_DELAY_SEC = 0.75
-DEFAULT_TTS_MAX_CHARS = 600
+DEFAULT_TTS_SEGMENT_MAX_CHARS = 2000
+DEFAULT_TTS_MAX_CHARS = DEFAULT_TTS_SEGMENT_MAX_CHARS
 _URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
 _MARKDOWN_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+")
 _MARKDOWN_BULLET_RE = re.compile(r"^\s*(?:[-*•]+|\d+[.)])\s+")
 _MARKDOWN_FENCE_RE = re.compile(r"^\s*```")
+_SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+")
 
 
 def synthesize_speech_wav(
@@ -38,8 +40,8 @@ def synthesize_speech_wav(
     retry_delay_sec: float = DEFAULT_TTS_RETRY_DELAY_SEC,
 ) -> tuple[bytes, str]:
     """Synthesize speech with Gemini and return WAV bytes + mime type."""
-    prompt = normalize_tts_text(text)
-    if not prompt:
+    prompts = split_tts_segments(text)
+    if not prompts:
         raise ValueError("Text is required for speech synthesis")
 
     key = _resolve_google_api_key(api_key)
@@ -60,33 +62,20 @@ def synthesize_speech_wav(
         response_modalities=["AUDIO"],
         speech_config=speech_config,
     )
-    attempts = max(1, int(retry_attempts))
-    last_error: Exception | None = None
-    response = None
-    for attempt in range(1, attempts + 1):
-        try:
-            response = client.models.generate_content(model=model, contents=prompt, config=config)
-            break
-        except Exception as e:
-            last_error = e
-            if attempt >= attempts or not _looks_like_transient_tts_error(e):
-                raise
-            time.sleep(max(0.0, float(retry_delay_sec)) * attempt)
-
-    if response is None and last_error is not None:
-        raise last_error
-
-    audio_bytes, source_mime = _extract_inline_audio(response)
-    if not audio_bytes:
-        raise RuntimeError("Gemini returned no audio payload")
-
-    normalized_mime = str(source_mime or "").lower()
-    if _looks_like_wav(audio_bytes, normalized_mime):
-        return bytes(audio_bytes), "audio/wav"
-
-    sample_rate = _extract_sample_rate(normalized_mime) or DEFAULT_PCM_SAMPLE_RATE
-    wav_bytes = _pcm16_mono_to_wav(bytes(audio_bytes), sample_rate=sample_rate)
-    return wav_bytes, "audio/wav"
+    wav_segments = [
+        _synthesize_wav_segment(
+            prompt,
+            client=client,
+            model=model,
+            config=config,
+            retry_attempts=retry_attempts,
+            retry_delay_sec=retry_delay_sec,
+        )
+        for prompt in prompts
+    ]
+    if len(wav_segments) == 1:
+        return wav_segments[0], "audio/wav"
+    return _concat_wav_segments(wav_segments), "audio/wav"
 
 
 def convert_wav_to_ogg_opus(
@@ -177,18 +166,43 @@ def normalize_tts_text(text: str) -> str:
         parts.append(cleaned)
 
     normalized = " ".join(parts).strip()
+    return normalized
+
+
+def split_tts_segments(text: str, *, max_chars: int = DEFAULT_TTS_SEGMENT_MAX_CHARS) -> list[str]:
+    """Split normalized TTS text into sentence-aware synthesis segments."""
+    normalized = normalize_tts_text(text)
     if not normalized:
-        return ""
-    if len(normalized) <= DEFAULT_TTS_MAX_CHARS:
-        return normalized
-    truncated = normalized[:DEFAULT_TTS_MAX_CHARS].rstrip()
-    cut_points = [truncated.rfind(". "), truncated.rfind("! "), truncated.rfind("? "), truncated.rfind(" ")]
-    cut = max(cut_points)
-    if cut > 0:
-        truncated = truncated[:cut].rstrip(" .!?")
-    else:
-        truncated = truncated.rstrip(" .!?")
-    return truncated + "..."
+        return []
+
+    limit = max(1, int(max_chars))
+    if len(normalized) <= limit:
+        return [normalized]
+
+    segments: list[str] = []
+    current = ""
+    sentences = [part.strip() for part in _SENTENCE_BOUNDARY_RE.split(normalized) if part.strip()]
+
+    for sentence in sentences:
+        if len(sentence) > limit:
+            if current:
+                segments.append(current)
+                current = ""
+            segments.extend(_split_long_tts_sentence(sentence, limit))
+            continue
+
+        candidate = sentence if not current else f"{current} {sentence}"
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+
+        if current:
+            segments.append(current)
+        current = sentence
+
+    if current:
+        segments.append(current)
+    return segments
 
 
 def _extract_inline_audio(response: Any) -> tuple[bytes, str]:
@@ -243,6 +257,95 @@ def _looks_like_transient_tts_error(error: Exception) -> bool:
     if not text:
         return False
     return any(token in text for token in ("500", "503", "internal", "unavailable", "deadline exceeded"))
+
+
+def _synthesize_wav_segment(
+    prompt: str,
+    *,
+    client: Any,
+    model: str,
+    config: Any,
+    retry_attempts: int,
+    retry_delay_sec: float,
+) -> bytes:
+    attempts = max(1, int(retry_attempts))
+    last_error: Exception | None = None
+    response = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = client.models.generate_content(model=model, contents=prompt, config=config)
+            break
+        except Exception as e:
+            last_error = e
+            if attempt >= attempts or not _looks_like_transient_tts_error(e):
+                raise
+            time.sleep(max(0.0, float(retry_delay_sec)) * attempt)
+
+    if response is None and last_error is not None:
+        raise last_error
+
+    audio_bytes, source_mime = _extract_inline_audio(response)
+    if not audio_bytes:
+        raise RuntimeError("Gemini returned no audio payload")
+
+    normalized_mime = str(source_mime or "").lower()
+    if _looks_like_wav(audio_bytes, normalized_mime):
+        return bytes(audio_bytes)
+
+    sample_rate = _extract_sample_rate(normalized_mime) or DEFAULT_PCM_SAMPLE_RATE
+    return _pcm16_mono_to_wav(bytes(audio_bytes), sample_rate=sample_rate)
+
+
+def _concat_wav_segments(wav_segments: list[bytes]) -> bytes:
+    if not wav_segments:
+        raise ValueError("WAV segments are required")
+
+    frames: list[bytes] = []
+    params: tuple[int, int, int] | None = None
+    for segment in wav_segments:
+        with wave.open(io.BytesIO(segment), "rb") as wf:
+            current = (wf.getnchannels(), wf.getsampwidth(), wf.getframerate())
+            if params is None:
+                params = current
+            elif current != params:
+                raise RuntimeError("Incompatible WAV segment parameters from TTS synthesis")
+            frames.append(wf.readframes(wf.getnframes()))
+
+    assert params is not None
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(params[0])
+        wf.setsampwidth(params[1])
+        wf.setframerate(params[2])
+        for chunk in frames:
+            wf.writeframes(chunk)
+    return buf.getvalue()
+
+
+def _split_long_tts_sentence(sentence: str, limit: int) -> list[str]:
+    parts: list[str] = []
+    current = ""
+    for word in sentence.split():
+        if len(word) > limit:
+            if current:
+                parts.append(current)
+                current = ""
+            parts.extend(_split_oversize_tts_token(word, limit))
+            continue
+        candidate = word if not current else f"{current} {word}"
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            parts.append(current)
+        current = word
+    if current:
+        parts.append(current)
+    return parts
+
+
+def _split_oversize_tts_token(token: str, limit: int) -> list[str]:
+    return [token[i : i + limit] for i in range(0, len(token), limit) if token[i : i + limit]]
 
 
 def _pcm16_mono_to_wav(pcm_bytes: bytes, *, sample_rate: int) -> bytes:

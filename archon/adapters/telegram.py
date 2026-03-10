@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 import secrets
 import sys
 import threading
@@ -348,6 +349,11 @@ class TelegramAdapter:
             self._send_text_and_record(chat_id, body, self._build_news_reply(body))
             return
 
+        if self._is_ai_news_request(body):
+            self._send_typing(chat_id)
+            self._send_text_and_record(chat_id, body, self._build_news_reply(body))
+            return
+
         raw = (body or "").strip()
         job_agent = self._get_local_shell_agent(chat_id, body)
         lowered = raw.lower()
@@ -572,6 +578,13 @@ class TelegramAdapter:
             self._send_text(chat_id, "Voice transcription error: empty transcript.")
             return
 
+        if self._is_ai_news_request(transcript):
+            self._send_typing(chat_id)
+            news_reply = self._build_news_reply(f"[{kind}] {transcript}")
+            self._send_text_and_record(chat_id, f"[{kind}] {transcript}", news_reply)
+            self._send_voice_reply_audio(chat_id, news_reply)
+            return
+
         reply_text = self._handle_chat_body(
             chat_id,
             user_id,
@@ -580,6 +593,37 @@ class TelegramAdapter:
         )
         if isinstance(reply_text, str):
             self._send_voice_reply_audio(chat_id, reply_text)
+
+    def _is_ai_news_request(self, body: str) -> bool:
+        if not isinstance(body, str):
+            return False
+        compact = re.sub(r"[^a-z0-9\s'’]", " ", body.lower())
+        compact = compact.replace("’", " ").strip()
+        compact = re.sub(r"\s+", " ", compact)
+        if not compact:
+            return False
+        if compact.startswith("/"):
+            return False
+
+        words = set(compact.split())
+        if any(marker in compact for marker in (
+            "ai news",
+            "artificial intelligence news",
+            "news briefing",
+            "news digest",
+            "ai-news",
+            "ai news briefing",
+            "ai news digest",
+        )):
+            return True
+
+        if "ai" in words and "news" in words:
+            return bool(
+                {"briefing", "digest", "daily", "today", "latest", "update", "send", "brief"}
+                & words
+            )
+
+        return False
 
     def _handle_chat_body(
         self,

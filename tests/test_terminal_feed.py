@@ -31,7 +31,7 @@ def test_terminal_activity_feed_emits_notice_and_restores_prompt_with_input():
     feed.emit(ActivityEvent(source="telegram", message="message received"))
 
     assert buf.render() == (
-        "\r\033[K[telegram] message received\n"
+        "\r\033[K[telegram] message received\r\n"
         "you> use researcher skill"
     )
 
@@ -47,7 +47,7 @@ def test_terminal_activity_feed_handles_empty_prompt_and_input():
 
     feed.emit(ActivityEvent(source="skill", message="auto-activated: researcher"))
 
-    assert buf.render() == "\r\033[K[skill] auto-activated: researcher\n"
+    assert buf.render() == "\r\033[K[skill] auto-activated: researcher\r\n"
 
 
 def test_terminal_activity_feed_redacts_and_sanitizes_event_text():
@@ -66,7 +66,7 @@ def test_terminal_activity_feed_redacts_and_sanitizes_event_text():
         )
     )
 
-    assert buf.render() == "\r\033[K[telegram] OPENAI_API_KEY=[REDACTED] red\n"
+    assert buf.render() == "\r\033[K[telegram] OPENAI_API_KEY=[REDACTED] red\r\n"
 
 
 def test_terminal_activity_feed_strips_readline_prompt_markers_when_restoring():
@@ -81,7 +81,7 @@ def test_terminal_activity_feed_strips_readline_prompt_markers_when_restoring():
     feed.emit(ActivityEvent(source="telegram", message="message received"))
 
     assert buf.render() == (
-        "\r\033[K[telegram] message received\n"
+        "\r\033[K[telegram] message received\r\n"
         "you> draft"
     )
 
@@ -108,6 +108,6 @@ def test_terminal_activity_feed_renders_ux_event_and_restores_prompt():
     )
 
     assert buf.render() == (
-        "\r\033[K[research] research:abc in progress: Research in progress\n"
+        "\r\033[K[research] research:abc in progress: Research in progress\r\n"
         "you> /job research:abc"
     )

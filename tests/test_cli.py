@@ -2103,7 +2103,7 @@ class TestCliCommands:
                 version="test",
             )
 
-        assert "\r\033[K[telegram] received from 99: hello\nyou> draft" in stderr.getvalue()
+        assert "\r\033[K[telegram] received from 99: hello\r\nyou> draft" in stderr.getvalue()
 
     def test_chat_cmd_auto_activates_skill_from_explicit_request(self):
         class _Agent:

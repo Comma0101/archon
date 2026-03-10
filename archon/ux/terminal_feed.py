@@ -38,7 +38,9 @@ class TerminalActivityFeed:
     def emit_text(self, text: str) -> None:
         self._write_fn("\r\033[K")
         self._write_fn(sanitize_terminal_notice_text(text))
-        self._write_fn("\n")
+        # Use CRLF so the prompt redraw always starts in column 0 even when the
+        # terminal does not translate bare LF while readline is active.
+        self._write_fn("\r\n")
         prompt = self.current_prompt
         buffer_text = strip_readline_prompt_markers(self._safe_text(self._input_fn))
         if prompt or buffer_text:

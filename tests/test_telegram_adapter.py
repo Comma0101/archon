@@ -623,6 +623,200 @@ def test_chat_agent_wires_terminal_feed_proxy_from_activity_sink():
         assert saved[0][1] == "/news"
         assert "Digest markdown" in saved[0][2]
 
+    def test_news_request_text_uses_news_backend(self, monkeypatch):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: (_ for _ in ()).throw(RuntimeError("agent should not run")),
+            poll_timeout_sec=1,
+        )
+        sent = []
+        saved = []
+
+        monkeypatch.setattr("archon.adapters.telegram.ensure_dirs", lambda: None)
+        monkeypatch.setattr("archon.adapters.telegram.load_config", lambda: Config())
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260225-070002")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: saved.append((session_id, user_msg, assistant_msg)),
+        )
+        monkeypatch.setattr(adapter, "_send_typing", lambda chat_id: None)
+        monkeypatch.setattr(
+            "archon.adapters.telegram.get_or_build_news_digest",
+            lambda _cfg, force_refresh=False: NewsRunResult(
+                status="preview",
+                reason="cache_hit",
+                digest=NewsDigest(
+                    date_iso="2026-02-24",
+                    markdown="Digest markdown",
+                    used_fallback=False,
+                    item_count=4,
+                    items=[],
+                ),
+            ),
+        )
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+        adapter._handle_message(
+            {
+                "text": "Could you send me today's AI news briefing?",
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        assert sent
+        assert sent[0][0] == 99
+        assert "Digest markdown" in sent[0][1]
+        assert saved
+        assert saved[0][0] == "tg-99-20260225-070002"
+        assert saved[0][1] == "Could you send me today's AI news briefing?"
+        assert "Digest markdown" in saved[0][2]
+
+    def test_news_request_voice_uses_news_backend(self, monkeypatch):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: (_ for _ in ()).throw(RuntimeError("agent should not run")),
+            poll_timeout_sec=1,
+        )
+        sent = []
+        sent_voices = []
+        saved = []
+        events = []
+
+        monkeypatch.setattr("archon.adapters.telegram.ensure_dirs", lambda: None)
+        monkeypatch.setattr("archon.adapters.telegram.load_config", lambda: Config())
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260225-070003")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: saved.append((session_id, user_msg, assistant_msg)),
+        )
+        monkeypatch.setattr(adapter, "_send_typing", lambda chat_id: None)
+        monkeypatch.setattr(adapter._bot, "get_file", lambda file_id, timeout=10: {"file_path": "voice/a.ogg"})
+        monkeypatch.setattr(adapter._bot, "download_file", lambda file_path, timeout=20: b"audio-data")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.transcribe_audio_bytes",
+            lambda data, mime_type: "can you send me today's AI news now",
+        )
+        monkeypatch.setattr(
+            "archon.adapters.telegram.synthesize_speech_wav",
+            lambda text: (b"RIFF....WAVE", "audio/wav"),
+        )
+        monkeypatch.setattr(
+            "archon.adapters.telegram.convert_wav_to_ogg_opus",
+            lambda data: (b"OggS....", "audio/ogg"),
+        )
+        monkeypatch.setattr(
+            adapter._bot,
+            "send_voice_bytes",
+            lambda chat_id, filename, data, **kwargs: sent_voices.append((chat_id, filename, data, kwargs))
+            or {"message_id": 901},
+        )
+        monkeypatch.setattr(
+            "archon.adapters.telegram.get_or_build_news_digest",
+            lambda _cfg, force_refresh=False: NewsRunResult(
+                status="preview",
+                reason="cache_hit",
+                digest=NewsDigest(
+                    date_iso="2026-02-24",
+                    markdown="Digest markdown",
+                    used_fallback=False,
+                    item_count=4,
+                    items=[],
+                ),
+            ),
+        )
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+        adapter.set_activity_sink(lambda event: events.append((event.source, event.message)))
+
+        adapter._handle_message(
+            {
+                "voice": {"file_id": "f1", "mime_type": "audio/ogg"},
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        assert sent
+        assert sent[0][0] == 99
+        assert "Digest markdown" in sent[0][1]
+        assert sent_voices
+        assert sent_voices[0][0] == 99
+        assert any("voice reply sent to 99" in event for _, event in events)
+        assert saved
+        assert saved[0][0] == "tg-99-20260225-070003"
+        assert saved[0][1] == "[voice] can you send me today's AI news now"
+        assert "Digest markdown" in saved[0][2]
+
+    def test_news_request_voice_phrase_from_history_uses_news_backend(self, monkeypatch):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: (_ for _ in ()).throw(RuntimeError("agent should not run")),
+            poll_timeout_sec=1,
+        )
+        sent = []
+        saved = []
+
+        monkeypatch.setattr("archon.adapters.telegram.ensure_dirs", lambda: None)
+        monkeypatch.setattr("archon.adapters.telegram.load_config", lambda: Config())
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260310-155216")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: saved.append((session_id, user_msg, assistant_msg)),
+        )
+        monkeypatch.setattr(adapter, "_send_typing", lambda chat_id: None)
+        monkeypatch.setattr(adapter._bot, "get_file", lambda file_id, timeout=10: {"file_path": "voice/a.ogg"})
+        monkeypatch.setattr(adapter._bot, "download_file", lambda file_path, timeout=20: b"audio-data")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.transcribe_audio_bytes",
+            lambda data, mime_type: "Simula AI news today",
+        )
+        monkeypatch.setattr(
+            "archon.adapters.telegram.synthesize_speech_wav",
+            lambda text: (b"RIFF....WAVE", "audio/wav"),
+        )
+        monkeypatch.setattr(
+            "archon.adapters.telegram.convert_wav_to_ogg_opus",
+            lambda data: (b"OggS....", "audio/ogg"),
+        )
+        monkeypatch.setattr(
+            adapter._bot,
+            "send_voice_bytes",
+            lambda chat_id, filename, data, **kwargs: {"message_id": 902},
+        )
+        monkeypatch.setattr(
+            "archon.adapters.telegram.get_or_build_news_digest",
+            lambda _cfg, force_refresh=False: NewsRunResult(
+                status="preview",
+                reason="cache_hit",
+                digest=NewsDigest(
+                    date_iso="2026-03-10",
+                    markdown="Digest markdown",
+                    used_fallback=False,
+                    item_count=4,
+                    items=[],
+                ),
+            ),
+        )
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+        adapter._handle_message(
+            {
+                "voice": {"file_id": "f1", "mime_type": "audio/ogg"},
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        assert sent
+        assert "Digest markdown" in sent[0][1]
+        assert saved
+        assert saved[0][0] == "tg-99-20260310-155216"
+        assert saved[0][1] == "[voice] Simula AI news today"
+        assert "Digest markdown" in saved[0][2]
+
     def test_news_status_command_reports_cache_hit(self, monkeypatch):
         adapter = _adapter()
         sent = []
