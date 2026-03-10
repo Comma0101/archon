@@ -24,15 +24,15 @@ def make_registry_allow_all():
     )
 
 class TestRegistry:
-    def test_schemas_has_34_tools(self):
+    def test_schemas_has_35_tools(self):
         reg = make_registry()
-        assert len(reg.get_schemas()) == 34
+        assert len(reg.get_schemas()) == 35
 
     def test_schema_names(self):
         reg = make_registry()
         names = {t["name"] for t in reg.get_schemas()}
         assert names == {"shell", "read_file", "write_file", "edit_file",
-                        "list_dir", "memory_read", "memory_write", "memory_lookup",
+                        "list_dir", "glob", "memory_read", "memory_write", "memory_lookup",
                         "memory_inbox_add", "memory_inbox_list", "memory_inbox_decide", "news_brief",
                         "deep_research", "check_research_job", "list_research_jobs",
                         "mcp_call",
@@ -115,6 +115,27 @@ class TestListDir:
         reg = make_registry()
         result = reg.execute("list_dir", {"path": "/tmp/nonexistent_dir_xyz"})
         assert "not found" in result.lower()
+
+
+class TestGlob:
+    def test_glob_matches_files_under_root(self, tmp_path):
+        reg = make_registry_allow_all()
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "one.py").write_text("print('one')\n")
+        (src / "two.txt").write_text("two\n")
+        nested = src / "nested"
+        nested.mkdir()
+        (nested / "three.py").write_text("print('three')\n")
+
+        result = reg.execute(
+            "glob",
+            {"pattern": "**/*.py", "root": str(src)},
+        )
+
+        assert str(src / "one.py") in result
+        assert str(nested / "three.py") in result
+        assert str(src / "two.txt") not in result
 
 class TestShell:
     def test_safe_command(self):

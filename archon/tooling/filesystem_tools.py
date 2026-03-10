@@ -37,6 +37,13 @@ def _should_confirm_read(registry) -> bool:
     return mode == 'confirm_all'
 
 
+def _confirm_read_operation(registry, label: str) -> str | None:
+    if _should_confirm_read(registry):
+        if not registry.confirmer(label, Level.SAFE):
+            return f"{label.split(':', 1)[0]} rejected by safety gate."
+    return None
+
+
 def register_filesystem_tools(registry) -> None:
     # 1. shell
     def shell(command: str, timeout: int = 30) -> str:
@@ -70,9 +77,9 @@ def register_filesystem_tools(registry) -> None:
             return f"Error: File not found: {p}"
         if not p.is_file():
             return f"Error: Not a file: {p}"
-        if _should_confirm_read(registry):
-            if not registry.confirmer(f"Read file: {p}", Level.SAFE):
-                return "Read rejected by safety gate."
+        rejected = _confirm_read_operation(registry, f"Read file: {p}")
+        if rejected is not None:
+            return rejected
         try:
             lines = p.read_text().splitlines()
             selected = lines[offset:offset + limit]
@@ -168,9 +175,9 @@ def register_filesystem_tools(registry) -> None:
             return f"Error: Directory not found: {p}"
         if not p.is_dir():
             return f"Error: Not a directory: {p}"
-        if _should_confirm_read(registry):
-            if not registry.confirmer(f"List directory: {p}", Level.SAFE):
-                return "List rejected by safety gate."
+        rejected = _confirm_read_operation(registry, f"List directory: {p}")
+        if rejected is not None:
+            return rejected
         entries = sorted(p.iterdir())
         lines = []
         for entry in entries[:500]:
@@ -187,3 +194,35 @@ def register_filesystem_tools(registry) -> None:
         },
         "required": [],
     }, list_dir)
+
+    # 6. glob
+    def glob_files(pattern: str, root: str = ".", limit: int = 200) -> str:
+        root_path = Path(root).expanduser().resolve()
+        if not root_path.exists():
+            return f"Error: Directory not found: {root_path}"
+        if not root_path.is_dir():
+            return f"Error: Not a directory: {root_path}"
+        rejected = _confirm_read_operation(registry, f"Glob files: {root_path}")
+        if rejected is not None:
+            return rejected
+        max_results = max(1, min(int(limit or 200), 1000))
+        matches: list[str] = []
+        for path in root_path.glob(pattern):
+            try:
+                resolved = path.resolve()
+            except Exception:
+                continue
+            if resolved.is_file():
+                matches.append(str(resolved))
+            if len(matches) >= max_results:
+                break
+        return "\n".join(matches) if matches else "(no matches)"
+
+    registry.register("glob", "Find files under a root using a glob pattern", {
+        "properties": {
+            "pattern": {"type": "string", "description": "Glob pattern to match (e.g. **/*.py)"},
+            "root": {"type": "string", "description": "Directory root to search", "default": "."},
+            "limit": {"type": "integer", "description": "Maximum number of matches to return", "default": 200},
+        },
+        "required": ["pattern"],
+    }, glob_files)
