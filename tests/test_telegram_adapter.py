@@ -345,6 +345,7 @@ class TestTelegramAdapterCommands:
         sent = []
         sent_voices = []
         saved = []
+        events = []
 
         monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260225-080000")
         monkeypatch.setattr(
@@ -373,6 +374,7 @@ class TestTelegramAdapterCommands:
             or {"message_id": 900},
         )
         adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+        adapter.set_activity_sink(lambda event: events.append((event.source, event.message)))
 
         adapter._handle_message(
             {
@@ -393,10 +395,12 @@ class TestTelegramAdapterCommands:
         assert sent_voices[0][0] == 99
         assert sent_voices[0][1].endswith(".ogg")
         assert sent_voices[0][2].startswith(b"OggS")
+        assert ("telegram", "voice reply sent to 99") in events
 
     def test_voice_message_tts_failure_does_not_break_text_reply(self, monkeypatch):
         adapter = _adapter()
         sent = []
+        events = []
         monkeypatch.setattr(adapter, "_send_typing", lambda chat_id: None)
         monkeypatch.setattr(adapter._bot, "get_file", lambda file_id, timeout=10: {"file_path": "voice/a.ogg"})
         monkeypatch.setattr(adapter._bot, "download_file", lambda file_path, timeout=20: b"audio-data")
@@ -409,6 +413,7 @@ class TestTelegramAdapterCommands:
             lambda text: (_ for _ in ()).throw(RuntimeError("tts unavailable")),
         )
         adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+        adapter.set_activity_sink(lambda event: events.append((event.source, event.message)))
 
         adapter._handle_message(
             {
@@ -419,6 +424,7 @@ class TestTelegramAdapterCommands:
         )
 
         assert sent == [(99, "ok")]
+        assert ("telegram", "voice reply failed for 99: RuntimeError: tts unavailable") in events
 
     def test_voice_message_voice_upload_falls_back_to_wav_document(self, monkeypatch):
         adapter = _adapter()

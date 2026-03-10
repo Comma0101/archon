@@ -626,6 +626,7 @@ class TelegramAdapter:
                     caption=None,
                     timeout=25,
                 )
+                self._emit_activity(f"voice reply sent to {chat_id}")
             except Exception as convert_or_upload_error:
                 print(
                     f"[telegram] Voice-note path fallback for chat {chat_id}: "
@@ -640,8 +641,13 @@ class TelegramAdapter:
                     caption="Archon voice reply",
                     timeout=25,
                 )
+                self._emit_activity(
+                    f"voice reply sent to {chat_id} (wav fallback: "
+                    f"{type(convert_or_upload_error).__name__})"
+                )
         except Exception as e:
             print(f"[telegram] Voice reply TTS error for chat {chat_id}: {type(e).__name__}: {e}", file=sys.stderr)
+            self._emit_activity(f"voice reply failed for {chat_id}: {type(e).__name__}: {e}")
 
     def _handle_callback_query(self, callback: dict) -> None:
         callback_id = callback.get("id")

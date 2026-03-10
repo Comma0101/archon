@@ -242,6 +242,7 @@ def build_slash_subvalues(
             ("active", "Show unresolved jobs"),
             ("all", "Show recent jobs"),
             ("purge", "Purge local terminal job records"),
+            ("show", "Show one recent job"),
             *[(f"show {job_id}", "Show one recent job") for job_id in job_refs],
         ],
         "/job": [
