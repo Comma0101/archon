@@ -17,6 +17,7 @@ DATA_DIR = _xdg("XDG_DATA_HOME", "~/.local/share") / "archon"
 STATE_DIR = _xdg("XDG_STATE_HOME", "~/.local/state") / "archon"
 CACHE_DIR = _xdg("XDG_CACHE_HOME", "~/.cache") / "archon"
 
+SKILLS_DIR = DATA_DIR / "skills"
 MEMORY_DIR = DATA_DIR / "memory"
 HISTORY_DIR = STATE_DIR / "history"
 NEWS_STATE_DIR = STATE_DIR / "news"

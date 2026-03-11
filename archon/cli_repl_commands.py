@@ -11,7 +11,9 @@ from archon.control.jobs import format_job_summary, format_job_summary_list
 from archon.control.orchestrator import describe_orchestrator_mode
 from archon.control.policy import resolve_profile
 from archon.control.skills import (
+    ensure_markdown_session_skill_profile,
     ensure_session_skill_profile,
+    find_markdown_skill_match,
     get_builtin_skill,
     is_session_skill_profile_name,
     list_builtin_skills,
@@ -1121,23 +1123,45 @@ def _clear_session_skill(agent) -> None:
 
 
 def _maybe_auto_activate_skill(agent, text: str) -> tuple[bool, str]:
-    """Auto-activate a built-in skill from an explicit natural-language request."""
+    """Auto-activate a skill from an explicit natural-language request.
+
+    Checks built-in skills first, then falls back to markdown skill triggers.
+    """
+    # 1. Check built-in skills (explicit phrases like "use coder skill")
     skill_name = _extract_explicit_skill_request(text)
-    if not skill_name:
-        return False, ""
-    if _active_skill_name(agent) == skill_name:
-        return False, ""
-    cfg = getattr(agent, "config", None)
-    base_profile = _skill_base_profile_name(agent)
-    profile_name = ensure_session_skill_profile(
-        cfg,
-        skill_name=skill_name,
-        base_profile_name=base_profile,
-    )
-    _set_agent_policy_profile(agent, profile_name)
-    setattr(agent, "_skills_base_profile", base_profile)
-    setattr(agent, "_skills_active_name", skill_name)
-    return True, f"Skill auto-activated: {skill_name}"
+    if skill_name:
+        if _active_skill_name(agent) == skill_name:
+            return False, ""
+        cfg = getattr(agent, "config", None)
+        base_profile = _skill_base_profile_name(agent)
+        profile_name = ensure_session_skill_profile(
+            cfg,
+            skill_name=skill_name,
+            base_profile_name=base_profile,
+        )
+        _set_agent_policy_profile(agent, profile_name)
+        setattr(agent, "_skills_base_profile", base_profile)
+        setattr(agent, "_skills_active_name", skill_name)
+        return True, f"Skill auto-activated: {skill_name}"
+
+    # 2. Check markdown skill triggers (e.g. "deploy korami")
+    md_skill = find_markdown_skill_match(text)
+    if md_skill:
+        if _active_skill_name(agent) == md_skill.name:
+            return False, ""
+        cfg = getattr(agent, "config", None)
+        base_profile = _skill_base_profile_name(agent)
+        profile_name = ensure_markdown_session_skill_profile(
+            cfg,
+            skill_name=md_skill.name,
+            base_profile_name=base_profile,
+        )
+        _set_agent_policy_profile(agent, profile_name)
+        setattr(agent, "_skills_base_profile", base_profile)
+        setattr(agent, "_skills_active_name", md_skill.name)
+        return True, f"Skill auto-activated: {md_skill.name}"
+
+    return False, ""
 
 
 def _extract_explicit_skill_request(text: str) -> str:

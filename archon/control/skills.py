@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from archon.config import ProfileConfig
+    from archon.skills.loader import MarkdownSkill
 
 
 DEFAULT_SKILL_NAME = "general"
@@ -285,3 +287,50 @@ def _fallback_profile() -> ProfileConfig:
     from archon.config import ProfileConfig
 
     return ProfileConfig()
+
+
+# --- Markdown skill support ---
+
+from archon.config import SKILLS_DIR  # noqa: E402
+
+_MARKDOWN_SKILLS_DIR = SKILLS_DIR
+
+
+@functools.lru_cache(maxsize=1)
+def _loaded_markdown_skills() -> dict[str, MarkdownSkill]:
+    """Load and cache markdown skills from disk."""
+    try:
+        from archon.skills.loader import load_markdown_skills
+        skills = load_markdown_skills(_MARKDOWN_SKILLS_DIR)
+        return {s.name: s for s in skills}
+    except Exception:
+        return {}
+
+
+def find_markdown_skill_match(text: str) -> MarkdownSkill | None:
+    """Match user text against markdown skill triggers."""
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return None
+    for skill in _loaded_markdown_skills().values():
+        for trigger in skill.triggers:
+            if trigger and trigger.lower() in lowered:
+                return skill
+    return None
+
+
+def ensure_markdown_session_skill_profile(config, *, skill_name: str, base_profile_name: str = "default") -> str:
+    """Create a session profile for a markdown skill."""
+    from archon.config import ProfileConfig
+
+    skill = _loaded_markdown_skills().get(str(skill_name or "").strip())
+    if skill is None:
+        raise ValueError(f"Unknown markdown skill '{skill_name}'")
+    profile_name = make_session_skill_profile_name(base_profile_name, skill.name)
+    config.profiles[profile_name] = ProfileConfig(
+        allowed_tools=skill.to_profile_kwargs()["allowed_tools"],
+        max_mode="implement",
+        execution_backend="host",
+        skill=skill.name,
+    )
+    return profile_name
