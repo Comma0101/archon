@@ -2411,6 +2411,31 @@ class TestAgentLoop:
         assert "Effective tool scope: all tools" in system_prompt_arg
         assert "Active skill: none" in system_prompt_arg
 
+    def test_run_visible_schema_uses_active_skill_profile_tools(self, monkeypatch):
+        responses = [
+            LLMResponse(
+                text="ok",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "ok"}],
+                input_tokens=10,
+                output_tokens=5,
+            ),
+        ]
+        agent = make_agent(responses)
+        agent.config.profiles["research"] = ProfileConfig(skill="researcher")
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+
+        result = agent.run("research current agent patterns", policy_profile="research")
+
+        assert result == "ok"
+        visible_tools = {
+            schema["name"] for schema in agent.llm.chat.call_args.kwargs["tools"]
+        }
+        assert "web_search" in visible_tools
+        assert "web_read" in visible_tools
+        assert "shell" not in visible_tools
+
     def test_source_awareness_summary_prefers_codebase_context(self, monkeypatch, tmp_path):
         codebase_context_path = tmp_path / "CODEBASE_CONTEXT.json"
         codebase_context_path.write_text(

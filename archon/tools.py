@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Callable
 
 from archon.config import Config
+from archon.control.policy import resolve_profile
 from archon.safety import Level, confirm
 from archon.tooling import (
     register_call_mission_tools,
@@ -48,6 +49,34 @@ class ToolRegistry:
 
     def get_schemas(self) -> list[dict]:
         return list(self.tools.values())
+
+    def get_schemas_for_profile(
+        self,
+        config: Config | None = None,
+        *,
+        profile_name: str = "default",
+    ) -> list[dict]:
+        cfg = config or self.config
+        _resolved_name, profile = resolve_profile(cfg, profile_name=profile_name)
+        allowed = {
+            str(item or "").strip().lower()
+            for item in getattr(profile, "allowed_tools", ())
+            if str(item or "").strip()
+        }
+        if not allowed or "*" in allowed:
+            return self.get_schemas()
+
+        visible: list[dict] = []
+        for schema in self.get_schemas():
+            name = str(schema.get("name", "") or "").strip().lower()
+            if not name:
+                continue
+            if name in allowed:
+                visible.append(schema)
+                continue
+            if name == "mcp_call" and self._mcp_tool_visible_for_profile(allowed):
+                visible.append(schema)
+        return visible
 
     def set_execute_event_handler(self, handler: Callable[[str, dict], None] | None) -> None:
         self._execute_event_handler = handler
@@ -141,3 +170,11 @@ class ToolRegistry:
         register_call_mission_tools(self)
 
         register_worker_tools(self)
+
+    @staticmethod
+    def _mcp_tool_visible_for_profile(allowed: set[str]) -> bool:
+        return (
+            "mcp_call" in allowed
+            or "mcp" in allowed
+            or any(item.startswith("mcp:") for item in allowed)
+        )

@@ -4,7 +4,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from archon.config import Config
+from archon.config import Config, ProfileConfig
 from archon.news.models import NewsDigest
 from archon.news.models import NewsRunResult
 from archon.tools import ToolRegistry
@@ -47,6 +47,44 @@ class TestRegistry:
         reg = make_registry()
         result = reg.execute("nonexistent", {})
         assert "Unknown tool" in result
+
+    def test_visible_schema_unrestricted_profile_exposes_full_registry(self):
+        reg = make_registry()
+        cfg = Config()
+
+        all_names = {schema["name"] for schema in reg.get_schemas()}
+        visible_names = {
+            schema["name"]
+            for schema in reg.get_schemas_for_profile(cfg, profile_name="default")
+        }
+
+        assert visible_names == all_names
+
+    def test_visible_schema_constrained_profile_hides_disallowed_tools(self):
+        reg = make_registry()
+        cfg = Config()
+        cfg.profiles["safe"] = ProfileConfig(allowed_tools=["read_file"])
+
+        visible_names = {
+            schema["name"]
+            for schema in reg.get_schemas_for_profile(cfg, profile_name="safe")
+        }
+
+        assert visible_names == {"read_file"}
+        assert "shell" not in visible_names
+        assert "mcp_call" not in visible_names
+
+    def test_visible_schema_mcp_capability_keeps_mcp_call_visible(self):
+        reg = make_registry()
+        cfg = Config()
+        cfg.profiles["mcp_only"] = ProfileConfig(allowed_tools=["mcp:exa"])
+
+        visible_names = {
+            schema["name"]
+            for schema in reg.get_schemas_for_profile(cfg, profile_name="mcp_only")
+        }
+
+        assert "mcp_call" in visible_names
 
 class TestReadFile:
     def test_read_existing(self):

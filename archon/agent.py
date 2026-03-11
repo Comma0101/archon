@@ -123,6 +123,23 @@ class Agent:
             )
         return self._system_prompt
 
+    def _system_prompt_for_visible_tools(self, tool_schemas: list[dict]) -> str:
+        full_count = len(self.tools.get_schemas())
+        visible_count = len(tool_schemas)
+        if visible_count == full_count:
+            return self.system_prompt
+        return (
+            self.system_prompt
+            + "\n\n[Visible Tool Scope]\n"
+            + f"This turn exposes {visible_count} tools after profile filtering."
+        )
+
+    def _visible_tool_schemas(self, active_profile: str) -> list[dict]:
+        return self.tools.get_schemas_for_profile(
+            self.config,
+            profile_name=active_profile,
+        )
+
     def run(self, user_message: str, policy_profile: str | None = None) -> str:
         """Run a single user message through the agent loop."""
         turn_id = self._next_turn_id()
@@ -142,8 +159,9 @@ class Agent:
         _maybe_capture_preference_memory(user_message)
         skill_guidance = build_skill_guidance(self.config, profile_name=active_profile)
         pending_compactions = self._consume_pending_compactions()
+        visible_tool_schemas = self._visible_tool_schemas(active_profile)
         turn_system_prompt = _build_turn_system_prompt(
-            self.system_prompt,
+            self._system_prompt_for_visible_tools(visible_tool_schemas),
             user_message,
             self.config,
             profile_name=active_profile,
@@ -165,7 +183,7 @@ class Agent:
                     self.llm,
                     iter_system_prompt,
                     self.history,
-                    self.tools.get_schemas(),
+                    visible_tool_schemas,
                     max_attempts=self.llm_retry_attempts,
                     request_timeout_sec=self.llm_request_timeout_sec,
                 ),
@@ -197,8 +215,9 @@ class Agent:
         _maybe_capture_preference_memory(user_message)
         skill_guidance = build_skill_guidance(self.config, profile_name=active_profile)
         pending_compactions = self._consume_pending_compactions()
+        visible_tool_schemas = self._visible_tool_schemas(active_profile)
         turn_system_prompt = _build_turn_system_prompt(
-            self.system_prompt,
+            self._system_prompt_for_visible_tools(visible_tool_schemas),
             user_message,
             self.config,
             profile_name=active_profile,
@@ -221,7 +240,7 @@ class Agent:
                     self.llm,
                     iter_system_prompt,
                     self.history,
-                    self.tools.get_schemas(),
+                    visible_tool_schemas,
                     max_attempts=self.llm_retry_attempts,
                     request_timeout_sec=self.llm_request_timeout_sec,
                 ),
