@@ -2,13 +2,37 @@ from __future__ import annotations
 
 import json
 
-from archon.usage.models import UsageEvent
-from archon.usage.store import (
-    load_usage_events,
-    record_usage_event,
-    summarize_usage_by_source,
-    summarize_usage_for_session,
-)
+import pytest
+
+REQUIRED_ROW_KEYS = {
+    "event_id",
+    "session_id",
+    "turn_id",
+    "source",
+    "provider",
+    "model",
+    "input_tokens",
+    "output_tokens",
+    "recorded_at",
+}
+
+
+def _usage_api():
+    from archon.usage.models import UsageEvent
+    from archon.usage.store import (
+        load_usage_events,
+        record_usage_event,
+        summarize_usage_by_source,
+        summarize_usage_for_session,
+    )
+
+    return (
+        UsageEvent,
+        load_usage_events,
+        record_usage_event,
+        summarize_usage_by_source,
+        summarize_usage_for_session,
+    )
 
 
 def _event(
@@ -22,7 +46,8 @@ def _event(
     input_tokens: int | None = 10,
     output_tokens: int | None = 5,
     recorded_at: float = 1_700_000_000.0,
-) -> UsageEvent:
+) -> object:
+    UsageEvent, *_rest = _usage_api()
     return UsageEvent(
         event_id=event_id,
         session_id=session_id,
@@ -46,6 +71,7 @@ def _read_jsonl(path):
 
 class TestUsageStore:
     def test_record_usage_event_appends_jsonl_and_loads_it_back(self, tmp_path):
+        _, load_usage_events, record_usage_event, _, _ = _usage_api()
         ledger_path = tmp_path / "usage.jsonl"
 
         recorded = record_usage_event(_event(), path=ledger_path)
@@ -67,6 +93,10 @@ class TestUsageStore:
         assert len(rows) == 2
         assert rows[0]["event_id"] == "evt-1"
         assert rows[1]["event_id"] == "evt-2"
+        assert REQUIRED_ROW_KEYS <= set(rows[0])
+        assert rows[0]["input_tokens"] == 10
+        assert rows[0]["output_tokens"] == 5
+        assert isinstance(rows[0]["recorded_at"], float)
         events = load_usage_events(path=ledger_path)
         assert len(events) == 2
         assert events[0].event_id == "evt-1"
@@ -76,6 +106,7 @@ class TestUsageStore:
         assert events[1].event_id == "evt-2"
 
     def test_summarize_usage_for_session_totals_input_and_output_tokens(self, tmp_path):
+        _, _, record_usage_event, _, summarize_usage_for_session = _usage_api()
         ledger_path = tmp_path / "usage.jsonl"
         record_usage_event(
             _event(
@@ -118,6 +149,7 @@ class TestUsageStore:
         assert summary["event_count"] == 2
 
     def test_summarize_usage_by_source_keeps_chat_and_news_distinct(self, tmp_path):
+        _, _, record_usage_event, summarize_usage_by_source, _ = _usage_api()
         ledger_path = tmp_path / "usage.jsonl"
         record_usage_event(
             _event(
@@ -162,13 +194,32 @@ class TestUsageStore:
         assert summary["news"]["total_tokens"] == 5
         assert summary["news"]["event_count"] == 1
 
-    def test_record_usage_event_ignores_missing_usage_data(self, tmp_path):
+    @pytest.mark.parametrize(
+        ("input_tokens", "output_tokens"),
+        [
+            (None, None),
+            (None, 5),
+            (5, None),
+        ],
+    )
+    def test_record_usage_event_ignores_missing_usage_data(
+        self,
+        tmp_path,
+        input_tokens,
+        output_tokens,
+    ):
+        _, load_usage_events, record_usage_event, _, _ = _usage_api()
         ledger_path = tmp_path / "usage.jsonl"
 
         recorded = record_usage_event(
-            _event(event_id="evt-empty", input_tokens=None, output_tokens=None),
+            _event(
+                event_id="evt-empty",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            ),
             path=ledger_path,
         )
 
         assert recorded is False
+        assert ledger_path.exists() is False
         assert load_usage_events(path=ledger_path) == []
