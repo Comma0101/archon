@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
+import sys
 from typing import Any
 import warnings
 
 
 DEFAULT_DEEP_RESEARCH_AGENT = "deep-research-pro-preview-12-2025"
+_DEBUG_EVENT_LIMIT = 10
 
 
 @dataclass(frozen=True)
@@ -32,6 +35,7 @@ class DeepResearchStream:
     interaction_id: str
     status: str
     events: object
+    last_event_id: str = ""
 
 
 class GoogleDeepResearchClient:
@@ -107,10 +111,16 @@ class GoogleDeepResearchClient:
         events = _coerce_stream_events(stream)
         first = next(events, None)
         if first is None:
-            return DeepResearchStream(interaction_id="", status="unknown", events=iter(()))
+            return DeepResearchStream(
+                interaction_id="",
+                status="unknown",
+                last_event_id="",
+                events=iter(()),
+            )
         return DeepResearchStream(
             interaction_id=first.interaction_id,
             status=first.status or "unknown",
+            last_event_id=first.event_id,
             events=_prepend_event(first, events),
         )
 
@@ -131,11 +141,13 @@ class GoogleDeepResearchClient:
             return DeepResearchStream(
                 interaction_id=str(interaction_id or "").strip(),
                 status="unknown",
+                last_event_id="",
                 events=iter(()),
             )
         return DeepResearchStream(
             interaction_id=first.interaction_id or str(interaction_id or "").strip(),
             status=first.status or "unknown",
+            last_event_id=first.event_id,
             events=_prepend_event(first, events),
         )
 
@@ -225,8 +237,14 @@ def _extract_output_text_from_outputs(outputs: object) -> str:
 
 
 def _coerce_stream_events(stream: object):
+    debug_enabled = _deep_research_debug_enabled()
+    remaining_debug_events = _DEBUG_EVENT_LIMIT
     for raw in stream:
-        yield _coerce_stream_event(raw)
+        event = _coerce_stream_event(raw)
+        if debug_enabled and remaining_debug_events > 0:
+            _emit_deep_research_debug_event(raw, event)
+            remaining_debug_events -= 1
+        yield event
 
 
 def _coerce_stream_event(event: object) -> DeepResearchStreamEvent:
@@ -234,8 +252,18 @@ def _coerce_stream_event(event: object) -> DeepResearchStreamEvent:
     event_id = str(_field(event, "event_id") or "").strip()
     interaction = _field(event, "interaction")
     delta = _field(event, "delta")
-    interaction_id = str(_field(interaction, "id") or _field(interaction, "name") or "").strip()
-    status = str(_field(interaction, "status") or _field(interaction, "state") or "").strip().lower()
+    interaction_id = str(
+        _field(event, "interaction_id")
+        or _field(interaction, "id")
+        or _field(interaction, "name")
+        or ""
+    ).strip()
+    status = str(
+        _field(event, "status")
+        or _field(interaction, "status")
+        or _field(interaction, "state")
+        or ""
+    ).strip().lower()
     delta_content = _field(delta, "content")
     response = _field(event, "response")
     text = str(
@@ -255,6 +283,48 @@ def _coerce_stream_event(event: object) -> DeepResearchStreamEvent:
         status=status,
         text=text,
         delta_type=delta_type,
+    )
+
+
+def _deep_research_debug_enabled() -> bool:
+    return str(os.environ.get("ARCHON_DEEP_RESEARCH_DEBUG", "") or "").strip().lower() not in {
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _emit_deep_research_debug_event(raw: object, event: DeepResearchStreamEvent) -> None:
+    interaction = _field(raw, "interaction")
+    delta = _field(raw, "delta")
+    delta_content = _field(delta, "content")
+    response = _field(raw, "response")
+    interaction_outputs = _extract_output_text_from_outputs(_field(interaction, "outputs"))
+    raw_status = str(
+        _field(raw, "status") or _field(interaction, "status") or _field(interaction, "state") or ""
+    ).strip().lower() or "-"
+    raw_delta_type = str(_field(delta, "type") or "").strip().lower() or "-"
+    normalized_event_id = event.event_id or "-"
+    normalized_delta_type = event.delta_type or "-"
+    normalized_interaction_id = event.interaction_id or "-"
+    print(
+        "[deep-research-debug] "
+        f"type={event.event_type or '-'} "
+        f"raw_event_id={'yes' if str(_field(raw, 'event_id') or '').strip() else 'no'} "
+        f"raw_interaction_id={'yes' if str(_field(raw, 'interaction_id') or '').strip() else 'no'} "
+        f"interaction_id={normalized_interaction_id} "
+        f"raw_status={raw_status} "
+        f"raw_delta_type={raw_delta_type} "
+        f"delta.text={'yes' if str(_field(delta, 'text') or '').strip() else 'no'} "
+        f"delta.content.text={'yes' if str(_field(delta_content, 'text') or '').strip() else 'no'} "
+        f"response.output_text={'yes' if str(_field(response, 'output_text') or '').strip() else 'no'} "
+        f"interaction.outputs={'yes' if interaction_outputs else 'no'} "
+        f"normalized_event_id={normalized_event_id} "
+        f"normalized_delta_type={normalized_delta_type} "
+        f"normalized_text={'yes' if event.text else 'no'}",
+        file=sys.stderr,
     )
 
 

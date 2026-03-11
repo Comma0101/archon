@@ -130,6 +130,8 @@ class TestDeepResearchTools:
         cfg.llm.provider = "google"
         cfg.llm.api_key = "cfg-google-key"
         cfg.research.google_deep_research.enabled = True
+        refresh_client = object()
+        seen = {}
 
         class _Record:
             interaction_id = "abc123"
@@ -155,12 +157,23 @@ class TestDeepResearchTools:
         monkeypatch.setattr("archon.tooling.content_tools.ensure_dirs", lambda: None)
         monkeypatch.setattr("archon.tooling.content_tools.load_config", lambda: cfg)
         monkeypatch.setattr(
+            "archon.tooling.content_tools._build_deep_research_client",
+            lambda _cfg: refresh_client,
+        )
+        monkeypatch.setattr(
             "archon.research.store.load_research_job",
-            lambda interaction_id, refresh_client=None: _Record(),
+            lambda interaction_id, refresh_client=None: seen.update(
+                {"interaction_id": interaction_id, "refresh_client": refresh_client}
+            )
+            or _Record(),
         )
 
         result = reg.execute("check_research_job", {"job_id": "research:abc123"})
 
+        assert seen == {
+            "interaction_id": "abc123",
+            "refresh_client": refresh_client,
+        }
         assert "job_id: research:abc123" in result
         assert "job_status: completed" in result
         assert "job_provider_status: completed" in result
@@ -174,6 +187,8 @@ class TestDeepResearchTools:
         cfg.llm.provider = "google"
         cfg.llm.api_key = "cfg-google-key"
         cfg.research.google_deep_research.enabled = True
+        refresh_client = object()
+        seen = {}
 
         class _Record:
             def __init__(self, interaction_id, status, summary):
@@ -200,8 +215,15 @@ class TestDeepResearchTools:
         monkeypatch.setattr("archon.tooling.content_tools.ensure_dirs", lambda: None)
         monkeypatch.setattr("archon.tooling.content_tools.load_config", lambda: cfg)
         monkeypatch.setattr(
+            "archon.tooling.content_tools._build_deep_research_client",
+            lambda _cfg: refresh_client,
+        )
+        monkeypatch.setattr(
             "archon.research.store.list_research_jobs",
-            lambda limit=20, refresh_client=None: [
+            lambda limit=20, refresh_client=None: seen.update(
+                {"limit": limit, "refresh_client": refresh_client}
+            )
+            or [
                 _Record("job-1", "in_progress", "Running"),
                 _Record("job-2", "completed", "Finished"),
             ],
@@ -209,6 +231,7 @@ class TestDeepResearchTools:
 
         result = reg.execute("list_research_jobs", {"limit": 2})
 
+        assert seen == {"limit": 2, "refresh_client": refresh_client}
         assert "Research jobs: 2" in result
         assert "research:job-1 | in_progress | provider=in_progress | events=2" in result
         assert "research:job-2 | completed | provider=completed | events=2" in result

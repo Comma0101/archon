@@ -11,37 +11,39 @@ from archon.web.search import search_web
 from .common import truncate_text
 
 
+def _resolve_deep_research_api_key(cfg) -> str:
+    llm_cfg = getattr(cfg, "llm", None)
+    api_key = ""
+    if str(getattr(llm_cfg, "provider", "") or "").strip().lower() == "google":
+        api_key = str(getattr(llm_cfg, "api_key", "") or "").strip()
+    if not api_key and str(getattr(llm_cfg, "fallback_provider", "") or "").strip().lower() == "google":
+        api_key = str(getattr(llm_cfg, "fallback_api_key", "") or "").strip()
+    if not api_key:
+        api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
+    return api_key
+
+
+def _build_deep_research_client(cfg):
+    deep_cfg = getattr(getattr(cfg, "research", None), "google_deep_research", None)
+    if deep_cfg is None or not bool(getattr(deep_cfg, "enabled", False)):
+        return None
+    api_key = _resolve_deep_research_api_key(cfg)
+    if not api_key:
+        return None
+    from archon.research.google_deep_research import GoogleDeepResearchClient
+
+    agent_name = str(getattr(deep_cfg, "agent", "") or "").strip()
+    thinking_summaries = str(getattr(deep_cfg, "thinking_summaries", "auto") or "auto").strip().lower()
+    return GoogleDeepResearchClient.from_api_key(
+        api_key,
+        agent=agent_name,
+        thinking_summaries=thinking_summaries,
+    )
+
+
 def register_content_tools(registry) -> None:
-    def _resolve_deep_research_api_key(cfg) -> str:
-        llm_cfg = getattr(cfg, "llm", None)
-        api_key = ""
-        if str(getattr(llm_cfg, "provider", "") or "").strip().lower() == "google":
-            api_key = str(getattr(llm_cfg, "api_key", "") or "").strip()
-        if not api_key and str(getattr(llm_cfg, "fallback_provider", "") or "").strip().lower() == "google":
-            api_key = str(getattr(llm_cfg, "fallback_api_key", "") or "").strip()
-        if not api_key:
-            api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-        if not api_key:
-            api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
-        return api_key
-
-    def _build_deep_research_client(cfg):
-        deep_cfg = getattr(getattr(cfg, "research", None), "google_deep_research", None)
-        if deep_cfg is None or not bool(getattr(deep_cfg, "enabled", False)):
-            return None
-        api_key = _resolve_deep_research_api_key(cfg)
-        if not api_key:
-            return None
-        from archon.research.google_deep_research import GoogleDeepResearchClient
-
-        agent_name = str(getattr(deep_cfg, "agent", "") or "").strip()
-        thinking_summaries = str(getattr(deep_cfg, "thinking_summaries", "auto") or "auto").strip().lower()
-        return GoogleDeepResearchClient.from_api_key(
-            api_key,
-            agent=agent_name,
-            thinking_summaries=thinking_summaries,
-        )
-
     # 12. news_brief
     def news_brief(force_refresh: bool = False, send_to_telegram: bool = False) -> str:
         ensure_dirs()
@@ -225,6 +227,7 @@ def register_content_tools(registry) -> None:
                 client=client,
                 agent_name=agent_name,
                 timeout_minutes=max(1, int(getattr(deep_cfg, "timeout_minutes", 20) or 20)),
+                poll_interval_sec=max(1, int(getattr(deep_cfg, "poll_interval_sec", 10) or 10)),
                 hook_bus=getattr(registry, "hook_bus", None),
             )
         except Exception as e:
@@ -260,12 +263,13 @@ def register_content_tools(registry) -> None:
         cfg = load_config()
         from archon.research.store import load_research_job
 
+        refresh_client = _build_deep_research_client(cfg)
         # Strip "research:" prefix if present
         interaction_id = job_id
         if interaction_id.startswith("research:"):
             interaction_id = interaction_id[9:]
 
-        record = load_research_job(interaction_id)
+        record = load_research_job(interaction_id, refresh_client=refresh_client)
         if record is None:
             return f"Research job '{job_id}' not found."
 
@@ -294,7 +298,8 @@ def register_content_tools(registry) -> None:
         cfg = load_config()
         from archon.research.store import list_research_jobs
 
-        records = list_research_jobs(limit=max(1, int(limit)))
+        refresh_client = _build_deep_research_client(cfg)
+        records = list_research_jobs(limit=max(1, int(limit)), refresh_client=refresh_client)
         lines = [f"Research jobs: {len(records)}"]
         if not records:
             lines.append("No research jobs found.")

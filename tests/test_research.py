@@ -235,9 +235,41 @@ def test_google_deep_research_client_stream_reads_nested_thought_summary_text():
     stream = client.start_research_stream("Research LA restaurant market")
     events = list(stream.events)
 
+    assert stream.last_event_id == "evt-1"
     assert events[1].delta_type == "thought_summary"
     assert events[1].text == "Looking at sources"
     assert events[1].event_id == "evt-2"
+
+
+def test_google_deep_research_client_stream_reads_top_level_status_update_fields():
+    class _StreamInteractionsClient:
+        def create(self, **kwargs):
+            return iter(
+                [
+                    {
+                        "event_type": "interaction.start",
+                        "interaction": {"id": "int-stream-123", "status": "in_progress"},
+                        "event_id": "evt-1",
+                    },
+                    {
+                        "event_type": "interaction.status_update",
+                        "interaction_id": "int-stream-123",
+                        "status": "in_progress",
+                    },
+                ]
+            )
+
+    client = GoogleDeepResearchClient(
+        _StreamInteractionsClient(),
+        agent="deep-research-pro-preview-12-2025",
+    )
+
+    stream = client.start_research_stream("Research LA restaurant market")
+    events = list(stream.events)
+
+    assert events[1].event_type == "interaction.status_update"
+    assert events[1].interaction_id == "int-stream-123"
+    assert events[1].status == "in_progress"
 
 
 def test_google_deep_research_client_can_resume_stream_from_last_event_id():
@@ -267,6 +299,7 @@ def test_google_deep_research_client_can_resume_stream_from_last_event_id():
 
     stream = client.resume_research_stream("int-stream-123", last_event_id="evt-2")
 
+    assert stream.last_event_id == "evt-3"
     assert [event.event_type for event in stream.events] == [
         "content.delta",
         "interaction.complete",
@@ -314,6 +347,83 @@ def test_google_deep_research_client_stream_reads_final_output_from_completion_p
 
     assert events[1].event_type == "interaction.complete"
     assert events[1].text == "Final report body"
+
+
+def test_google_deep_research_client_debug_stream_tracing_emits_raw_and_normalized_markers(
+    monkeypatch, capsys
+):
+    monkeypatch.setenv("ARCHON_DEEP_RESEARCH_DEBUG", "1")
+
+    class _StreamInteractionsClient:
+        def create(self, **kwargs):
+            return iter(
+                [
+                    {
+                        "event_type": "interaction.start",
+                        "interaction": {"id": "int-stream-123", "status": "in_progress"},
+                        "event_id": "evt-1",
+                    },
+                    {
+                        "event_type": "content.delta",
+                        "event_id": "evt-2",
+                        "delta": {
+                            "type": "thought_summary",
+                            "content": {"text": "Looking at sources"},
+                        },
+                    },
+                ]
+            )
+
+    client = GoogleDeepResearchClient(
+        _StreamInteractionsClient(),
+        agent="deep-research-pro-preview-12-2025",
+    )
+
+    stream = client.start_research_stream("Research LA restaurant market")
+    list(stream.events)
+    captured = capsys.readouterr()
+
+    assert "[deep-research-debug]" in captured.err
+    assert "type=content.delta" in captured.err
+    assert "raw_event_id=yes" in captured.err
+    assert "delta.content.text=yes" in captured.err
+    assert "normalized_delta_type=thought_summary" in captured.err
+    assert "normalized_text=yes" in captured.err
+
+
+def test_google_deep_research_client_debug_stream_tracing_is_silent_by_default(monkeypatch, capsys):
+    monkeypatch.delenv("ARCHON_DEEP_RESEARCH_DEBUG", raising=False)
+
+    class _StreamInteractionsClient:
+        def create(self, **kwargs):
+            return iter(
+                [
+                    {
+                        "event_type": "interaction.start",
+                        "interaction": {"id": "int-stream-123", "status": "in_progress"},
+                        "event_id": "evt-1",
+                    },
+                    {
+                        "event_type": "content.delta",
+                        "event_id": "evt-2",
+                        "delta": {
+                            "type": "thought_summary",
+                            "content": {"text": "Looking at sources"},
+                        },
+                    },
+                ]
+            )
+
+    client = GoogleDeepResearchClient(
+        _StreamInteractionsClient(),
+        agent="deep-research-pro-preview-12-2025",
+    )
+
+    stream = client.start_research_stream("Research LA restaurant market")
+    list(stream.events)
+    captured = capsys.readouterr()
+
+    assert captured.err == ""
 
 
 def test_research_job_summary_round_trips_from_store(tmp_path, monkeypatch):
@@ -468,6 +578,98 @@ def test_consume_research_stream_tracks_event_count_without_incrementing_poll_co
     assert record.poll_count == 4
     assert record.last_event_id == "evt-2"
     assert record.status == "completed"
+
+
+def test_consume_research_stream_emits_progress_event_for_new_thought_summary(tmp_path, monkeypatch):
+    jobs_dir = tmp_path / "research" / "jobs"
+    monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", jobs_dir)
+
+    save_research_job(
+        ResearchJobRecord(
+            interaction_id="abc",
+            status="running",
+            prompt="Research LA restaurant market",
+            agent="deep-research-pro-preview-12-2025",
+            created_at="2099-03-08T07:50:00Z",
+            updated_at="2099-03-08T07:55:00Z",
+            summary="Research job started",
+            output_text="",
+            error="",
+        )
+    )
+
+    events = []
+    hook_bus = HookBus()
+    hook_bus.register("ux.job_progress", lambda event: events.append(event))
+
+    record = research_store.consume_research_stream(
+        "abc",
+        [
+            SimpleNamespace(
+                event_type="content.delta",
+                event_id="evt-1",
+                text="Checking sources",
+                delta_type="thought_summary",
+                status="in_progress",
+            )
+        ],
+        hook_bus=hook_bus,
+        mark_unfinished_as_error=False,
+    )
+
+    assert record is not None
+    assert len(events) == 1
+    assert "research:abc" in events[0].payload["event"].render_text()
+    assert "Checking sources" in events[0].payload["event"].render_text()
+
+
+def test_consume_research_stream_deduplicates_repeated_thought_summary_events(tmp_path, monkeypatch):
+    jobs_dir = tmp_path / "research" / "jobs"
+    monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", jobs_dir)
+
+    save_research_job(
+        ResearchJobRecord(
+            interaction_id="abc",
+            status="running",
+            prompt="Research LA restaurant market",
+            agent="deep-research-pro-preview-12-2025",
+            created_at="2099-03-08T07:50:00Z",
+            updated_at="2099-03-08T07:55:00Z",
+            summary="Research job started",
+            output_text="",
+            error="",
+        )
+    )
+
+    events = []
+    hook_bus = HookBus()
+    hook_bus.register("ux.job_progress", lambda event: events.append(event))
+
+    record = research_store.consume_research_stream(
+        "abc",
+        [
+            SimpleNamespace(
+                event_type="content.delta",
+                event_id="evt-1",
+                text="Checking sources",
+                delta_type="thought_summary",
+                status="in_progress",
+            ),
+            SimpleNamespace(
+                event_type="content.delta",
+                event_id="evt-2",
+                text="Checking sources",
+                delta_type="thought_summary",
+                status="in_progress",
+            ),
+        ],
+        hook_bus=hook_bus,
+        mark_unfinished_as_error=False,
+    )
+
+    assert record is not None
+    assert record.latest_thought_summary == "Checking sources"
+    assert len(events) == 1
 
 
 def test_load_research_job_emits_progress_event_on_nonterminal_refresh(tmp_path, monkeypatch):
