@@ -2412,6 +2412,39 @@ class TestAgentLoop:
         assert agent.total_input_tokens == 100
         assert agent.total_output_tokens == 50
 
+    def test_run_records_usage_ledger_event_for_non_streaming_turn(self):
+        usage_events = []
+
+        responses = [
+            LLMResponse(
+                text="ok",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "ok"}],
+                input_tokens=100,
+                output_tokens=50,
+            ),
+        ]
+        agent = make_agent(responses)
+        agent.session_id = "sess-usage"
+        agent.llm.provider = "google"
+        agent.llm.model = "gemini-3.1-pro-preview"
+        agent.hooks.register("usage.recorded", usage_events.append)
+
+        result = agent.run("test")
+
+        assert result == "ok"
+        assert agent.total_input_tokens == 100
+        assert agent.total_output_tokens == 50
+        assert len(usage_events) == 1
+        assert usage_events[0].task_id == agent.last_turn_id
+        payload = usage_events[0].payload
+        assert payload["source"] == "chat"
+        assert payload["session_id"] == "sess-usage"
+        assert payload["provider"] == "google"
+        assert payload["model"] == "gemini-3.1-pro-preview"
+        assert payload["input_tokens"] == 100
+        assert payload["output_tokens"] == 50
+
     def test_reset(self):
         responses = [
             LLMResponse(text="ok", tool_calls=[], raw_content=[{"type": "text", "text": "ok"}],
@@ -2439,6 +2472,38 @@ class TestAgentLoop:
         assert chunks == ["Hello", " ", "world"]
         assert agent.total_input_tokens == 10
         assert len(agent.history) == 2  # user + assistant
+
+    def test_run_stream_records_usage_ledger_event_for_streaming_turn(self):
+        usage_events = []
+
+        final_resp = LLMResponse(
+            text="Hello world",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "Hello world"}],
+            input_tokens=10,
+            output_tokens=5,
+        )
+        stream_chunks = [["Hello", " ", "world", final_resp]]
+        agent = make_agent([], stream_chunks=stream_chunks)
+        agent.session_id = "sess-stream"
+        agent.llm.provider = "google"
+        agent.llm.model = "gemini-3.1-pro-preview"
+        agent.hooks.register("usage.recorded", usage_events.append)
+
+        chunks = list(agent.run_stream("hi"))
+
+        assert chunks == ["Hello", " ", "world"]
+        assert agent.total_input_tokens == 10
+        assert agent.total_output_tokens == 5
+        assert len(usage_events) == 1
+        assert usage_events[0].task_id == agent.last_turn_id
+        payload = usage_events[0].payload
+        assert payload["source"] == "chat"
+        assert payload["session_id"] == "sess-stream"
+        assert payload["provider"] == "google"
+        assert payload["model"] == "gemini-3.1-pro-preview"
+        assert payload["input_tokens"] == 10
+        assert payload["output_tokens"] == 5
 
     def test_run_stream_with_tool_calls(self):
         tool_resp = LLMResponse(
