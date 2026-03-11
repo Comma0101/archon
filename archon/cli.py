@@ -178,6 +178,26 @@ def _read_interactive_input(prompt: str, fallback_read_fn) -> tuple[str, bool]:
     )
 
 
+def _supports_interactive_prompts() -> bool:
+    for stream in (sys.stdin, sys.stdout):
+        fileno = getattr(stream, "fileno", None)
+        if not callable(fileno):
+            return False
+        try:
+            fd = fileno()
+        except (AttributeError, OSError, ValueError):
+            return False
+        if not os.isatty(fd):
+            return False
+    return True
+
+
+def _make_runtime_prompt(label: str, color_ansi: str) -> str:
+    if not _supports_interactive_prompts():
+        return f"{label} "
+    return _make_readline_prompt(label, color_ansi)
+
+
 def _handle_model_command(agent: Agent, text: str) -> tuple[bool, str]:
     raw = (text or "").strip()
     lowered = raw.lower()
@@ -307,7 +327,7 @@ def chat():
         format_session_summary_fn=_format_session_summary,
         format_chat_response_fn=_format_chat_response,
         format_turn_stats_fn=_format_turn_stats,
-        make_readline_prompt_fn=_make_readline_prompt,
+        make_readline_prompt_fn=_make_runtime_prompt,
         spinner_cls=_Spinner,
         ansi_prompt_user=ANSI_PROMPT_USER,
         ansi_error=ANSI_ERROR,
