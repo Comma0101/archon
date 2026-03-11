@@ -1246,6 +1246,24 @@ class TestCliCommands:
         assert "mcp=1/1" in msg
         assert "tokens=150" in msg
 
+    def test_handle_repl_command_status_describes_hybrid_as_shared_executor_routing(self):
+        cfg = Config()
+        cfg.orchestrator.enabled = True
+        cfg.orchestrator.mode = "hybrid"
+        cfg.calls.enabled = True
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(provider="google", model="gemini-x"),
+            total_input_tokens=120,
+            total_output_tokens=30,
+            policy_profile="safe",
+            config=cfg,
+        )
+
+        action, msg = _handle_repl_command(agent, "/status")
+
+        assert action == "status"
+        assert "orchestrator=hybrid(shared-executor-routing)" in msg
+
     def test_handle_repl_command_cost_reports_session_token_usage(self):
         agent = SimpleNamespace(
             llm=SimpleNamespace(provider="google", model="gemini-x"),
