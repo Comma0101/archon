@@ -170,6 +170,46 @@ def test_run_prefers_native_news_brief_for_ai_news_request(monkeypatch):
     assert agent.history[-1] == {"role": "assistant", "content": "Digest markdown"}
 
 
+def test_run_prefers_native_research_status_for_explicit_job_id(monkeypatch):
+    responses = [
+        LLMResponse(
+            text="llm fallback",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "llm fallback"}],
+            input_tokens=1,
+            output_tokens=1,
+        )
+    ]
+    agent = make_agent(responses)
+    monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+    monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+    executed = {}
+
+    def _check_research_job(job_id: str) -> str:
+        executed["job_id"] = job_id
+        return "job_status: completed"
+
+    agent.tools.register(
+        "check_research_job",
+        "Stub research status tool",
+        {
+            "properties": {
+                "job_id": {"type": "string"},
+            },
+            "required": ["job_id"],
+        },
+        _check_research_job,
+    )
+
+    result = agent.run("Show me the status of research:v1_abc")
+
+    assert result == "job_status: completed"
+    assert executed == {"job_id": "research:v1_abc"}
+    assert agent.llm.chat.call_count == 0
+    assert agent.history[-2] == {"role": "user", "content": "Show me the status of research:v1_abc"}
+    assert agent.history[-1] == {"role": "assistant", "content": "job_status: completed"}
+
+
 def capture_non_stream_executor_trace(
     agent: Agent,
     user_message: str,
@@ -2139,6 +2179,12 @@ class TestAgentLoop:
 
         assert lane == "operator"
         assert reason == "native_news_request"
+
+    def test_orchestrator_route_classifies_explicit_research_status_as_native_operator_request(self):
+        lane, reason = orchestrator_module._classify_route("show me the status of research:v1_abc")
+
+        assert lane == "operator"
+        assert reason == "native_research_status_request"
 
     def test_orchestrator_legacy_route_hook_includes_default_metadata(self, monkeypatch):
         responses = [
