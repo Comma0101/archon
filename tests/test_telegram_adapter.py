@@ -927,6 +927,46 @@ def test_chat_agent_wires_terminal_feed_proxy_from_activity_sink():
         assert saved
         assert saved[0][0] == "tg-99-20260311-090000"
         assert saved[0][1] == "show me the status of research:v1_abc"
+        assert adapter._agents[99].run_calls == []  # type: ignore[attr-defined]
+
+    def test_natural_language_active_jobs_uses_local_job_store_without_model_turn(self, monkeypatch):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: _TelegramLocalCommandAgent(),
+            poll_timeout_sec=1,
+        )
+        sent = []
+        saved = []
+
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260311-090001")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: saved.append((session_id, user_msg, assistant_msg)),
+        )
+        monkeypatch.setattr(
+            "archon.adapters.telegram.handle_jobs_command",
+            lambda agent, text: (
+                True,
+                "Jobs:\n- research:v1_abc [deep_research] running | now | Research in progress",
+            ) if text == "/jobs active" else (False, ""),
+        )
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+        adapter._handle_message(
+            {
+                "text": "show me active jobs",
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        assert sent
+        assert sent[0][1].startswith("Jobs:")
+        assert saved
+        assert saved[0][0] == "tg-99-20260311-090001"
+        assert saved[0][1] == "show me active jobs"
+        assert adapter._agents[99].run_calls == []  # type: ignore[attr-defined]
 
     def test_jobs_command_renders_job_list(self, monkeypatch):
         adapter = _adapter()

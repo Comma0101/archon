@@ -6,7 +6,11 @@ import re
 from typing import Callable, TypeVar
 
 from archon.control.contracts import RouteDecision
-from archon.control.session_controller import is_ai_news_request, is_broad_scope_request
+from archon.control.session_controller import (
+    extract_explicit_job_status_ref,
+    is_ai_news_request,
+    is_broad_scope_request,
+)
 
 
 T = TypeVar("T")
@@ -210,6 +214,30 @@ def _normalize_mode(mode: str) -> str:
     return "legacy"
 
 
+def describe_orchestrator_mode(cfg) -> str:
+    orchestrator = getattr(cfg, "orchestrator", None)
+    if orchestrator is None:
+        return "legacy"
+    enabled = bool(getattr(orchestrator, "enabled", False))
+    mode = _normalize_mode(str(getattr(orchestrator, "mode", "legacy") or "legacy"))
+    if not enabled:
+        return "legacy"
+    if mode == "hybrid":
+        return "hybrid(shared-executor-routing)"
+    return mode
+
+
+def describe_route_path(path: str) -> str:
+    normalized = str(path or "").strip().lower()
+    if not normalized:
+        return ""
+    if normalized == "hybrid_shared_executor":
+        return "shared-executor-routing"
+    if normalized == "hybrid_stream_shared_executor":
+        return "shared-executor-stream-routing"
+    return normalized.replace("_", "-")
+
+
 def _route_payload(
     *,
     turn_id: str,
@@ -301,6 +329,11 @@ def _classify_route(user_message: str) -> tuple[str, str]:
     text_l = text.lower()
     if is_ai_news_request(text):
         return "operator", "native_news_request"
+    job_ref = extract_explicit_job_status_ref(text)
+    if job_ref:
+        if job_ref.startswith("research:"):
+            return "operator", "native_research_status_request"
+        return "operator", "native_job_status_request"
     if _is_operator_request(text, text_l):
         return "operator", "bounded_file_or_status_request"
     if is_deep_research_request(text_l):

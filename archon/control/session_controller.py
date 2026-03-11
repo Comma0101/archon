@@ -42,6 +42,29 @@ _AI_NEWS_DIRECT_MARKERS = (
 )
 _AI_NEWS_REFRESH_WORDS = {"refresh", "force", "refetch", "rebuild"}
 _AI_NEWS_DELIVERY_WORDS = {"send", "post", "deliver", "share", "push", "forward"}
+_JOB_REF_PATTERN = re.compile(
+    r"\b(?P<kind>research|worker|call):(?P<id>[A-Za-z0-9_-]+)\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_STATUS_PHRASES = (
+    "status of",
+    "status for",
+    "progress of",
+    "progress for",
+    "state of",
+    "state for",
+)
+_STATUS_NEGATION_MARKERS = ("cancel", "stop", "delete", "remove", "purge")
+_JOBS_LIST_PHRASES = (
+    "show active jobs",
+    "show me active jobs",
+    "list active jobs",
+    "show running jobs",
+    "list running jobs",
+    "list jobs",
+    "show jobs",
+    "what jobs are running",
+)
 
 
 def runtime_quiet_seconds(active_run: Any) -> int | None:
@@ -127,6 +150,60 @@ def wants_news_telegram_delivery(text: str) -> bool:
     if "telegram" not in words:
         return False
     return bool(_AI_NEWS_DELIVERY_WORDS & words)
+
+
+def extract_job_ref(text: str) -> str:
+    match = _JOB_REF_PATTERN.search(str(text or ""))
+    if not match:
+        return ""
+    kind = str(match.group("kind") or "").strip().lower()
+    identifier = str(match.group("id") or "").strip()
+    if not kind or not identifier:
+        return ""
+    return f"{kind}:{identifier}"
+
+
+def split_job_ref(job_ref: str) -> tuple[str, str]:
+    ref = str(job_ref or "").strip()
+    if ":" not in ref:
+        return "", ""
+    kind, identifier = ref.split(":", 1)
+    return kind.strip().lower(), identifier.strip()
+
+
+def extract_research_job_id(text: str) -> str:
+    ref = extract_job_ref(text)
+    kind, identifier = split_job_ref(ref)
+    if kind != "research":
+        return ""
+    return f"{kind}:{identifier}"
+
+
+def extract_explicit_job_status_ref(text: str) -> str:
+    compact = _normalize_text(text)
+    if not compact or compact.startswith("/"):
+        return ""
+    if any(marker in compact for marker in _STATUS_NEGATION_MARKERS):
+        return ""
+    ref = extract_job_ref(text)
+    if not ref:
+        return ""
+    if not any(phrase in compact for phrase in _EXPLICIT_STATUS_PHRASES):
+        return ""
+    return ref
+
+
+def is_explicit_research_status_request(text: str) -> bool:
+    return extract_explicit_job_status_ref(text).startswith("research:")
+
+
+def is_explicit_job_list_request(text: str) -> bool:
+    compact = _normalize_text(text)
+    if not compact or compact.startswith("/"):
+        return False
+    if extract_job_ref(text):
+        return False
+    return any(phrase in compact for phrase in _JOBS_LIST_PHRASES)
 
 
 def detect_delegate_continue_target_worker(

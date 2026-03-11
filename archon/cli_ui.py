@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 import threading
 
+from archon.control.orchestrator import describe_route_path
+
 
 ANSI_RESET = "\033[0m"
 ANSI_PROMPT_USER = "\033[93;1m"      # bright yellow + bold
@@ -98,18 +100,22 @@ def _format_turn_stats(
     phase_label: str = "",
     route_lane: str = "",
     route_reason: str = "",
+    route_path: str = "",
 ) -> str:
     """Format a dim per-turn stats line."""
     total = total_in + total_out
     phase = str(phase_label or "").strip()
     lane = (route_lane or "").strip().lower()
     reason = str(route_reason or "").strip().replace("_", " ")
+    path_label = describe_route_path(route_path)
     phase_suffix = f" | phase: {phase}" if phase else ""
     route_suffix = ""
     if lane:
         route_suffix = f" | route: {lane}"
         if reason:
             route_suffix += f" ({reason})"
+        if path_label:
+            route_suffix += f" | path: {path_label}"
     return (
         f"{ANSI_DIM}  {elapsed:.1f}s | {turn_in:,} in | {turn_out:,} out | "
         f"session: {total:,} tokens{phase_suffix}{route_suffix}{ANSI_RESET}"

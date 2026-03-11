@@ -109,6 +109,22 @@ class TestCliFormatting:
         assert "route: job" in out
         assert "broad scope request" in out
 
+    def test_format_turn_stats_includes_route_path_description_when_present(self):
+        out = self._plain(
+            _format_turn_stats(
+                1.23,
+                1234,
+                56,
+                1234,
+                56,
+                route_lane="operator",
+                route_reason="native_research_status_request",
+                route_path="hybrid_shared_executor",
+            )
+        )
+        assert "route: operator" in out
+        assert "shared-executor-routing" in out
+
     def test_format_turn_stats_includes_phase_when_present(self):
         out = self._plain(
             _format_turn_stats(
@@ -1241,7 +1257,7 @@ class TestCliCommands:
         assert "Status:" in msg
         assert "model=google/gemini-x" in msg
         assert "profile=safe" in msg
-        assert "orchestrator=hybrid(shared-executor)" in msg
+        assert "orchestrator=hybrid(shared-executor-routing)" in msg
         assert "calls=on" in msg
         assert "mcp=1/1" in msg
         assert "tokens=150" in msg

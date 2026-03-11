@@ -307,8 +307,10 @@ def chat_cmd(
         turn_id = str(payload.get("turn_id", "")).strip()
         lane = str(payload.get("lane", "")).strip().lower()
         reason = str(payload.get("reason", "")).strip()
+        path = str(payload.get("path", "")).strip()
         route_state["lane"] = lane
         route_state["reason"] = reason
+        route_state["path"] = path
         if lane and turn_id and turn_id not in counted_route_turn_ids:
             route_counts[lane] = route_counts.get(lane, 0) + 1
             counted_route_turn_ids.add(turn_id)
@@ -460,6 +462,7 @@ def chat_cmd(
                 agent.log_label = f"terminal session={session_id}"
                 route_state["lane"] = ""
                 route_state["reason"] = ""
+                route_state["path"] = ""
                 phase_state["label"] = ""
                 approval_state["current_user_input"] = user_input
                 approval_state["blocked_pending_id"] = ""
@@ -504,6 +507,7 @@ def chat_cmd(
                         phase_label=phase_state.get("label", ""),
                         route_lane=route_state.get("lane", ""),
                         route_reason=route_state.get("reason", ""),
+                        route_path=route_state.get("path", ""),
                     )
                 )
             except KeyboardInterrupt:

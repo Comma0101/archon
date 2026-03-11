@@ -46,7 +46,11 @@ from archon.cli_repl_commands import (
     handle_status_command,
 )
 from archon.config import ensure_dirs, load_config
-from archon.control.session_controller import is_ai_news_request
+from archon.control.session_controller import (
+    extract_explicit_job_status_ref,
+    is_ai_news_request,
+    is_explicit_job_list_request,
+)
 from archon.history import new_session_id, save_exchange
 from archon.news.runner import get_or_build_news_digest
 from archon.news.state import load_cached_digest, load_news_state, news_state_path
@@ -378,6 +382,27 @@ class TelegramAdapter:
                 self._format_degraded_local_response(job_agent, body, msg),
             )
             return
+
+        native_job_ref = extract_explicit_job_status_ref(body)
+        if native_job_ref:
+            handled, msg = handle_jobs_command(job_agent, f"/jobs show {native_job_ref}")
+            if handled:
+                self._send_text_and_record(
+                    chat_id,
+                    body,
+                    self._format_degraded_local_response(job_agent, body, msg),
+                )
+                return
+
+        if is_explicit_job_list_request(body):
+            handled, msg = handle_jobs_command(job_agent, "/jobs active")
+            if handled:
+                self._send_text_and_record(
+                    chat_id,
+                    body,
+                    self._format_degraded_local_response(job_agent, body, msg),
+                )
+                return
 
         handled, msg = handle_job_command(job_agent, body)
         if handled:

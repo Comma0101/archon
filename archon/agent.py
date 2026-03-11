@@ -20,7 +20,9 @@ from archon.control.orchestrator import (
 )
 from archon.control.policy import evaluate_mcp_policy, evaluate_tool_policy
 from archon.control.session_controller import (
+    extract_explicit_job_status_ref,
     is_ai_news_request,
+    split_job_ref,
     wants_news_force_refresh,
     wants_news_telegram_delivery,
 )
@@ -347,23 +349,76 @@ class Agent:
         active_profile: str,
         turn_id: str,
     ) -> str | None:
-        if not is_ai_news_request(user_message):
-            return None
+        if is_ai_news_request(user_message):
+            return self._execute_native_tool_request(
+                user_message,
+                active_profile=active_profile,
+                turn_id=turn_id,
+                tool_name="news_brief",
+                arguments={
+                    "force_refresh": wants_news_force_refresh(user_message),
+                    "send_to_telegram": wants_news_telegram_delivery(user_message),
+                },
+                route_path="native_news_direct",
+                route_reason="native_news_request",
+            )
 
-        arguments = {
-            "force_refresh": wants_news_force_refresh(user_message),
-            "send_to_telegram": wants_news_telegram_delivery(user_message),
-        }
+        job_ref = extract_explicit_job_status_ref(user_message)
+        if job_ref:
+            kind, identifier = split_job_ref(job_ref)
+            if kind == "research" and identifier:
+                return self._execute_native_tool_request(
+                    user_message,
+                    active_profile=active_profile,
+                    turn_id=turn_id,
+                    tool_name="check_research_job",
+                    arguments={"job_id": job_ref},
+                    route_path="native_research_status_direct",
+                    route_reason="native_research_status_request",
+                )
+            if kind == "worker" and identifier:
+                return self._execute_native_tool_request(
+                    user_message,
+                    active_profile=active_profile,
+                    turn_id=turn_id,
+                    tool_name="worker_status",
+                    arguments={"session_id": identifier},
+                    route_path="native_worker_status_direct",
+                    route_reason="native_worker_status_request",
+                )
+            if kind == "call" and identifier:
+                return self._execute_native_tool_request(
+                    user_message,
+                    active_profile=active_profile,
+                    turn_id=turn_id,
+                    tool_name="call_mission_status",
+                    arguments={"call_session_id": identifier},
+                    route_path="native_call_status_direct",
+                    route_reason="native_call_status_request",
+                )
+        return None
+
+    def _execute_native_tool_request(
+        self,
+        user_message: str,
+        *,
+        active_profile: str,
+        turn_id: str,
+        tool_name: str,
+        arguments: dict,
+        route_path: str,
+        route_reason: str,
+    ) -> str:
         policy = evaluate_tool_policy(
             config=self.config,
-            tool_name="news_brief",
+            tool_name=tool_name,
             mode="review",
             profile_name=active_profile,
         )
         self._emit_hook(
             "policy.decision",
             {
-                "tool_name": "news_brief",
+                "tool_name": tool_name,
                 "decision": policy.decision,
                 "reason": policy.reason,
                 "profile": policy.profile,
@@ -375,9 +430,9 @@ class Agent:
             build_route_payload(
                 turn_id=turn_id,
                 mode=self._orchestrator_mode(),
-                path="native_news_direct",
+                path=route_path,
                 lane="operator",
-                reason="native_news_request",
+                reason=route_reason,
             ),
         )
 
@@ -385,16 +440,16 @@ class Agent:
         _maybe_capture_preference_memory(user_message)
         if policy.decision == "deny":
             response = (
-                f"Tool 'news_brief' is not allowed under profile '{policy.profile}' "
+                f"Tool '{tool_name}' is not allowed under profile '{policy.profile}' "
                 f"({policy.reason})."
             )
         else:
             if self.on_tool_call is not None:
                 try:
-                    self.on_tool_call("news_brief", dict(arguments))
+                    self.on_tool_call(tool_name, dict(arguments))
                 except Exception:
                     pass
-            response = self.tools.execute("news_brief", arguments)
+            response = self.tools.execute(tool_name, arguments)
         self.history.append({"role": "assistant", "content": response})
         return response
 

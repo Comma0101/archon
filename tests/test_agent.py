@@ -210,6 +210,117 @@ def test_run_prefers_native_research_status_for_explicit_job_id(monkeypatch):
     assert agent.history[-1] == {"role": "assistant", "content": "job_status: completed"}
 
 
+def test_run_prefers_native_worker_status_for_explicit_job_id(monkeypatch):
+    responses = [
+        LLMResponse(
+            text="llm fallback",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "llm fallback"}],
+            input_tokens=1,
+            output_tokens=1,
+        )
+    ]
+    agent = make_agent(responses)
+    monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+    monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+    executed = {}
+
+    def _worker_status(session_id: str, include_events: bool = False, max_events: int = 25) -> str:
+        executed["session_id"] = session_id
+        return "job_status: running"
+
+    agent.tools.register(
+        "worker_status",
+        "Stub worker status tool",
+        {
+            "properties": {
+                "session_id": {"type": "string"},
+                "include_events": {"type": "boolean"},
+                "max_events": {"type": "integer"},
+            },
+            "required": ["session_id"],
+        },
+        _worker_status,
+    )
+
+    result = agent.run("Check the status of worker:sess_123")
+
+    assert result == "job_status: running"
+    assert executed == {"session_id": "sess_123"}
+    assert agent.llm.chat.call_count == 0
+
+
+def test_run_does_not_treat_reasoning_prompt_about_research_job_as_native_status(monkeypatch):
+    responses = [
+        LLMResponse(
+            text="llm reasoning",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "llm reasoning"}],
+            input_tokens=1,
+            output_tokens=1,
+        )
+    ]
+    agent = make_agent(responses)
+    monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+    monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+    executed = {}
+
+    def _check_research_job(job_id: str) -> str:
+        executed["job_id"] = job_id
+        return "job_status: failed"
+
+    agent.tools.register(
+        "check_research_job",
+        "Stub research status tool",
+        {
+            "properties": {
+                "job_id": {"type": "string"},
+            },
+            "required": ["job_id"],
+        },
+        _check_research_job,
+    )
+
+    result = agent.run("Show me why research:v1_abc failed")
+
+    assert result == "llm reasoning"
+    assert executed == {}
+    assert agent.llm.chat.call_count == 1
+
+
+def test_run_native_research_status_honors_policy_deny(monkeypatch):
+    agent = make_agent([])
+    agent.config.profiles["safe"] = ProfileConfig(allowed_tools=["read_file"], max_mode="review")
+    agent.config.orchestrator.enabled = True
+    agent.config.orchestrator.mode = "hybrid"
+    agent.config.orchestrator.shadow_eval = False
+    monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+    monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+    executed = {}
+
+    def _check_research_job(job_id: str) -> str:
+        executed["job_id"] = job_id
+        return "job_status: completed"
+
+    agent.tools.register(
+        "check_research_job",
+        "Stub research status tool",
+        {
+            "properties": {
+                "job_id": {"type": "string"},
+            },
+            "required": ["job_id"],
+        },
+        _check_research_job,
+    )
+
+    result = agent.run("Show me the status of research:v1_abc", policy_profile="safe")
+
+    assert "Tool 'check_research_job' is not allowed under profile 'safe'" in result
+    assert executed == {}
+    assert agent.llm.chat.call_count == 0
+
+
 def capture_non_stream_executor_trace(
     agent: Agent,
     user_message: str,

@@ -8,6 +8,7 @@ from typing import Callable
 
 from archon.calls.store import list_call_job_summaries, load_call_job_summary
 from archon.control.jobs import format_job_summary, format_job_summary_list
+from archon.control.orchestrator import describe_orchestrator_mode
 from archon.control.policy import resolve_profile
 from archon.control.skills import (
     ensure_session_skill_profile,
@@ -93,7 +94,7 @@ def handle_status_command(agent, text: str) -> tuple[bool, str]:
     active_skill = _active_skill_name(agent)
     if active_skill:
         parts.append(f"skill={active_skill}")
-    orchestrator_mode = _describe_orchestrator_mode(cfg)
+    orchestrator_mode = describe_orchestrator_mode(cfg)
     if orchestrator_mode != "legacy":
         parts.append(f"orchestrator={orchestrator_mode}")
     calls_state = "on" if bool(getattr(getattr(cfg, "calls", None), "enabled", False)) else "off"
@@ -957,19 +958,6 @@ def _render_job_detail(agent, job_ref: str) -> str:
     if job is None:
         return f"Job not found: {ref}"
     return format_job_summary(job)
-
-
-def _describe_orchestrator_mode(cfg) -> str:
-    orchestrator = getattr(cfg, "orchestrator", None)
-    if orchestrator is None:
-        return "legacy"
-    enabled = bool(getattr(orchestrator, "enabled", False))
-    mode = str(getattr(orchestrator, "mode", "legacy") or "legacy").strip().lower() or "legacy"
-    if not enabled:
-        return "legacy"
-    if mode == "hybrid":
-        return "hybrid(shared-executor)"
-    return mode
 
 
 def _count_enabled_mcp_servers(cfg) -> int:
