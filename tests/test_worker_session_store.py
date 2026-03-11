@@ -298,6 +298,19 @@ class TestWorkerSessionStore:
         assert record.summary == "Worker session never started"
         assert record.completed_at
 
+    def test_reserve_worker_session_starts_pending_until_runtime_begins(self, monkeypatch, tmp_path):
+        sessions_dir = tmp_path / "workers" / "sessions"
+        events_dir = tmp_path / "workers" / "events"
+        monkeypatch.setattr("archon.workers.session_store.WORKER_SESSIONS_DIR", sessions_dir)
+        monkeypatch.setattr("archon.workers.session_store.WORKER_EVENTS_DIR", events_dir)
+
+        task = WorkerTask(task="Deep analysis", worker="opencode", mode="review", repo_path=str(tmp_path))
+
+        reserved = session_store.reserve_worker_session(task, requested_worker="opencode")
+
+        assert reserved.status == "pending"
+        assert reserved.summary == "Worker session reserved"
+
     def test_list_worker_job_summaries_preserves_live_reserved_runtime(self, monkeypatch, tmp_path):
         sessions_dir = tmp_path / "workers" / "sessions"
         events_dir = tmp_path / "workers" / "events"
@@ -317,7 +330,7 @@ class TestWorkerSessionStore:
         assert len(jobs) == 1
         assert jobs[0].job_id == f"worker:{reserved.session_id}"
         assert jobs[0].status == "running"
-        assert jobs[0].summary == "Worker session reserved"
+        assert jobs[0].summary == "Worker session running"
 
     def test_worker_summary_candidate_uses_unique_project_lookup_hit(self, monkeypatch, tmp_path):
         captured = {}

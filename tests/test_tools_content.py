@@ -145,6 +145,7 @@ class TestDeepResearchTools:
             last_event_at = "2026-03-07T00:01:05Z"
             stream_status = "interaction.complete"
             latest_thought_summary = "Checking sources"
+            event_count = 3
             poll_count = 3
             timeout_minutes = 20
             _refresh_attempted = True
@@ -189,6 +190,7 @@ class TestDeepResearchTools:
                 self.last_event_at = "2026-03-07T00:01:05Z"
                 self.stream_status = "content.delta"
                 self.latest_thought_summary = "Running"
+                self.event_count = 2
                 self.poll_count = 2
                 self.timeout_minutes = 20
                 self._refresh_attempted = True

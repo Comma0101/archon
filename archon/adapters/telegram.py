@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import re
 import secrets
 import sys
 import threading
@@ -47,6 +46,7 @@ from archon.cli_repl_commands import (
     handle_status_command,
 )
 from archon.config import ensure_dirs, load_config
+from archon.control.session_controller import is_ai_news_request
 from archon.history import new_session_id, save_exchange
 from archon.news.runner import get_or_build_news_digest
 from archon.news.state import load_cached_digest, load_news_state, news_state_path
@@ -325,7 +325,7 @@ class TelegramAdapter:
                 body,
                 "Core: /status, /approvals, /jobs, /skills, /mcp, /reset\n"
                 "Context: /compact, /context, /cost\n"
-                "Advanced: /doctor, /permissions, /plugins, /profile, /job <id>, "
+                "Advanced: /doctor, /permissions, /plugins, /profile, /jobs show <job-id>, "
                 "/approve, /deny, /approve_next, /news, /news_status\n"
                 "Dangerous commands can be approved with inline buttons or /approve.",
             )
@@ -595,35 +595,7 @@ class TelegramAdapter:
             self._send_voice_reply_audio(chat_id, reply_text)
 
     def _is_ai_news_request(self, body: str) -> bool:
-        if not isinstance(body, str):
-            return False
-        compact = re.sub(r"[^a-z0-9\s'’]", " ", body.lower())
-        compact = compact.replace("’", " ").strip()
-        compact = re.sub(r"\s+", " ", compact)
-        if not compact:
-            return False
-        if compact.startswith("/"):
-            return False
-
-        words = set(compact.split())
-        if any(marker in compact for marker in (
-            "ai news",
-            "artificial intelligence news",
-            "news briefing",
-            "news digest",
-            "ai-news",
-            "ai news briefing",
-            "ai news digest",
-        )):
-            return True
-
-        if "ai" in words and "news" in words:
-            return bool(
-                {"briefing", "digest", "daily", "today", "latest", "update", "send", "brief"}
-                & words
-            )
-
-        return False
+        return is_ai_news_request(body)
 
     def _handle_chat_body(
         self,

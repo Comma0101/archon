@@ -54,7 +54,7 @@ _EXPLICIT_SKILL_PATTERNS = (
 _TERMINAL_HELP_TEXT = (
     "Core: /status, /approvals, /jobs, /skills, /mcp, /reset, /clear\n"
     "Advanced: /cost, /compact, /context, /doctor, /permissions, /plugins, /model, "
-    "/calls, /profile, /job <id>, /paste\n"
+    "/calls, /profile, /jobs show <job-id>, /paste\n"
     "Use / to browse commands."
 )
 

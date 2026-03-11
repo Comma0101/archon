@@ -137,6 +137,39 @@ def test_agent_bootstraps_deep_research_recovery_once(monkeypatch):
     assert len(calls) == 1
 
 
+def test_run_prefers_native_news_brief_for_ai_news_request(monkeypatch):
+    agent = make_agent([])
+    monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+    monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+    executed = {}
+
+    def _news_brief(force_refresh: bool = False, send_to_telegram: bool = False) -> str:
+        executed["force_refresh"] = force_refresh
+        executed["send_to_telegram"] = send_to_telegram
+        return "Digest markdown"
+
+    agent.tools.register(
+        "news_brief",
+        "Stub news tool",
+        {
+            "properties": {
+                "force_refresh": {"type": "boolean"},
+                "send_to_telegram": {"type": "boolean"},
+            },
+            "required": [],
+        },
+        _news_brief,
+    )
+
+    result = agent.run("Send me today's AI news briefing on Telegram")
+
+    assert result == "Digest markdown"
+    assert executed == {"force_refresh": False, "send_to_telegram": True}
+    assert agent.llm.chat.call_count == 0
+    assert agent.history[-2] == {"role": "user", "content": "Send me today's AI news briefing on Telegram"}
+    assert agent.history[-1] == {"role": "assistant", "content": "Digest markdown"}
+
+
 def capture_non_stream_executor_trace(
     agent: Agent,
     user_message: str,
@@ -2101,6 +2134,12 @@ class TestAgentLoop:
         assert lane == "operator"
         assert reason == "bounded_file_or_status_request"
 
+    def test_orchestrator_route_classifies_ai_news_as_native_operator_request(self):
+        lane, reason = orchestrator_module._classify_route("send me today's ai news briefing")
+
+        assert lane == "operator"
+        assert reason == "native_news_request"
+
     def test_orchestrator_legacy_route_hook_includes_default_metadata(self, monkeypatch):
         responses = [
             LLMResponse(
@@ -2372,9 +2411,9 @@ class TestAgentLoop:
         assert "Effective tool scope: all tools" in system_prompt_arg
         assert "Active skill: none" in system_prompt_arg
 
-    def test_source_awareness_summary_uses_git_and_agent_context(self, monkeypatch, tmp_path):
-        context_path = tmp_path / "AGENT_CONTEXT.json"
-        context_path.write_text(
+    def test_source_awareness_summary_prefers_codebase_context(self, monkeypatch, tmp_path):
+        codebase_context_path = tmp_path / "CODEBASE_CONTEXT.json"
+        codebase_context_path.write_text(
             """
 {
   "project": "archon",
@@ -2388,7 +2427,31 @@ class TestAgentLoop:
 }
 """.strip()
         )
-        monkeypatch.setattr(prompt_module, "AGENT_CONTEXT_PATH", context_path, raising=False)
+        legacy_context_path = tmp_path / "AGENT_CONTEXT.json"
+        legacy_context_path.write_text(
+            """
+{
+  "project": "legacy-archon",
+  "version": "0.0.9",
+  "total_tests": 1,
+  "changelog": [
+    "legacy change"
+  ]
+}
+""".strip()
+        )
+        monkeypatch.setattr(
+            prompt_module,
+            "CODEBASE_CONTEXT_PATH",
+            codebase_context_path,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            prompt_module,
+            "AGENT_CONTEXT_PATH",
+            legacy_context_path,
+            raising=False,
+        )
         monkeypatch.setattr(
             prompt_module,
             "_git_output",
@@ -2408,6 +2471,52 @@ class TestAgentLoop:
         assert "new routing update" in summary
         assert "research job inspection tools" in summary
         assert "older change" not in summary
+        assert "legacy-archon" not in summary
+
+    def test_source_awareness_summary_falls_back_to_legacy_agent_context(
+        self, monkeypatch, tmp_path
+    ):
+        legacy_context_path = tmp_path / "AGENT_CONTEXT.json"
+        legacy_context_path.write_text(
+            """
+{
+  "project": "archon",
+  "version": "0.1.0",
+  "total_tests": 537,
+  "changelog": [
+    "older change",
+    "new routing update",
+    "research job inspection tools"
+  ]
+}
+""".strip()
+        )
+        monkeypatch.setattr(
+            prompt_module,
+            "CODEBASE_CONTEXT_PATH",
+            tmp_path / "missing-CODEBASE_CONTEXT.json",
+            raising=False,
+        )
+        monkeypatch.setattr(
+            prompt_module,
+            "AGENT_CONTEXT_PATH",
+            legacy_context_path,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            prompt_module,
+            "_git_output",
+            lambda *args: "master" if "--abbrev-ref" in args else "f8f7106",
+            raising=False,
+        )
+
+        summary_fn = getattr(prompt_module, "build_source_awareness_summary", None)
+        assert callable(summary_fn)
+        summary = summary_fn()
+
+        assert "[Source Awareness]" in summary
+        assert "Project: archon v0.1.0" in summary
+        assert "Verified tests: 537" in summary
 
     def test_run_appends_source_awareness_to_turn_prompt(self, monkeypatch):
         responses = [

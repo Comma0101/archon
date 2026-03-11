@@ -184,7 +184,8 @@ def test_consume_research_stream_persists_progress_and_completion(tmp_path, monk
     assert record.status == "completed"
     assert record.summary == "Final answer"
     assert record.output_text == "Final answer"
-    assert record.poll_count == 2
+    assert record.event_count == 2
+    assert record.poll_count == 0
 
 
 def test_consume_research_stream_marks_unfinished_stream_as_error(tmp_path, monkeypatch):

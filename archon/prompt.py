@@ -15,6 +15,7 @@ from archon.memory import summary as memory_summary
 
 
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
+CODEBASE_CONTEXT_PATH = Path(__file__).parent.parent / "CODEBASE_CONTEXT.json"
 AGENT_CONTEXT_PATH = Path(__file__).parent.parent / "AGENT_CONTEXT.json"
 
 
@@ -118,6 +119,18 @@ def _git_output(*args: str) -> str:
     return str(result.stdout or "").strip()
 
 
+def _load_source_awareness_payload() -> dict:
+    """Load the preferred source-awareness context with legacy fallback."""
+    for path in (CODEBASE_CONTEXT_PATH, AGENT_CONTEXT_PATH):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
+
+
 def build_source_awareness_summary() -> str:
     """Render a compact source-of-truth summary for capability grounding."""
     lines: list[str] = ["[Source Awareness]"]
@@ -129,12 +142,7 @@ def build_source_awareness_summary() -> str:
     if head:
         lines.append(f"Git head: {head}")
 
-    try:
-        payload = json.loads(AGENT_CONTEXT_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
+    payload = _load_source_awareness_payload()
 
     project = str(payload.get("project", "") or "").strip()
     version = str(payload.get("version", "") or "").strip()

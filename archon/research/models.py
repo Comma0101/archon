@@ -22,6 +22,7 @@ class ResearchJobRecord:
     last_event_id: str = ""
     stream_status: str = ""
     latest_thought_summary: str = ""
+    event_count: int = 0
     poll_count: int = 0
     timeout_minutes: int = 20
 
@@ -42,6 +43,7 @@ class ResearchJobRecord:
             "last_event_id": self.last_event_id,
             "stream_status": self.stream_status,
             "latest_thought_summary": self.latest_thought_summary,
+            "event_count": int(self.event_count or 0),
             "poll_count": int(self.poll_count or 0),
             "timeout_minutes": int(self.timeout_minutes or 20),
         }
@@ -64,6 +66,7 @@ class ResearchJobRecord:
             last_event_id=str(data.get("last_event_id", "") or ""),
             stream_status=str(data.get("stream_status", "") or ""),
             latest_thought_summary=str(data.get("latest_thought_summary", "") or ""),
+            event_count=int(data.get("event_count", 0) or 0),
             poll_count=int(data.get("poll_count", 0) or 0),
             timeout_minutes=int(data.get("timeout_minutes", 20) or 20),
         )

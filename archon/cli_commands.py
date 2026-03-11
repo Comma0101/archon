@@ -47,7 +47,6 @@ SLASH_COMMAND_GROUPS = (
             ("/calls", "call controls"),
             ("/profile", "policy profiles"),
             ("/jobs", "recent jobs"),
-            ("/job", "job summary"),
         ),
     ),
     (

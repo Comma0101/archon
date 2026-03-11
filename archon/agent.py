@@ -14,10 +14,16 @@ from typing import Callable, Generator, TypeVar, cast
 from archon import memory as memory_store
 from archon.control.hooks import HookBus
 from archon.control.orchestrator import (
+    build_route_payload,
     orchestrate_response,
     orchestrate_stream_response,
 )
 from archon.control.policy import evaluate_mcp_policy, evaluate_tool_policy
+from archon.control.session_controller import (
+    is_ai_news_request,
+    wants_news_force_refresh,
+    wants_news_telegram_delivery,
+)
 from archon.execution.turn_executor import execute_turn, execute_turn_stream
 from archon.llm import LLMClient, LLMResponse
 from archon.tools import ToolRegistry
@@ -125,6 +131,13 @@ class Agent:
         log_prefix = _make_log_prefix(self.log_label, turn_id)
         self._trim_history_if_needed()
         self._repair_history_tool_sequence()
+        native_result = self._maybe_handle_native_capability_request(
+            user_message,
+            active_profile=active_profile,
+            turn_id=turn_id,
+        )
+        if native_result is not None:
+            return native_result
         self.history.append({"role": "user", "content": user_message})
         _maybe_capture_preference_memory(user_message)
         skill_guidance = build_skill_guidance(self.config, profile_name=active_profile)
@@ -172,6 +185,14 @@ class Agent:
         log_prefix = _make_log_prefix(self.log_label, turn_id)
         self._trim_history_if_needed()
         self._repair_history_tool_sequence()
+        native_result = self._maybe_handle_native_capability_request(
+            user_message,
+            active_profile=active_profile,
+            turn_id=turn_id,
+        )
+        if native_result is not None:
+            yield native_result
+            return
         self.history.append({"role": "user", "content": user_message})
         _maybe_capture_preference_memory(user_message)
         skill_guidance = build_skill_guidance(self.config, profile_name=active_profile)
@@ -296,9 +317,67 @@ class Agent:
             cfg_profile = str(
                 getattr(orchestrator_cfg, "default_profile", "default") or "default"
             ).strip()
-            if cfg_profile:
-                return cfg_profile
+        if cfg_profile:
+            return cfg_profile
         return "default"
+
+    def _maybe_handle_native_capability_request(
+        self,
+        user_message: str,
+        *,
+        active_profile: str,
+        turn_id: str,
+    ) -> str | None:
+        if not is_ai_news_request(user_message):
+            return None
+
+        arguments = {
+            "force_refresh": wants_news_force_refresh(user_message),
+            "send_to_telegram": wants_news_telegram_delivery(user_message),
+        }
+        policy = evaluate_tool_policy(
+            config=self.config,
+            tool_name="news_brief",
+            mode="review",
+            profile_name=active_profile,
+        )
+        self._emit_hook(
+            "policy.decision",
+            {
+                "tool_name": "news_brief",
+                "decision": policy.decision,
+                "reason": policy.reason,
+                "profile": policy.profile,
+                "mode": policy.mode,
+            },
+        )
+        self._emit_hook(
+            "orchestrator.route",
+            build_route_payload(
+                turn_id=turn_id,
+                mode=self._orchestrator_mode(),
+                path="native_news_direct",
+                lane="operator",
+                reason="native_news_request",
+            ),
+        )
+
+        self.history.append({"role": "user", "content": user_message})
+        _maybe_capture_preference_memory(user_message)
+        if policy.decision == "deny":
+            response = (
+                f"Tool 'news_brief' is not allowed under profile '{policy.profile}' "
+                f"({policy.reason})."
+            )
+        else:
+            if self.on_tool_call is not None:
+                try:
+                    self.on_tool_call("news_brief", dict(arguments))
+                except Exception:
+                    pass
+            response = self.tools.execute("news_brief", arguments)
+        self.history.append({"role": "assistant", "content": response})
+        return response
 
     def _create_google_deep_research_client(self):
         from archon.research.google_deep_research import GoogleDeepResearchClient

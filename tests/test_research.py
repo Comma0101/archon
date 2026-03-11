@@ -421,7 +421,53 @@ def test_load_research_job_refresh_tracks_poll_metadata_and_provider_status(tmp_
     assert record.provider_status == "in_progress"
     assert record.last_polled_at
     assert record.poll_count == 1
+    assert record.event_count == 0
     assert record.summary == "Research in progress"
+
+
+def test_consume_research_stream_tracks_event_count_without_incrementing_poll_count(tmp_path, monkeypatch):
+    jobs_dir = tmp_path / "research" / "jobs"
+    monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", jobs_dir)
+
+    save_research_job(
+        ResearchJobRecord(
+            interaction_id="abc",
+            status="running",
+            prompt="Research LA restaurant market",
+            agent="deep-research-pro-preview-12-2025",
+            created_at="2099-03-08T07:50:00Z",
+            updated_at="2099-03-08T07:55:00Z",
+            summary="Research job started",
+            output_text="",
+            error="",
+            poll_count=4,
+        )
+    )
+
+    events = [
+        SimpleNamespace(
+            event_type="content.delta",
+            event_id="evt-1",
+            text="Checking sources",
+            delta_type="thought_summary",
+            status="in_progress",
+        ),
+        SimpleNamespace(
+            event_type="interaction.complete",
+            event_id="evt-2",
+            text="Final report",
+            delta_type="text",
+            status="completed",
+        ),
+    ]
+
+    record = research_store.consume_research_stream("abc", events, mark_unfinished_as_error=False)
+
+    assert record is not None
+    assert record.event_count == 2
+    assert record.poll_count == 4
+    assert record.last_event_id == "evt-2"
+    assert record.status == "completed"
 
 
 def test_load_research_job_emits_progress_event_on_nonterminal_refresh(tmp_path, monkeypatch):

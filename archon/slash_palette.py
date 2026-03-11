@@ -21,6 +21,11 @@ def build_palette_items(
     """Build executable slash command items for the live palette."""
     items: list[tuple[str, str]] = []
     seen: set[str] = set()
+    visible_commands = {
+        str(value or "").strip()
+        for value, _desc in slash_commands
+        if str(value or "").strip()
+    }
 
     for value, desc in slash_commands:
         normalized = str(value or "").strip()
@@ -29,6 +34,8 @@ def build_palette_items(
             items.append((normalized, desc))
 
     for command, values in slash_subvalues.items():
+        if str(command or "").strip() not in visible_commands:
+            continue
         for value, desc in _picker_selectable_subvalues(command, values):
             full_value = f"{command} {value}".strip()
             if full_value and full_value not in seen:

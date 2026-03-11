@@ -25,6 +25,11 @@ WORKERS_STATE_DIR = STATE_DIR / "workers"
 WORKER_SESSIONS_DIR = WORKERS_STATE_DIR / "sessions"
 WORKER_EVENTS_DIR = WORKERS_STATE_DIR / "events"
 _STORE_LOCK = threading.RLock()
+_TRANSITIONAL_WORKER_SUMMARIES = {
+    "Worker session reserved",
+    "Worker session starting",
+    "Worker session running",
+}
 
 
 def record_worker_run(
@@ -127,7 +132,7 @@ def reserve_worker_session(task: WorkerTask, requested_worker: str) -> WorkerSes
             requested_worker=(requested_worker or task.worker or "auto"),
             selected_worker="",
             mode=task.mode,
-            status="running",
+            status="pending",
             repo_path=str(Path(task.repo_path).expanduser().resolve()),
             task=task.task,
             constraints=task.constraints,
@@ -142,9 +147,40 @@ def reserve_worker_session(task: WorkerTask, requested_worker: str) -> WorkerSes
         _write_session_record(
             record,
             task,
-            WorkerResult(worker="", status="running", repo_path=record.repo_path),
+            WorkerResult(worker="", status="pending", repo_path=record.repo_path),
             turns=[],
         )
+        return record
+
+
+def sync_worker_session_runtime_state(
+    session_id: str,
+    *,
+    status: str,
+    summary: str = "",
+    selected_worker: str = "",
+) -> WorkerSessionRecord | None:
+    with _STORE_LOCK:
+        payload, record = _load_payload_and_record(session_id)
+        if payload is None or record is None:
+            return None
+        if str(record.status or "").strip().lower() in {"ok", "failed", "timeout", "unsupported", "unavailable", "error", "cancelled"}:
+            return record
+        normalized = str(status or "").strip().lower()
+        if not normalized:
+            return record
+        record.updated_at = _now_iso()
+        record.status = normalized
+        if selected_worker and not str(record.selected_worker or "").strip():
+            record.selected_worker = selected_worker
+        if summary.strip():
+            record.summary = summary.strip()
+        elif normalized == "starting" and record.summary in _TRANSITIONAL_WORKER_SUMMARIES:
+            record.summary = "Worker session starting"
+        elif normalized == "running" and record.summary in _TRANSITIONAL_WORKER_SUMMARIES:
+            record.summary = "Worker session running"
+        payload["record"] = record.to_dict()
+        _write_payload(session_id, payload)
         return record
 
 
@@ -361,9 +397,9 @@ def reconcile_worker_session(
 def _maybe_reconcile_stale_reserved_session(record: WorkerSessionRecord | None) -> WorkerSessionRecord | None:
     if record is None:
         return None
-    if str(record.status or "").strip().lower() not in {"running", "starting"}:
+    if str(record.status or "").strip().lower() not in {"pending", "running", "starting"}:
         return record
-    if str(record.summary or "").strip() != "Worker session reserved":
+    if str(record.summary or "").strip() not in _TRANSITIONAL_WORKER_SUMMARIES:
         return record
     try:
         from archon.workers.runtime import get_background_run
@@ -379,7 +415,11 @@ def _maybe_reconcile_stale_reserved_session(record: WorkerSessionRecord | None) 
         "starting",
         "running",
     }:
-        return record
+        synced = sync_worker_session_runtime_state(
+            record.session_id,
+            status=str(getattr(active_run, "state", "") or "").strip().lower(),
+        )
+        return synced or record
     reconciled = reconcile_worker_session(
         record.session_id,
         reason="Worker session never started",

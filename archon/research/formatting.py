@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+_RECENT_PROGRESS_WINDOW_SEC = 60
+
 
 def format_research_job_record(record, *, cfg=None) -> str:
     interaction_id = str(getattr(record, "interaction_id", "") or "").strip()
@@ -15,13 +17,11 @@ def format_research_job_record(record, *, cfg=None) -> str:
     last_event_at = str(getattr(record, "last_event_at", "") or "").strip() or "(not yet streamed)"
     stream_status = str(getattr(record, "stream_status", "") or "").strip() or "(not yet started)"
     latest_thought_summary = str(getattr(record, "latest_thought_summary", "") or "").strip()
+    event_count = max(0, int(getattr(record, "event_count", 0) or 0))
     poll_count = max(0, int(getattr(record, "poll_count", 0) or 0))
     created_at = str(getattr(record, "created_at", "") or "").strip()
     created_at_dt = _parse_iso_datetime(created_at)
-    last_polled_dt = _parse_iso_datetime(last_polled_at if last_polled_at != "(not yet refreshed)" else "")
     last_event_dt = _parse_iso_datetime(last_event_at if last_event_at != "(not yet streamed)" else "")
-    if last_event_dt is None:
-        last_event_dt = last_polled_dt
     timeout_minutes = max(
         1,
         int(
@@ -45,7 +45,7 @@ def format_research_job_record(record, *, cfg=None) -> str:
         f"job_last_event_at: {last_event_at}",
         f"job_stream_status: {stream_status}",
         f"job_elapsed: {_format_elapsed(created_at)}",
-        f"job_event_count: {poll_count}",
+        f"job_event_count: {event_count}",
         f"job_poll_count: {poll_count}",
         f"job_live_status: {_format_research_live_status(status, stream_status, last_event_dt, created_at_dt, timeout_minutes)}",
         f"job_stream_age: {_format_refresh_age(last_event_dt)}",
@@ -66,7 +66,7 @@ def format_research_job_compact_line(record, *, cfg=None) -> str:
     interaction_id = str(getattr(record, "interaction_id", "") or "").strip()
     status = str(getattr(record, "status", "") or "unknown").strip() or "unknown"
     provider_status = str(getattr(record, "provider_status", "") or status).strip() or status
-    event_count = max(0, int(getattr(record, "poll_count", 0) or 0))
+    event_count = max(0, int(getattr(record, "event_count", 0) or 0))
     summary = str(getattr(record, "summary", "") or "").strip()
     if not summary:
         summary = str(getattr(record, "prompt", "") or "").strip()
@@ -123,7 +123,10 @@ def _format_research_live_status(
         if _research_runtime_exceeds_timeout(created_at, timeout_minutes):
             return f"stream active | running longer than configured {timeout_minutes}m timeout"
         if last_event_at is not None:
-            return "stream active | receiving progress"
+            age_seconds = max(0, int((datetime.now(timezone.utc) - last_event_at).total_seconds()))
+            if age_seconds <= _RECENT_PROGRESS_WINDOW_SEC:
+                return "stream active | recent progress"
+            return "stream active | waiting for next progress"
         return "stream started | waiting for first event"
     if normalized == "requires_action":
         return "stream active | action required"

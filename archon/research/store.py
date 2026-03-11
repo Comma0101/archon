@@ -169,7 +169,8 @@ def consume_research_stream(
                 last_event_id=event_id or latest.last_event_id,
                 stream_status=event_type,
                 latest_thought_summary=latest_thought_summary,
-                poll_count=max(0, int(latest.poll_count or 0)) + 1,
+                event_count=max(0, int(latest.event_count or 0)) + 1,
+                poll_count=max(0, int(latest.poll_count or 0)),
                 timeout_minutes=max(1, int(latest.timeout_minutes or 20)),
             )
         )
@@ -191,6 +192,7 @@ def consume_research_stream(
                 last_event_id=latest.last_event_id,
                 stream_status="stream.ended",
                 latest_thought_summary=latest.latest_thought_summary,
+                event_count=max(0, int(latest.event_count or 0)),
                 poll_count=max(0, int(latest.poll_count or 0)),
                 timeout_minutes=max(1, int(latest.timeout_minutes or 20)),
             )
@@ -306,6 +308,7 @@ def recover_incomplete_research_jobs(*, client, hook_bus=None) -> int:
                     last_event_id=record.last_event_id,
                     stream_status=record.stream_status or "recovery.unavailable",
                     latest_thought_summary=record.latest_thought_summary,
+                    event_count=max(0, int(record.event_count or 0)),
                     poll_count=max(0, int(record.poll_count or 0)),
                     timeout_minutes=max(1, int(record.timeout_minutes or 20)),
                 )
@@ -513,6 +516,7 @@ def _save_research_stream_error(
             last_event_id=record.last_event_id,
             stream_status=stream_status,
             latest_thought_summary=record.latest_thought_summary,
+            event_count=max(0, int(record.event_count or 0)),
             poll_count=max(0, int(record.poll_count or 0)),
             timeout_minutes=max(1, int(record.timeout_minutes or 20)),
         )
@@ -616,6 +620,7 @@ def _refresh_research_job(record: ResearchJobRecord, *, refresh_client=None, hoo
                 ),
                 provider_status=status,
                 last_polled_at=polled_at,
+                event_count=max(0, int(record.event_count or 0)),
                 poll_count=max(0, int(record.poll_count or 0)) + 1,
                 timeout_minutes=timeout_minutes,
             )
@@ -648,6 +653,11 @@ def _refresh_research_job(record: ResearchJobRecord, *, refresh_client=None, hoo
         error=record.error,
         provider_status=provider_status,
         last_polled_at=polled_at,
+        last_event_at=record.last_event_at,
+        last_event_id=record.last_event_id,
+        stream_status=record.stream_status,
+        latest_thought_summary=record.latest_thought_summary,
+        event_count=max(0, int(record.event_count or 0)),
         poll_count=max(0, int(record.poll_count or 0)) + 1,
         timeout_minutes=timeout_minutes,
     )
@@ -702,6 +712,7 @@ def _reconcile_local_research_job(record: ResearchJobRecord, *, hook_bus=None) -
             last_event_id=record.last_event_id,
             stream_status=record.stream_status or "stream.inactive",
             latest_thought_summary=record.latest_thought_summary,
+            event_count=max(0, int(record.event_count or 0)),
             poll_count=max(0, int(record.poll_count or 0)),
             timeout_minutes=max(1, int(record.timeout_minutes or 20)),
         )

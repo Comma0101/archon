@@ -31,6 +31,17 @@ _DEEP_SCOPE_UNDERSTAND_PATTERNS = (
     re.compile(r"\breview architecture\b"),
     re.compile(r"\barchitecture review\b"),
 )
+_AI_NEWS_DIRECT_MARKERS = (
+    "ai news",
+    "artificial intelligence news",
+    "news briefing",
+    "news digest",
+    "ai-news",
+    "ai news briefing",
+    "ai news digest",
+)
+_AI_NEWS_REFRESH_WORDS = {"refresh", "force", "refetch", "rebuild"}
+_AI_NEWS_DELIVERY_WORDS = {"send", "post", "deliver", "share", "push", "forward"}
 
 
 def runtime_quiet_seconds(active_run: Any) -> int | None:
@@ -91,6 +102,31 @@ def is_broad_scope_request(task: str) -> bool:
     has_broad = _matches_any_pattern(task_l, _DEEP_SCOPE_BROAD_PATTERNS)
     has_understand = _matches_any_pattern(task_l, _DEEP_SCOPE_UNDERSTAND_PATTERNS)
     return has_scope and (has_broad or has_understand)
+
+
+def is_ai_news_request(text: str) -> bool:
+    compact = _normalize_text(text)
+    if not compact or compact.startswith("/"):
+        return False
+    words = set(compact.split())
+    if any(marker in compact for marker in _AI_NEWS_DIRECT_MARKERS):
+        return True
+    if "ai" in words and "news" in words:
+        return bool({"briefing", "digest", "daily", "today", "latest", "update", "send", "brief"} & words)
+    return False
+
+
+def wants_news_force_refresh(text: str) -> bool:
+    words = set(_normalize_text(text).split())
+    return bool(_AI_NEWS_REFRESH_WORDS & words)
+
+
+def wants_news_telegram_delivery(text: str) -> bool:
+    compact = _normalize_text(text)
+    words = set(compact.split())
+    if "telegram" not in words:
+        return False
+    return bool(_AI_NEWS_DELIVERY_WORDS & words)
 
 
 def detect_delegate_continue_target_worker(
@@ -200,3 +236,9 @@ def find_latest_worker_session_for_repo(
 
 def _matches_any_pattern(text: str, patterns: tuple[re.Pattern[str], ...]) -> bool:
     return any(pattern.search(text) for pattern in patterns)
+
+
+def _normalize_text(text: str) -> str:
+    compact = re.sub(r"[^a-z0-9\s'’]", " ", str(text or "").lower())
+    compact = compact.replace("’", " ").strip()
+    return re.sub(r"\s+", " ", compact)

@@ -121,22 +121,20 @@ git commit -m "refactor: remove stale control paths and sync codebase context"
 
 **Files:**
 - Modify: `archon/slash_palette.py`
-- Modify: `archon/ux/terminal_feed.py`
-- Modify: `archon/cli_interactive_commands.py`
+- Modify: `archon/cli_commands.py`
+- Modify: `archon/cli_repl_commands.py`
 - Modify: `archon/adapters/telegram.py`
-- Modify: `archon/audio/tts.py`
 - Test: `tests/test_slash_palette.py`
-- Test: `tests/test_terminal_feed.py`
 - Test: `tests/test_cli.py`
-- Test: `tests/test_audio_tts.py`
 - Test: `tests/test_telegram_adapter.py`
 
 **Step 1: Write the failing tests**
 - Add only the UX regressions still open after Tasks 1-3.
-- Keep tests behavior-focused: prompt redraw, slash predictability, `/jobs` clarity, and long voice reply completion.
+- Keep tests behavior-focused: slash predictability, `/jobs` clarity, and removal of duplicate advertised job commands.
+- Note: prompt redraw and long voice reply completion were already fixed in the base branch before this worktree started, so they are verified but not reimplemented here.
 
 **Step 2: Run tests to verify they fail**
-Run: `pytest tests/test_slash_palette.py tests/test_terminal_feed.py tests/test_cli.py tests/test_audio_tts.py tests/test_telegram_adapter.py -q`
+Run: `pytest tests/test_slash_palette.py tests/test_cli.py tests/test_telegram_adapter.py -q`
 Expected: FAIL for the new UX regressions.
 
 **Step 3: Write minimal implementation**
@@ -149,7 +147,7 @@ Expected: PASS
 
 **Step 5: Commit**
 ```bash
-git add archon/slash_palette.py archon/ux/terminal_feed.py archon/cli_interactive_commands.py archon/adapters/telegram.py archon/audio/tts.py tests/test_slash_palette.py tests/test_terminal_feed.py tests/test_cli.py tests/test_audio_tts.py tests/test_telegram_adapter.py
+git add archon/slash_palette.py archon/cli_commands.py archon/cli_repl_commands.py archon/adapters/telegram.py tests/test_slash_palette.py tests/test_terminal_feed.py tests/test_cli.py tests/test_audio_tts.py tests/test_telegram_adapter.py
 git commit -m "fix: improve trusted terminal and telegram ux"
 ```
 
@@ -161,7 +159,7 @@ git commit -m "fix: improve trusted terminal and telegram ux"
 - Modify: `docs/plans/2026-03-10-reliability-coherence-plan.md`
 
 **Step 1: Run the focused milestone verification**
-Run: `pytest tests/test_cli.py tests/test_telegram_adapter.py tests/test_terminal_feed.py tests/test_audio_tts.py tests/test_agent.py tests/test_orchestrator.py tests/test_research_store.py tests/test_tools_workers.py tests/test_slash_palette.py -q`
+Run: `pytest tests/test_cli.py tests/test_telegram_adapter.py tests/test_terminal_feed.py tests/test_audio_tts.py tests/test_agent.py tests/test_research_store.py tests/test_tools_workers.py tests/test_slash_palette.py -q`
 Expected: PASS
 
 **Step 2: Run the broader suite**

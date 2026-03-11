@@ -134,13 +134,13 @@ def register_delegate_tool(registry, ns, worker_send):
             lines.append("The matched worker session is still running. Use worker_poll / worker_status instead of starting a new delegation.")
             return "\n".join(lines)
 
-        if session_record.status == "running" and not active_run:
+        if session_record.status in {"pending", "starting", "running"} and not active_run:
             return (
                 "session_reuse: blocked_stale_running_record\n"
                 f"reuse_reason: {reuse_reason}\n"
                 f"matched_archon_session_id: {session_record.session_id}\n"
                 f"matched_worker: {rec_worker}\n"
-                "The matched session is marked running but has no active runtime entry. "
+                "The matched session is marked active but has no live runtime entry. "
                 "Check worker_status/worker_poll and use worker_reconcile if it is stale."
             )
 

@@ -82,6 +82,9 @@ Remove stale paths and regenerate `CODEBASE_CONTEXT.json`.
 
 ### Phase 4: UX Trust Pass
 Polish prompt redraw, command predictability, and cross-surface output consistency.
+In execution, this phase narrowed to the remaining trust-breaking job-command confusion because
+the terminal redraw and long TTS reply fixes were already present in the base branch before this
+worktree started.
 
 ## Testing Strategy
 The milestone should rely on focused regression coverage rather than broad speculative refactors.

@@ -41,6 +41,21 @@ def test_build_palette_items_expands_executable_leaf_commands():
     assert "/plugins show" not in values
 
 
+def test_build_palette_items_omits_hidden_alias_subcommands():
+    items = build_palette_items(
+        [("/jobs", "recent jobs")],
+        {
+            "/jobs": [("show research:abc", "Show one recent job")],
+            "/job": [("research:abc", "Legacy alias for one recent job")],
+        },
+    )
+    values = [value for value, _desc in items]
+
+    assert "/jobs" in values
+    assert "/jobs show research:abc" in values
+    assert "/job research:abc" not in values
+
+
 def test_filter_palette_items_shows_all_commands_for_root_query():
     items = build_palette_items(
         build_slash_commands(),

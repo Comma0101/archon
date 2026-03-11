@@ -7,7 +7,12 @@ from datetime import datetime, timezone
 
 from archon.execution.runner import run_worker_task
 from archon.workers.base import WorkerEvent, WorkerExecObserver, WorkerResult, WorkerTask
-from archon.workers.session_store import append_worker_events, record_worker_run, reserve_worker_session
+from archon.workers.session_store import (
+    append_worker_events,
+    record_worker_run,
+    reserve_worker_session,
+    sync_worker_session_runtime_state,
+)
 
 
 @dataclass
@@ -55,6 +60,11 @@ def start_background_worker(task: WorkerTask, requested_worker: str, *, hook_bus
     run.thread_name = thread.name
     with _LOCK:
         _RUNS[reserved.session_id] = run
+    sync_worker_session_runtime_state(
+        reserved.session_id,
+        status="starting",
+        summary="Worker session starting",
+    )
     thread.start()
     return run
 
@@ -206,6 +216,11 @@ class _RuntimeExecObserver(WorkerExecObserver):
         _set_process(self.session_id, process)
         pid = int(getattr(process, "pid", 0) or 0)
         _update_run(self.session_id, pid=pid, process_state="running")
+        sync_worker_session_runtime_state(
+            self.session_id,
+            status="running",
+            summary="Worker session running",
+        )
         append_worker_events(
             self.session_id,
             [WorkerEvent(kind="runtime.process.started", payload={"pid": pid})],

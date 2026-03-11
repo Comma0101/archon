@@ -508,6 +508,8 @@ def test_chat_agent_wires_terminal_feed_proxy_from_activity_sink():
         assert "Core: /status, /approvals, /jobs, /skills, /mcp, /reset" in sent[0][1]
         assert "Advanced:" in sent[0][1]
         assert "/plugins" in sent[0][1]
+        assert "/jobs show <job-id>" in sent[0][1]
+        assert "/job <id>" not in sent[0][1]
 
     def test_startup_sync_skips_pending_updates_by_advancing_offset(self, monkeypatch):
         adapter = _adapter()

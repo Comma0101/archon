@@ -405,6 +405,8 @@ class TestCliCommands:
         assert "Advanced:" in msg
         assert "/cost" in msg
         assert "/permissions" in msg
+        assert "/jobs show <job-id>" in msg
+        assert "/job <id>" not in msg
         assert "Use / to browse commands." in msg
 
     def test_handle_repl_command_approvals_toggle_reports_requested_mode_without_state(self):
@@ -884,6 +886,7 @@ class TestCliCommands:
             last_event_at="2026-03-06T22:10:06Z",
             stream_status="content.delta",
             latest_thought_summary="Checking sources",
+            event_count=2,
             poll_count=3,
         )
         monkeypatch.setattr(
@@ -907,9 +910,10 @@ class TestCliCommands:
         assert "job_status: in_progress" in msg
         assert "job_provider_status: in_progress" in msg
         assert "job_last_polled_at: 2026-03-06T22:10:05Z" in msg
-        assert "job_event_count: 3" in msg
+        assert "job_event_count: 2" in msg
+        assert "job_poll_count: 3" in msg
         assert "job_elapsed:" in msg
-        assert "job_live_status: stream active | receiving progress" in msg
+        assert "job_live_status: stream active | waiting for next progress" in msg
         assert "job_stream_age:" in msg
 
     def test_handle_repl_command_job_marks_overdue_research_as_not_running_normally(self, monkeypatch):
@@ -2791,8 +2795,7 @@ class TestSlashCompleter:
 
     def test_job_prefix_matches_job_commands(self):
         assert _slash_completer("/jo", 0) == "/jobs"
-        assert _slash_completer("/jo", 1) == "/job"
-        assert _slash_completer("/jo", 2) is None
+        assert _slash_completer("/jo", 1) is None
 
     def test_mcp_prefix_matches_command(self):
         assert _slash_completer("/mc", 0) == "/mcp"

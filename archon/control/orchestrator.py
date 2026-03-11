@@ -6,7 +6,7 @@ import re
 from typing import Callable, TypeVar
 
 from archon.control.contracts import RouteDecision
-from archon.control.session_controller import is_broad_scope_request
+from archon.control.session_controller import is_ai_news_request, is_broad_scope_request
 
 
 T = TypeVar("T")
@@ -299,6 +299,8 @@ def _classify_route(user_message: str) -> tuple[str, str]:
         return "fast", "simple_chat"
 
     text_l = text.lower()
+    if is_ai_news_request(text):
+        return "operator", "native_news_request"
     if _is_operator_request(text, text_l):
         return "operator", "bounded_file_or_status_request"
     if is_deep_research_request(text_l):
