@@ -25,6 +25,7 @@ from archon.research.store import (
     load_research_job_summary,
     purge_completed_jobs,
 )
+from archon.usage import summarize_usage_for_session
 from archon.workers.session_store import list_worker_job_summaries, load_worker_job_summary, purge_stale_sessions
 
 _NATIVE_PLUGIN_SPECS = (
@@ -106,15 +107,21 @@ def handle_status_command(agent, text: str) -> tuple[bool, str]:
 
 
 def handle_cost_command(agent, text: str) -> tuple[bool, str]:
-    """Handle /cost command to show estimated session cost."""
+    """Handle /cost command with truthful token reporting."""
     raw = (text or "").strip().lower()
     if raw != "/cost":
         return False, ""
 
     total_input = max(0, int(getattr(agent, "total_input_tokens", 0) or 0))
     total_output = max(0, int(getattr(agent, "total_output_tokens", 0) or 0))
-    total_tokens = total_input + total_output
-    return True, f"Cost: total_tokens={total_tokens:,} | input={total_input:,} | output={total_output:,}"
+    chat_total_tokens = total_input + total_output
+    workflow_total_tokens = _workflow_total_tokens(agent, fallback_total=chat_total_tokens)
+    return True, (
+        "Cost: "
+        f"chat_session_tokens={chat_total_tokens:,} | "
+        f"workflow_total_tokens={workflow_total_tokens:,} | "
+        f"input={total_input:,} | output={total_output:,}"
+    )
 
 
 def handle_doctor_command(agent, text: str) -> tuple[bool, str]:
@@ -994,6 +1001,26 @@ def _plugin_rows(cfg) -> list[dict[str, object]]:
             }
         )
     return rows
+
+
+def _workflow_total_tokens(agent, *, fallback_total: int) -> int:
+    session_id = str(getattr(agent, "session_id", "") or "").strip()
+    if not session_id:
+        return max(0, int(fallback_total or 0))
+
+    try:
+        session_summary = summarize_usage_for_session(session_id)
+    except Exception:
+        return max(0, int(fallback_total or 0))
+
+    event_count = max(0, int((session_summary or {}).get("event_count", 0) or 0))
+    if event_count > 0:
+        return max(0, int((session_summary or {}).get("total_tokens", 0) or 0))
+
+    return max(
+        0,
+        int((session_summary or {}).get("total_tokens", fallback_total) or fallback_total),
+    )
 
 
 def _on_off(enabled: object) -> str:

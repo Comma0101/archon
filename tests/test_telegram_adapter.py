@@ -91,6 +91,7 @@ class _TelegramLocalCommandAgent:
         self.config = cfg
         self.llm = SimpleNamespace(provider="openai", model="gpt-5-mini")
         self.policy_profile = "safe"
+        self.session_id = ""
         self.total_input_tokens = 120
         self.total_output_tokens = 30
         self.history = []
@@ -284,6 +285,8 @@ class TestTelegramAdapterCommands:
             assert saved[-1][0] == "tg-99-20260306-170000"
             assert saved[-1][1] == command
             assert saved[-1][2].startswith(expected_prefix)
+
+        assert adapter._agents[99].session_id == "tg-99-20260306-170000"  # type: ignore[attr-defined]
 
         assert 99 in adapter._agents  # type: ignore[attr-defined]
         agent = adapter._agents[99]  # type: ignore[attr-defined]

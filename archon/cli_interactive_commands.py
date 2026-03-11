@@ -69,6 +69,7 @@ def chat_cmd(
         refresh_slash_subvalues_fn(getattr(agent, "config", None))
     telegram_adapter = None
     session_id = new_session_id_fn()
+    agent.session_id = session_id
     prompt_state = {"value": ""}
     visible_input_state = {"value": None}
 
@@ -412,6 +413,7 @@ def chat_cmd(
                 if action == "reset":
                     agent.reset()
                     session_id = new_session_id_fn()
+                    agent.session_id = session_id
                     turn_count = 0
                     route_counts.clear()
                     counted_route_turn_ids.clear()

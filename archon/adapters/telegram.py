@@ -555,9 +555,11 @@ class TelegramAdapter:
 
     def _get_or_create_chat_agent(self, chat_id: int) -> "Agent":
         agent = self._agents.get(chat_id)
+        history_session_id = self._history_session_id(chat_id)
         if agent is None:
             agent = self.agent_factory()
             agent.log_label = f"telegram chat={chat_id}"
+            agent.session_id = history_session_id
             if callable(self._activity_sink):
                 agent.terminal_activity_feed = _ActivitySinkTextProxy(self._activity_sink)
             self._wire_chat_confirmer(agent, chat_id)
@@ -565,6 +567,7 @@ class TelegramAdapter:
             self._agents[chat_id] = agent
         else:
             agent.log_label = f"telegram chat={chat_id}"
+            agent.session_id = history_session_id
             if callable(self._activity_sink):
                 agent.terminal_activity_feed = _ActivitySinkTextProxy(self._activity_sink)
         return agent

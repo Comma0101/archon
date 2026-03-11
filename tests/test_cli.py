@@ -238,6 +238,7 @@ class TestCliCommands:
             policy_profile="safe",
             total_input_tokens=120,
             total_output_tokens=30,
+            session_id="sess-usage",
         )
 
     def test_slash_commands_include_local_shell_status_commands(self):
@@ -1228,7 +1229,26 @@ class TestCliCommands:
         action, msg = _handle_repl_command(agent, "/cost")
 
         assert action == "cost"
-        assert msg == "Cost: total_tokens=150 | input=120 | output=30"
+        assert msg == "Cost: chat_session_tokens=150 | workflow_total_tokens=150 | input=120 | output=30"
+
+    def test_handle_repl_command_cost_prefers_current_session_usage_totals(self, monkeypatch):
+        agent = self._make_local_command_agent()
+        agent.session_id = "sess-current"
+
+        monkeypatch.setattr(
+            "archon.cli_repl_commands.summarize_usage_for_session",
+            lambda session_id: {
+                "session_id": session_id,
+                "input_tokens": 180,
+                "output_tokens": 40,
+                "total_tokens": 220,
+                "event_count": 2,
+            },
+        )
+        action, msg = _handle_repl_command(agent, "/cost")
+
+        assert action == "cost"
+        assert msg == "Cost: chat_session_tokens=150 | workflow_total_tokens=220 | input=120 | output=30"
 
     def test_handle_repl_command_doctor_reports_compact_health_summary(self):
         agent = self._make_local_command_agent()
@@ -2403,6 +2423,7 @@ class _LocalCommandAgent:
         self.config = cfg
         self.llm = SimpleNamespace(provider="openai", model="gpt-5-mini")
         self.policy_profile = "safe"
+        self.session_id = ""
         self.total_input_tokens = 120
         self.total_output_tokens = 30
         self.history = []
@@ -2662,7 +2683,7 @@ class TestCliLocalInteractiveCommands:
         ("command", "expected"),
         [
             ("/status", "Status: model=openai/gpt-5-mini | profile=safe | calls=on | mcp=1/2 | tokens=150"),
-            ("/cost", "Cost: total_tokens=150 | input=120 | output=30"),
+            ("/cost", "Cost: chat_session_tokens=150 | workflow_total_tokens=150 | input=120 | output=30"),
             ("/doctor", "Doctor: llm=ok | profile=ok | calls=on | mcp=1/2"),
             ("/permissions", "Permissions: permission_mode=confirm_all | profile=safe | mode=review | tools=2 [read_file,shell]"),
             ("/permissions status", "Permissions: permission_mode=confirm_all | profile=safe | mode=review | tools=2 [read_file,shell]"),
@@ -2685,6 +2706,13 @@ class TestCliLocalInteractiveCommands:
 
         assert expected in outputs
         assert agent.run_calls == []
+
+    def test_local_shell_session_assigns_and_rotates_usage_session_id_on_reset(self):
+        agent = _LocalCommandAgent()
+
+        _run_local_command_session(agent, ["/status", "/reset", "/status", "quit"])
+
+        assert agent.session_id == "sess-2"
 
     def test_local_skills_commands_do_not_call_agent_run(self):
         agent = _LocalCommandAgent()
