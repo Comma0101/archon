@@ -22,7 +22,6 @@ _RESEARCH_MONITOR_LOCK = threading.Lock()
 _RESEARCH_MONITORS: dict[str, threading.Thread] = {}
 _RESEARCH_RECOVERY_LOCK = threading.Lock()
 _RESEARCH_RECOVERY_STARTED = False
-_STREAM_STALE_AFTER_SEC = 60
 
 
 def save_research_job(record: ResearchJobRecord) -> ResearchJobRecord:
@@ -130,6 +129,7 @@ def consume_research_stream(
     if record is None:
         return None
     latest = record
+    status_before = latest.status
     for event in events:
         now = _now_iso()
         event_type = str(getattr(event, "event_type", "") or "").strip().lower()
@@ -140,7 +140,9 @@ def consume_research_stream(
         summary = latest.summary
         output_text = latest.output_text
         latest_thought_summary = latest.latest_thought_summary
+        emit_thought_progress = False
         if delta_type == "thought_summary" and text:
+            emit_thought_progress = text != latest.latest_thought_summary
             latest_thought_summary = text
             summary = text
         if event_type == "interaction.complete":
@@ -174,6 +176,23 @@ def consume_research_stream(
                 timeout_minutes=max(1, int(latest.timeout_minutes or 20)),
             )
         )
+        if emit_thought_progress:
+            _emit_job_progress_event(
+                job_kind="research",
+                job_id=f"research:{latest.interaction_id}",
+                status=latest.status,
+                summary=text,
+                hook_bus=hook_bus,
+            )
+    if _is_terminal_research_status(latest.status) and not _is_terminal_research_status(status_before):
+        _emit_job_completed_event(
+            job_kind="research",
+            job_id=f"research:{latest.interaction_id}",
+            status=latest.status,
+            summary=latest.summary,
+            hook_bus=hook_bus,
+        )
+        return latest
     if mark_unfinished_as_error and not _is_terminal_research_status(latest.status):
         latest = save_research_job(
             ResearchJobRecord(
@@ -213,6 +232,7 @@ def start_research_stream_job(
     client,
     agent_name: str,
     timeout_minutes: int,
+    poll_interval_sec: int = 10,
     hook_bus=None,
     startup_timeout_sec: int = 15,
 ) -> ResearchJobRecord:
@@ -237,35 +257,29 @@ def start_research_stream_job(
                     output_text="",
                     error="",
                     provider_status=status,
-                    last_event_id=str(getattr(stream, "last_event_id", "") or "").strip(),
                     stream_status="started",
                     timeout_minutes=max(1, int(timeout_minutes or 20)),
                 )
             )
-            with _RESEARCH_MONITOR_LOCK:
-                _RESEARCH_MONITORS[interaction_id] = threading.current_thread()
-            startup_queue.put(("ok", record))
-            _drive_research_stream_to_terminal(
+            start_research_job_monitor(
                 interaction_id,
-                stream,
-                client=client,
+                refresh_client=client,
+                poll_interval_sec=max(1, int(poll_interval_sec or 10)),
                 hook_bus=hook_bus,
             )
+            startup_queue.put(("ok", record))
+            # Stream is only a handshake — Google sends interaction_id
+            # then goes silent.  The poll monitor tracks the job via REST.
+            _close_stream(stream)
         except Exception as e:
             if interaction_id:
                 existing = _load_research_job_raw(interaction_id)
                 if existing is not None and not _is_terminal_research_status(existing.status):
-                    _save_research_stream_error(existing, f"{type(e).__name__}: {e}")
+                    _save_research_stream_error(existing, f"{type(e).__name__}: {e}", hook_bus=hook_bus)
             try:
                 startup_queue.put(("error", e))
             except Exception:
                 pass
-        finally:
-            if interaction_id:
-                with _RESEARCH_MONITOR_LOCK:
-                    current = _RESEARCH_MONITORS.get(interaction_id)
-                    if current is threading.current_thread():
-                        _RESEARCH_MONITORS.pop(interaction_id, None)
 
     thread = threading.Thread(
         target=_worker,
@@ -280,49 +294,21 @@ def start_research_stream_job(
 
 
 def recover_incomplete_research_jobs(*, client, hook_bus=None) -> int:
+    """Start poll monitors for incomplete research jobs that lack one."""
     _ensure_dirs()
     resumed = 0
     for path in sorted(RESEARCH_JOBS_DIR.glob("*.json"), reverse=True):
         record = _load_research_job_raw(path.stem)
         if record is None or _is_terminal_research_status(record.status):
             continue
-        if not _research_job_uses_stream(record):
-            continue
         if _has_live_research_monitor(record.interaction_id):
             continue
-        if not str(record.last_event_id or "").strip():
-            saved = save_research_job(
-                ResearchJobRecord(
-                    interaction_id=record.interaction_id,
-                    status="error",
-                    prompt=record.prompt,
-                    agent=record.agent,
-                    created_at=record.created_at,
-                    updated_at=_now_iso(),
-                    summary="Research recovery unavailable",
-                    output_text=record.output_text,
-                    error="Missing last_event_id for stream-backed research job",
-                    provider_status=record.provider_status or record.status,
-                    last_polled_at=record.last_polled_at,
-                    last_event_at=record.last_event_at,
-                    last_event_id=record.last_event_id,
-                    stream_status=record.stream_status or "recovery.unavailable",
-                    latest_thought_summary=record.latest_thought_summary,
-                    event_count=max(0, int(record.event_count or 0)),
-                    poll_count=max(0, int(record.poll_count or 0)),
-                    timeout_minutes=max(1, int(record.timeout_minutes or 20)),
-                )
-            )
-            _emit_job_completed_event(
-                job_kind="research",
-                job_id=f"research:{record.interaction_id}",
-                status="error",
-                summary=saved.summary,
-                hook_bus=hook_bus,
-            )
-            resumed += 1
-            continue
-        if _start_research_resume_worker(record, client=client, hook_bus=hook_bus):
+        if start_research_job_monitor(
+            record.interaction_id,
+            refresh_client=client,
+            poll_interval_sec=10,
+            hook_bus=hook_bus,
+        ):
             resumed += 1
     return resumed
 
@@ -451,55 +437,15 @@ def _make_research_refresh_client(cfg=None):
         return None
 
 
-def _drive_research_stream_to_terminal(
-    interaction_id: str,
-    stream,
-    *,
-    client,
-    hook_bus=None,
-    max_resume_attempts: int = 3,
-) -> ResearchJobRecord | None:
-    latest = _load_research_job_raw(interaction_id)
-    resume_attempts = 0
-    while True:
-        latest = consume_research_stream(
-            interaction_id,
-            getattr(stream, "events", None),
-            hook_bus=hook_bus,
-            mark_unfinished_as_error=False,
-        ) or latest
-        if latest is None or _is_terminal_research_status(latest.status):
-            return latest
-        last_event_id = str(getattr(latest, "last_event_id", "") or "").strip()
-        if not last_event_id or not hasattr(client, "resume_research_stream"):
-            return consume_research_stream(
-                interaction_id,
-                iter(()),
-                hook_bus=hook_bus,
-                mark_unfinished_as_error=True,
-            ) or latest
-        if resume_attempts >= max_resume_attempts:
-            return _save_research_stream_error(
-                latest,
-                f"Stream ended without terminal event after {max_resume_attempts} resume attempts",
-                summary="Research stream resume limit exceeded",
-                stream_status="stream.resume_exhausted",
-            )
-        resume_attempts += 1
-        stream = client.resume_research_stream(
-            interaction_id,
-            last_event_id=last_event_id,
-        )
-
-
 def _save_research_stream_error(
     record: ResearchJobRecord,
     error: str,
     *,
     summary: str = "Research stream failed",
     stream_status: str = "error",
+    hook_bus=None,
 ) -> ResearchJobRecord:
-    return save_research_job(
+    saved = save_research_job(
         ResearchJobRecord(
             interaction_id=record.interaction_id,
             status="error",
@@ -521,58 +467,24 @@ def _save_research_stream_error(
             timeout_minutes=max(1, int(record.timeout_minutes or 20)),
         )
     )
+    _emit_job_completed_event(
+        job_kind="research",
+        job_id=f"research:{saved.interaction_id}",
+        status="error",
+        summary=summary,
+        hook_bus=hook_bus,
+    )
+    return saved
 
 
-def _start_research_resume_worker(record: ResearchJobRecord, *, client, hook_bus=None) -> bool:
-    interaction_id = str(record.interaction_id or "").strip()
-    if not interaction_id:
-        return False
-    with _RESEARCH_MONITOR_LOCK:
-        existing = _RESEARCH_MONITORS.get(interaction_id)
-        if existing is not None and existing.is_alive():
-            return False
-        thread = threading.Thread(
-            target=_resume_research_worker_main,
-            args=(record, client, hook_bus),
-            name=f"archon-research-resume-{interaction_id[:24]}",
-            daemon=True,
-        )
-        _RESEARCH_MONITORS[interaction_id] = thread
-    thread.start()
-    return True
-
-
-def _resume_research_worker_main(record: ResearchJobRecord, client, hook_bus) -> None:
-    interaction_id = str(record.interaction_id or "").strip()
-    try:
-        last_event_id = str(record.last_event_id or "").strip()
-        if not last_event_id:
-            _save_research_stream_error(
-                record,
-                "Missing last_event_id for stream-backed research job",
-                summary="Research recovery unavailable",
-                stream_status=record.stream_status or "recovery.unavailable",
-            )
-            return
-        stream = client.resume_research_stream(
-            interaction_id,
-            last_event_id=last_event_id,
-        )
-        _drive_research_stream_to_terminal(
-            interaction_id,
-            stream,
-            client=client,
-            hook_bus=hook_bus,
-        )
-    except Exception as e:
-        current = _load_research_job_raw(interaction_id) or record
-        if not _is_terminal_research_status(current.status):
-            _save_research_stream_error(current, f"{type(e).__name__}: {e}")
-    finally:
-        with _RESEARCH_MONITOR_LOCK:
-            current = _RESEARCH_MONITORS.get(interaction_id)
-            if current is threading.current_thread():
-                _RESEARCH_MONITORS.pop(interaction_id, None)
+def _close_stream(stream) -> None:
+    """Best-effort close of a Google stream object."""
+    close_fn = getattr(stream, "close", None)
+    if callable(close_fn):
+        try:
+            close_fn()
+        except Exception:
+            pass
 
 
 def _refresh_research_job(record: ResearchJobRecord, *, refresh_client=None, hook_bus=None) -> ResearchJobRecord:
@@ -683,48 +595,9 @@ def _refresh_research_job(record: ResearchJobRecord, *, refresh_client=None, hoo
 
 
 def _reconcile_local_research_job(record: ResearchJobRecord, *, hook_bus=None) -> ResearchJobRecord:
-    if _is_terminal_research_status(record.status):
-        return record
-    if not _research_job_uses_stream(record):
-        return record
-    if _has_live_research_monitor(record.interaction_id):
-        return record
-    last_event_at = _parse_iso_datetime(record.last_event_at)
-    if last_event_at is None:
-        return record
-    age_seconds = max(0, int((datetime.now(timezone.utc) - last_event_at).total_seconds()))
-    if age_seconds < _STREAM_STALE_AFTER_SEC:
-        return record
-    saved = save_research_job(
-        ResearchJobRecord(
-            interaction_id=record.interaction_id,
-            status="error",
-            prompt=record.prompt,
-            agent=record.agent,
-            created_at=record.created_at,
-            updated_at=_now_iso(),
-            summary="Research stream inactive",
-            output_text=record.output_text,
-            error="No active stream consumer for this research job",
-            provider_status=record.provider_status or record.status,
-            last_polled_at=record.last_polled_at,
-            last_event_at=record.last_event_at,
-            last_event_id=record.last_event_id,
-            stream_status=record.stream_status or "stream.inactive",
-            latest_thought_summary=record.latest_thought_summary,
-            event_count=max(0, int(record.event_count or 0)),
-            poll_count=max(0, int(record.poll_count or 0)),
-            timeout_minutes=max(1, int(record.timeout_minutes or 20)),
-        )
-    )
-    _emit_job_completed_event(
-        job_kind="research",
-        job_id=f"research:{record.interaction_id}",
-        status="error",
-        summary=saved.summary,
-        hook_bus=hook_bus,
-    )
-    return saved
+    # No local reconciliation needed — the poll monitor and recovery
+    # handle all state transitions via the REST API.
+    return record
 
 
 def _attach_refresh_meta(record: ResearchJobRecord, *, attempted: bool, ok: bool, error: str) -> ResearchJobRecord:
@@ -761,9 +634,6 @@ def _is_terminal_research_status(status: str) -> bool:
     normalized = str(status or "").strip().lower()
     return normalized in {"completed", "done", "failed", "error", "cancelled"}
 
-
-def _research_job_uses_stream(record: ResearchJobRecord) -> bool:
-    return bool(str(getattr(record, "stream_status", "") or "").strip())
 
 
 def _has_live_research_monitor(interaction_id: str) -> bool:

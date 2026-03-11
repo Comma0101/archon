@@ -119,6 +119,7 @@ def _format_research_live_status(
     timeout_minutes: int,
 ) -> str:
     normalized = str(status or "").strip().lower()
+    normalized_stream_status = str(stream_status or "").strip().lower()
     if normalized in {"in_progress", "running", "queued", "starting"}:
         if _research_runtime_exceeds_timeout(created_at, timeout_minutes):
             return f"stream active | running longer than configured {timeout_minutes}m timeout"

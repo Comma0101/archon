@@ -606,7 +606,10 @@ class TestCliCommands:
                 last_update_at="2026-02-24T00:00:09Z",
             ),
         ]
-        monkeypatch.setattr("archon.cli_repl_commands._collect_job_summaries", lambda limit=10: jobs)
+        monkeypatch.setattr(
+            "archon.cli_repl_commands._collect_job_summaries",
+            lambda limit=10, **kwargs: jobs,
+        )
 
         action, msg = _handle_repl_command(agent, "/jobs")
 
@@ -643,7 +646,10 @@ class TestCliCommands:
                 last_update_at="2026-02-24T00:00:08Z",
             ),
         ]
-        monkeypatch.setattr("archon.cli_repl_commands._collect_job_summaries", lambda limit=10: jobs)
+        monkeypatch.setattr(
+            "archon.cli_repl_commands._collect_job_summaries",
+            lambda limit=10, **kwargs: jobs,
+        )
 
         action, msg = _handle_repl_command(agent, "/jobs active 2")
 
@@ -674,13 +680,49 @@ class TestCliCommands:
                 last_update_at="2026-03-06T22:00:00Z",
             ),
         ]
-        monkeypatch.setattr("archon.cli_repl_commands._collect_job_summaries", lambda limit=10: jobs)
+        monkeypatch.setattr(
+            "archon.cli_repl_commands._collect_job_summaries",
+            lambda limit=10, **kwargs: jobs,
+        )
 
         action, msg = _handle_repl_command(agent, "/jobs active")
 
         assert action == "jobs"
         assert msg.startswith("Jobs: showing=1 | active=1 | filter=active")
         assert "research:abc" in msg
+        assert "worker:sess-1" not in msg
+
+    def test_handle_repl_command_jobs_active_includes_blocked_setup_jobs(self, monkeypatch):
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+        )
+        jobs = [
+            SimpleNamespace(
+                job_id="setup:browser-use",
+                kind="project_setup",
+                status="blocked",
+                summary="browser-use: 1/3 steps, waiting for 1 human step(s)",
+                last_update_at="2026-03-10T14:32:00Z",
+            ),
+            SimpleNamespace(
+                job_id="worker:sess-1",
+                kind="worker_session",
+                status="ok",
+                summary="Done",
+                last_update_at="2026-03-10T14:00:00Z",
+            ),
+        ]
+        monkeypatch.setattr(
+            "archon.cli_repl_commands._collect_job_summaries",
+            lambda limit=10, **kwargs: jobs,
+        )
+
+        action, msg = _handle_repl_command(agent, "/jobs active")
+
+        assert action == "jobs"
+        assert msg.startswith("Jobs: showing=1 | active=1 | filter=active")
+        assert "setup:browser-use" in msg
         assert "worker:sess-1" not in msg
 
     def test_handle_repl_command_jobs_degrades_gracefully_on_store_error(self, monkeypatch):
@@ -690,7 +732,7 @@ class TestCliCommands:
         )
         monkeypatch.setattr(
             "archon.cli_repl_commands._collect_job_summaries",
-            lambda limit=10: (_ for _ in ()).throw(OSError("read-only file system")),
+            lambda limit=10, **kwargs: (_ for _ in ()).throw(OSError("read-only file system")),
         )
 
         action, msg = _handle_repl_command(agent, "/jobs")
@@ -712,7 +754,7 @@ class TestCliCommands:
         )
         monkeypatch.setattr(
             "archon.cli_repl_commands._load_job_summary",
-            lambda job_ref: job if job_ref == "worker:sess-1" else None,
+            lambda job_ref, **kwargs: job if job_ref == "worker:sess-1" else None,
         )
 
         action, msg = _handle_repl_command(agent, "/job worker:sess-1")
@@ -722,6 +764,49 @@ class TestCliCommands:
         assert "job_kind: worker_session" in msg
         assert "job_status: ok" in msg
         assert "job_summary: Looks good" in msg
+
+    def test_handle_repl_command_jobs_show_setup_renders_setup_detail(self, monkeypatch):
+        from archon.setup.models import SetupRecord, SetupStep
+
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+        )
+        record = SetupRecord(
+            setup_id="browser-use",
+            project_name="browser-use",
+            project_path="/tmp/browser-use",
+            status="blocked",
+            created_at="2026-03-10T14:30:00Z",
+            updated_at="2026-03-10T14:32:00Z",
+            stack="Python",
+            steps=[
+                SetupStep(step_id=1, kind="archon", description="Install deps", status="done"),
+                SetupStep(
+                    step_id=2,
+                    kind="human",
+                    description="Provide OPENAI_API_KEY",
+                    status="pending",
+                    hint="Sign up first",
+                    env_var="OPENAI_API_KEY",
+                ),
+            ],
+            discovery_sources=["README.md"],
+            requirements={},
+            generated_skill_path="",
+            resume_hint="Provide OPENAI_API_KEY to continue.",
+        )
+        monkeypatch.setattr(
+            "archon.cli_repl_commands.load_setup_record",
+            lambda setup_id: record if setup_id == "browser-use" else None,
+        )
+
+        action, msg = _handle_repl_command(agent, "/jobs show setup:browser-use")
+
+        assert action == "jobs"
+        assert "job_id: setup:browser-use" in msg
+        assert "job_status: blocked" in msg
+        assert "Provide OPENAI_API_KEY" in msg
 
     def test_handle_repl_command_job_without_arg_shows_selector(self, monkeypatch):
         agent = SimpleNamespace(
@@ -744,7 +829,10 @@ class TestCliCommands:
                 last_update_at="2026-03-08T20:00:09Z",
             ),
         ]
-        monkeypatch.setattr("archon.cli_repl_commands._collect_job_summaries", lambda limit=10: jobs)
+        monkeypatch.setattr(
+            "archon.cli_repl_commands._collect_job_summaries",
+            lambda limit=10, **kwargs: jobs,
+        )
 
         action, msg = _handle_repl_command(agent, "/job")
 
@@ -775,7 +863,10 @@ class TestCliCommands:
                 last_update_at="2026-03-08T20:00:09Z",
             ),
         ]
-        monkeypatch.setattr("archon.cli_repl_commands._collect_job_summaries", lambda limit=10: jobs)
+        monkeypatch.setattr(
+            "archon.cli_repl_commands._collect_job_summaries",
+            lambda limit=10, **kwargs: jobs,
+        )
         monkeypatch.setattr(
             "archon.cli_repl_commands.load_research_job",
             lambda interaction_id, refresh_client=None, hook_bus=None: SimpleNamespace(
@@ -799,6 +890,52 @@ class TestCliCommands:
         action, msg = _handle_repl_command(agent, "/jobs show research:abc")
 
         assert action == "jobs"
+        assert "job_id: research:abc" in msg
+
+    def test_handle_repl_command_jobs_show_research_uses_refresh_client(self, monkeypatch):
+        refresh_client = object()
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+            hooks=object(),
+            _create_google_deep_research_client=lambda: refresh_client,
+        )
+        seen = {}
+        monkeypatch.setattr(
+            "archon.cli_repl_commands.load_research_job",
+            lambda interaction_id, refresh_client=None, hook_bus=None: seen.update(
+                {
+                    "interaction_id": interaction_id,
+                    "refresh_client": refresh_client,
+                    "hook_bus": hook_bus,
+                }
+            )
+            or SimpleNamespace(
+                interaction_id=interaction_id,
+                status="in_progress",
+                summary="Research in progress",
+                updated_at="2026-03-08T20:07:15Z",
+                provider_status="in_progress",
+                last_polled_at="2026-03-08T20:07:16Z",
+                last_event_at="2026-03-08T20:07:15Z",
+                stream_status="interaction.status_update",
+                created_at="2026-03-08T20:07:15Z",
+                latest_thought_summary="",
+                output_text="",
+                error="",
+                poll_count=1,
+                timeout_minutes=20,
+            ),
+        )
+
+        action, msg = _handle_repl_command(agent, "/jobs show research:abc")
+
+        assert action == "jobs"
+        assert seen == {
+            "interaction_id": "abc",
+            "refresh_client": refresh_client,
+            "hook_bus": agent.hooks,
+        }
         assert "job_id: research:abc" in msg
 
     def test_handle_repl_command_jobs_show_requires_job_id(self, monkeypatch):
@@ -841,6 +978,226 @@ class TestCliCommands:
         assert action == "jobs"
         assert "research:abc" in msg
         assert "LA market research started" in msg
+
+    def test_handle_repl_command_jobs_list_uses_research_refresh_client(self, monkeypatch):
+        refresh_client = object()
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+            hooks=object(),
+            _create_google_deep_research_client=lambda: refresh_client,
+        )
+        seen = {}
+        monkeypatch.setattr("archon.cli_repl_commands.list_worker_job_summaries", lambda limit=10: [])
+        monkeypatch.setattr("archon.cli_repl_commands.list_call_job_summaries", lambda limit=10: [])
+        monkeypatch.setattr("archon.cli_repl_commands.list_setup_job_summaries", lambda limit=10: [])
+        monkeypatch.setattr(
+            "archon.cli_repl_commands.list_research_job_summaries",
+            lambda limit=10, refresh_client=None, hook_bus=None: seen.update(
+                {
+                    "limit": limit,
+                    "refresh_client": refresh_client,
+                    "hook_bus": hook_bus,
+                }
+            )
+            or [
+                SimpleNamespace(
+                    job_id="research:abc",
+                    kind="deep_research",
+                    status="in_progress",
+                    summary="Research in progress",
+                    last_update_at="2026-03-08T20:07:15Z",
+                )
+            ],
+        )
+
+        action, msg = _handle_repl_command(agent, "/jobs")
+
+        assert action == "jobs"
+        assert seen == {
+            "limit": 10,
+            "refresh_client": refresh_client,
+            "hook_bus": agent.hooks,
+        }
+        assert "research:abc" in msg
+
+    def test_handle_repl_command_jobs_includes_setup_jobs(self, monkeypatch, tmp_path):
+        from archon.setup.models import SetupRecord
+        from archon.setup.store import save_setup_record
+
+        monkeypatch.setattr("archon.setup.store.SETUP_RECORDS_DIR", tmp_path / "setup" / "records")
+        monkeypatch.setattr("archon.cli_repl_commands.list_worker_job_summaries", lambda limit=10: [])
+        monkeypatch.setattr("archon.cli_repl_commands.list_call_job_summaries", lambda limit=10: [])
+        monkeypatch.setattr(
+            "archon.cli_repl_commands.list_research_job_summaries",
+            lambda limit=10, **kwargs: [],
+        )
+        save_setup_record(
+            SetupRecord(
+                setup_id="browser-use-1",
+                project_name="browser-use",
+                project_path="~/Documents/browser-use",
+                status="blocked",
+                created_at="2026-03-10T14:30:00Z",
+                updated_at="2026-03-10T14:32:00Z",
+                stack="Python",
+                steps=[
+                    {"id": 1, "kind": "archon", "desc": "Install deps", "status": "done"},
+                    {"id": 2, "kind": "human", "desc": "Provide OPENAI_API_KEY", "status": "pending"},
+                ],
+                blocked_on=[{"step_id": 2, "what": "Provide OPENAI_API_KEY", "env_var": "OPENAI_API_KEY"}],
+            )
+        )
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+        )
+
+        action, msg = _handle_repl_command(agent, "/jobs")
+
+        assert action == "jobs"
+        assert "setup:browser-use-1" in msg
+        assert "browser-use" in msg
+
+    def test_handle_repl_command_jobs_show_setup_renders_blocked_details(self, monkeypatch, tmp_path):
+        from archon.setup.models import SetupRecord
+        from archon.setup.store import save_setup_record
+
+        monkeypatch.setattr("archon.setup.store.SETUP_RECORDS_DIR", tmp_path / "setup" / "records")
+        monkeypatch.setattr("archon.cli_repl_commands.load_worker_job_summary", lambda _ref: None)
+        monkeypatch.setattr("archon.cli_repl_commands.load_call_job_summary", lambda _ref: None)
+        monkeypatch.setattr("archon.cli_repl_commands.load_research_job_summary", lambda _ref: None)
+        save_setup_record(
+            SetupRecord(
+                setup_id="browser-use-1",
+                project_name="browser-use",
+                project_path="~/Documents/browser-use",
+                status="blocked",
+                created_at="2026-03-10T14:30:00Z",
+                updated_at="2026-03-10T14:32:00Z",
+                stack="Python 3.11 + browser automation",
+                steps=[
+                    {"id": 1, "kind": "archon", "desc": "Install deps", "status": "done"},
+                    {"id": 2, "kind": "archon", "desc": "Install chromium", "status": "done"},
+                    {"id": 3, "kind": "human", "desc": "Provide OPENAI_API_KEY", "status": "pending"},
+                    {"id": 4, "kind": "archon", "desc": "Verify installation", "status": "pending"},
+                ],
+                blocked_on=[
+                    {
+                        "step_id": 3,
+                        "what": "Provide OPENAI_API_KEY",
+                        "hint": "Sign up at https://platform.openai.com/api-keys",
+                        "env_var": "OPENAI_API_KEY",
+                        "provided": False,
+                    }
+                ],
+                requirements={"env_vars": ["OPENAI_API_KEY"], "bins": ["python3", "chromium"], "services": []},
+                discovery_sources=["README.md", "pyproject.toml", ".env.example"],
+                generated_skill_path="~/.local/share/archon/skills/browser-use/SKILL.md",
+                resume_hint="User provides OPENAI_API_KEY and setup continues.",
+                artifact_refs=["memory://projects/browser-use.md"],
+            )
+        )
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+        )
+
+        action, msg = _handle_repl_command(agent, "/jobs show setup:browser-use-1")
+
+        assert action == "jobs"
+        assert "job_id: setup:browser-use-1" in msg
+        assert "job_kind: project_setup" in msg
+        assert "job_status: blocked" in msg
+        assert "job_project: browser-use" in msg
+        assert "job_stack: Python 3.11 + browser automation" in msg
+        assert "job_blocked_on:" in msg
+        assert "Provide OPENAI_API_KEY" in msg
+        assert "job_steps_completed: 2/4" in msg
+        assert "job_pending_steps:" in msg
+        assert "Verify installation" in msg
+        assert "job_resume_hint: User provides OPENAI_API_KEY and setup continues." in msg
+
+    def test_handle_repl_command_jobs_includes_setup_jobs(self, monkeypatch, tmp_path):
+        from archon.setup.models import SetupRecord
+        from archon.setup.store import save_setup_record
+
+        monkeypatch.setattr("archon.setup.store.SETUP_RECORDS_DIR", tmp_path / "setup" / "records")
+        monkeypatch.setattr("archon.cli_repl_commands.list_worker_job_summaries", lambda limit=10: [])
+        monkeypatch.setattr("archon.cli_repl_commands.list_call_job_summaries", lambda limit=10: [])
+        monkeypatch.setattr(
+            "archon.cli_repl_commands.list_research_job_summaries",
+            lambda limit=10, **kwargs: [],
+        )
+        save_setup_record(
+            SetupRecord(
+                setup_id="browser-use-20260310",
+                project_name="browser-use",
+                project_path="~/Documents/browser-use",
+                status="blocked",
+                created_at="2026-03-10T14:30:00Z",
+                updated_at="2026-03-10T14:32:00Z",
+                summary="2/5 steps done, waiting for OPENAI_API_KEY",
+                steps=[],
+                blocked_on=[],
+            )
+        )
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+        )
+
+        action, msg = _handle_repl_command(agent, "/jobs")
+
+        assert action == "jobs"
+        assert "setup:browser-use-20260310" in msg
+        assert "waiting for OPENAI_API_KEY" in msg
+
+    def test_handle_repl_command_jobs_show_setup_renders_blocked_steps(self, monkeypatch, tmp_path):
+        from archon.setup.models import SetupRecord
+        from archon.setup.store import save_setup_record
+
+        monkeypatch.setattr("archon.setup.store.SETUP_RECORDS_DIR", tmp_path / "setup" / "records")
+        save_setup_record(
+            SetupRecord(
+                setup_id="browser-use-20260310",
+                project_name="browser-use",
+                project_path="~/Documents/browser-use",
+                status="blocked",
+                created_at="2026-03-10T14:30:00Z",
+                updated_at="2026-03-10T14:32:00Z",
+                summary="2/5 steps done, waiting for OPENAI_API_KEY",
+                steps=[
+                    {"id": 1, "kind": "archon", "desc": "Install deps", "status": "done"},
+                    {"id": 2, "kind": "human", "desc": "Provide OPENAI_API_KEY", "status": "pending"},
+                    {"id": 3, "kind": "archon", "desc": "Verify installation", "status": "pending"},
+                ],
+                blocked_on=[
+                    {
+                        "step_id": 2,
+                        "what": "Provide OPENAI_API_KEY",
+                        "hint": "Sign up at https://platform.openai.com/api-keys",
+                        "env_var": "OPENAI_API_KEY",
+                        "provided": False,
+                    }
+                ],
+                resume_hint="User provides OPENAI_API_KEY -> continue verification",
+                approval_state="needs_human_input",
+            )
+        )
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=SimpleNamespace(llm=SimpleNamespace(model="test")),
+        )
+
+        action, msg = _handle_repl_command(agent, "/jobs show setup:browser-use-20260310")
+
+        assert action == "jobs"
+        assert "job_id: setup:browser-use-20260310" in msg
+        assert "job_status: blocked" in msg
+        assert "blocked_on:" in msg
+        assert "Provide OPENAI_API_KEY" in msg
+        assert "pending_steps:" in msg
 
     def test_handle_repl_command_job_loads_research_job_summary(self, monkeypatch, tmp_path):
         from archon.research.models import ResearchJobRecord
@@ -987,6 +1344,43 @@ class TestCliCommands:
         assert action == "job"
         assert "job_live_status: stream active | running longer than configured 20m timeout" in msg
 
+    def test_handle_repl_command_job_formats_in_progress_research_workflow_details(self, monkeypatch):
+        record = SimpleNamespace(
+            interaction_id="abc",
+            status="in_progress",
+            summary="Research in progress",
+            updated_at="2026-03-06T22:10:00Z",
+            created_at="2026-03-06T22:00:00Z",
+            output_text="",
+            error="",
+            provider_status="in_progress",
+            last_polled_at="2026-03-06T22:10:05Z",
+            last_event_at="2026-03-06T22:10:06Z",
+            stream_status="started",
+            latest_thought_summary="Checking sources",
+            event_count=2,
+            poll_count=3,
+        )
+        monkeypatch.setattr(
+            "archon.cli_repl_commands.load_research_job",
+            lambda interaction_id, refresh_client=None, hook_bus=None: record,
+        )
+        monkeypatch.setattr("archon.cli_repl_commands.load_worker_job_summary", lambda _ref: None)
+        monkeypatch.setattr("archon.cli_repl_commands.load_call_job_summary", lambda _ref: None)
+
+        cfg = Config()
+        cfg.research.google_deep_research.timeout_minutes = 999999
+        agent = SimpleNamespace(
+            llm=SimpleNamespace(model="test"),
+            config=cfg,
+        )
+
+        action, msg = _handle_repl_command(agent, "/job research:abc")
+
+        assert action == "job"
+        assert "job_stream_status: started" in msg
+        assert "job_latest_thought_summary: Checking sources" in msg
+
     def test_handle_repl_command_job_degrades_gracefully_on_lookup_error(self, monkeypatch):
         agent = SimpleNamespace(
             llm=SimpleNamespace(model="test"),
@@ -994,7 +1388,7 @@ class TestCliCommands:
         )
         monkeypatch.setattr(
             "archon.cli_repl_commands._load_job_summary",
-            lambda job_ref: (_ for _ in ()).throw(OSError("read-only file system")),
+            lambda job_ref, **kwargs: (_ for _ in ()).throw(OSError("read-only file system")),
         )
 
         action, msg = _handle_repl_command(agent, "/job worker:sess-1")
@@ -1053,7 +1447,10 @@ class TestCliCommands:
             summary="Final report body",
             last_update_at="2026-03-06T22:10:00Z",
         )
-        monkeypatch.setattr("archon.cli_repl_commands._collect_job_summaries", lambda limit=10: [fresh_job])
+        monkeypatch.setattr(
+            "archon.cli_repl_commands._collect_job_summaries",
+            lambda limit=10, **kwargs: [fresh_job],
+        )
         agent = SimpleNamespace(
             llm=SimpleNamespace(model="test"),
             config=SimpleNamespace(llm=SimpleNamespace(model="test")),
@@ -1065,7 +1462,7 @@ class TestCliCommands:
         assert "completed" in msg
         assert "Final report body" in msg
 
-    def test_handle_repl_command_jobs_skips_deep_research_client_when_no_research_jobs(self, monkeypatch):
+    def test_handle_repl_command_jobs_still_renders_without_research_jobs_even_if_client_is_created(self, monkeypatch):
         jobs = [
             SimpleNamespace(
                 job_id="worker:sess-1",
@@ -1075,7 +1472,10 @@ class TestCliCommands:
                 last_update_at="2026-02-24T00:00:10Z",
             ),
         ]
-        monkeypatch.setattr("archon.cli_repl_commands._collect_job_summaries", lambda limit=10: jobs)
+        monkeypatch.setattr(
+            "archon.cli_repl_commands._collect_job_summaries",
+            lambda limit=10, **kwargs: jobs,
+        )
         calls = []
         agent = SimpleNamespace(
             llm=SimpleNamespace(model="test"),
@@ -1086,7 +1486,7 @@ class TestCliCommands:
         action, msg = _handle_repl_command(agent, "/jobs")
 
         assert action == "jobs"
-        assert calls == []
+        assert calls == ["created"]
         assert "worker:sess-1" in msg
 
     def test_handle_repl_command_jobs_purge_reports_local_records(self, monkeypatch):

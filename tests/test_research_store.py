@@ -1,4 +1,4 @@
-"""Tests for research job cancellation and polling."""
+"""Tests for research job storage, polling, and stream handshake."""
 
 import json
 import time
@@ -227,36 +227,8 @@ def test_consume_research_stream_marks_unfinished_stream_as_error(tmp_path, monk
     assert "ended before completion" in record.error
 
 
-def test_load_research_job_marks_stale_stream_without_live_monitor_as_error(tmp_path, monkeypatch):
-    monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path)
-
-    save_research_job(
-        ResearchJobRecord(
-            interaction_id="stream-123",
-            status="in_progress",
-            prompt="test query",
-            agent="deep-research-pro-preview-12-2025",
-            created_at="2000-01-01T00:00:00Z",
-            updated_at="2000-01-01T00:00:10Z",
-            summary="Research job started",
-            output_text="",
-            error="",
-            provider_status="in_progress",
-            last_event_at="2000-01-01T00:00:10Z",
-            stream_status="interaction.status_update",
-            poll_count=2,
-        )
-    )
-
-    record = load_research_job("stream-123")
-
-    assert record is not None
-    assert record.status == "error"
-    assert record.summary == "Research stream inactive"
-    assert "No active stream consumer" in record.error
-
-
-def test_start_research_stream_job_starts_stream_in_worker_and_persists_updates(tmp_path, monkeypatch):
+def test_start_research_stream_job_saves_record_and_starts_monitor(tmp_path, monkeypatch):
+    """Worker saves initial record and starts poll monitor, then exits."""
     monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path)
 
     class _Stream:
@@ -264,18 +236,7 @@ def test_start_research_stream_job_starts_stream_in_worker_and_persists_updates(
         status = "in_progress"
 
         def __init__(self):
-            class _Event:
-                def __init__(self, event_type: str, **fields):
-                    self.event_type = event_type
-                    for key, value in fields.items():
-                        setattr(self, key, value)
-
-            self.events = iter(
-                [
-                    _Event("content.delta", delta_type="thought_summary", text="Checking sources"),
-                    _Event("interaction.complete", status="completed", text="Final answer"),
-                ]
-            )
+            self.events = iter(())
 
     class _Client:
         def __init__(self):
@@ -285,8 +246,15 @@ def test_start_research_stream_job_starts_stream_in_worker_and_persists_updates(
             self.prompts.append(prompt)
             return _Stream()
 
-    client = _Client()
+    monitor_calls = []
 
+    def _fake_start_monitor(interaction_id: str, *, refresh_client, poll_interval_sec=10, hook_bus=None):
+        monitor_calls.append(interaction_id)
+        return True
+
+    monkeypatch.setattr("archon.research.store.start_research_job_monitor", _fake_start_monitor)
+
+    client = _Client()
     record = start_research_stream_job(
         "test query",
         client=client,
@@ -297,98 +265,69 @@ def test_start_research_stream_job_starts_stream_in_worker_and_persists_updates(
     assert record is not None
     assert record.interaction_id == "stream-job-123"
     assert client.prompts == ["test query"]
+    assert monitor_calls == ["stream-job-123"]
 
-    reloaded = None
-    for _ in range(20):
-        reloaded = load_research_job("stream-job-123")
-        if reloaded is not None and reloaded.status == "completed":
-            break
-        time.sleep(0.01)
-
+    reloaded = load_research_job("stream-job-123")
     assert reloaded is not None
-    assert reloaded.status == "completed"
-    assert reloaded.output_text == "Final answer"
+    assert reloaded.status == "in_progress"
+    assert reloaded.stream_status == "started"
 
 
-def test_start_research_stream_job_resumes_after_nonterminal_stream_end(tmp_path, monkeypatch):
+def test_start_research_stream_job_starts_poll_monitor(tmp_path, monkeypatch):
     monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path)
 
     class _Stream:
-        def __init__(self, interaction_id: str, events):
-            self.interaction_id = interaction_id
-            self.status = "in_progress"
-            self.events = iter(events)
+        interaction_id = "stream-job-monitor-123"
+        status = "in_progress"
 
-    class _Event:
-        def __init__(self, event_type: str, **fields):
-            self.event_type = event_type
-            for key, value in fields.items():
-                setattr(self, key, value)
+        def __init__(self):
+            self.events = iter(())
 
     class _Client:
-        def __init__(self):
-            self.resume_calls = []
-
         def start_research_stream(self, prompt: str):
-            return _Stream(
-                "stream-job-456",
-                [
-                    _Event(
-                        "content.delta",
-                        delta_type="thought_summary",
-                        text="Checking sources",
-                        event_id="evt-1",
-                    ),
-                ],
-            )
+            return _Stream()
 
-        def resume_research_stream(self, interaction_id: str, *, last_event_id: str):
-            self.resume_calls.append((interaction_id, last_event_id))
-            return _Stream(
-                interaction_id,
-                [
-                    _Event(
-                        "interaction.complete",
-                        status="completed",
-                        text="Final answer",
-                        event_id="evt-2",
-                    ),
-                ],
-            )
+    monitor_calls = []
 
-    client = _Client()
+    def _fake_start_monitor(interaction_id: str, *, refresh_client, poll_interval_sec=10, hook_bus=None):
+        from archon.research import store as research_store
+
+        monitor_calls.append(
+            {
+                "interaction_id": interaction_id,
+                "refresh_client": refresh_client,
+                "poll_interval_sec": poll_interval_sec,
+                "hook_bus": hook_bus,
+                "monitor_slot_preexisting": interaction_id in research_store._RESEARCH_MONITORS,
+            }
+        )
+        return True
+
+    monkeypatch.setattr("archon.research.store.start_research_job_monitor", _fake_start_monitor)
 
     record = start_research_stream_job(
         "test query",
-        client=client,
+        client=_Client(),
         agent_name="deep-research-pro-preview-12-2025",
         timeout_minutes=20,
     )
 
     assert record is not None
-    assert record.interaction_id == "stream-job-456"
-
-    reloaded = None
-    for _ in range(20):
-        reloaded = load_research_job("stream-job-456")
-        if reloaded is not None and reloaded.status == "completed":
-            break
-        time.sleep(0.01)
-
-    assert client.resume_calls == [("stream-job-456", "evt-1")]
-    assert reloaded is not None
-    assert reloaded.status == "completed"
-    assert reloaded.output_text == "Final answer"
+    assert monitor_calls
+    assert monitor_calls[0]["interaction_id"] == "stream-job-monitor-123"
+    assert monitor_calls[0]["poll_interval_sec"] == 10
+    assert monitor_calls[0]["monitor_slot_preexisting"] is False
 
 
-def test_ensure_research_recovery_started_resumes_nonterminal_stream_job(tmp_path, monkeypatch):
+def test_ensure_research_recovery_starts_poll_monitors(tmp_path, monkeypatch):
+    """Recovery starts poll monitors for incomplete jobs."""
     monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path)
     monkeypatch.setattr("archon.research.store._RESEARCH_MONITORS", {})
     monkeypatch.setattr("archon.research.store._RESEARCH_RECOVERY_STARTED", False, raising=False)
 
     save_research_job(
         ResearchJobRecord(
-            interaction_id="resume-123",
+            interaction_id="recover-123",
             status="in_progress",
             prompt="test query",
             agent="deep-research-pro-preview-12-2025",
@@ -398,11 +337,78 @@ def test_ensure_research_recovery_started_resumes_nonterminal_stream_job(tmp_pat
             output_text="",
             error="",
             provider_status="in_progress",
-            last_event_at="2099-01-01T00:00:00Z",
-            last_event_id="evt-1",
-            stream_status="interaction.status_update",
+            stream_status="started",
             poll_count=1,
             timeout_minutes=60,
+        )
+    )
+
+    monitor_calls = []
+
+    def _fake_start_monitor(interaction_id: str, *, refresh_client, poll_interval_sec=10, hook_bus=None):
+        monitor_calls.append(interaction_id)
+        return True
+
+    monkeypatch.setattr("archon.research.store.start_research_job_monitor", _fake_start_monitor)
+
+    class _Client:
+        def get_research(self, interaction_id):
+            return type("_I", (), {"status": "in_progress", "output_text": ""})()
+
+    started = ensure_research_recovery_started(cfg=Config(), hook_bus=None, client=_Client())
+
+    assert started is True
+    assert monitor_calls == ["recover-123"]
+
+
+def test_ensure_research_recovery_skips_terminal_jobs(tmp_path, monkeypatch):
+    """Recovery ignores already-completed jobs."""
+    monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path)
+    monkeypatch.setattr("archon.research.store._RESEARCH_MONITORS", {})
+    monkeypatch.setattr("archon.research.store._RESEARCH_RECOVERY_STARTED", False, raising=False)
+
+    save_research_job(
+        ResearchJobRecord(
+            interaction_id="done-456",
+            status="completed",
+            prompt="test query",
+            agent="deep-research-pro-preview-12-2025",
+            created_at="2099-01-01T00:00:00Z",
+            updated_at="2099-01-01T00:00:00Z",
+            summary="Done",
+            output_text="Result",
+            error="",
+        )
+    )
+
+    monitor_calls = []
+
+    def _fake_start_monitor(interaction_id: str, *, refresh_client, poll_interval_sec=10, hook_bus=None):
+        monitor_calls.append(interaction_id)
+        return True
+
+    monkeypatch.setattr("archon.research.store.start_research_job_monitor", _fake_start_monitor)
+
+    started = ensure_research_recovery_started(cfg=Config(), hook_bus=None, client=object())
+
+    assert started is True
+    assert monitor_calls == []
+
+
+def test_consume_research_stream_emits_completed_event_on_terminal_transition(tmp_path, monkeypatch):
+    monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path)
+
+    save_research_job(
+        ResearchJobRecord(
+            interaction_id="stream-emit-123",
+            status="in_progress",
+            prompt="test query",
+            agent="deep-research-pro-preview-12-2025",
+            created_at="2099-01-01T00:00:00Z",
+            updated_at="2099-01-01T00:00:00Z",
+            summary="Research job started",
+            output_text="",
+            error="",
         )
     )
 
@@ -412,75 +418,89 @@ def test_ensure_research_recovery_started_resumes_nonterminal_stream_job(tmp_pat
             for key, value in fields.items():
                 setattr(self, key, value)
 
-    class _Stream:
-        def __init__(self, interaction_id: str):
-            self.interaction_id = interaction_id
-            self.status = "in_progress"
-            self.events = iter(
-                [
-                    _Event(
-                        "interaction.complete",
-                        status="completed",
-                        text="Recovered final answer",
-                        event_id="evt-2",
-                    )
-                ]
-            )
+    events = iter([
+        _Event("interaction.complete", status="completed", text="Final answer"),
+    ])
 
-    class _Client:
-        def __init__(self):
-            self.resume_calls = []
+    captured = []
 
-        def resume_research_stream(self, interaction_id: str, *, last_event_id: str):
-            self.resume_calls.append((interaction_id, last_event_id))
-            return _Stream(interaction_id)
+    import archon.research.store as _store_mod
 
-    client = _Client()
-    started = ensure_research_recovery_started(cfg=Config(), hook_bus=None, client=client)
+    def _capture_emit(**kwargs):
+        captured.append(kwargs)
 
-    assert started is True
-    reloaded = None
-    for _ in range(20):
-        reloaded = load_research_job("resume-123")
-        if reloaded is not None and reloaded.status == "completed":
-            break
-        time.sleep(0.01)
+    monkeypatch.setattr(_store_mod, "_emit_job_completed_event", _capture_emit)
 
-    assert client.resume_calls == [("resume-123", "evt-1")]
-    assert reloaded is not None
-    assert reloaded.status == "completed"
-    assert reloaded.output_text == "Recovered final answer"
+    result = consume_research_stream("stream-emit-123", events, hook_bus="fake-bus")
+    assert result is not None
+    assert result.status == "completed"
+    assert len(captured) == 1
+    assert captured[0]["status"] == "completed"
+    assert captured[0]["hook_bus"] == "fake-bus"
 
 
-def test_ensure_research_recovery_started_marks_missing_last_event_id_as_error(tmp_path, monkeypatch):
+def test_consume_research_stream_skips_event_for_already_terminal(tmp_path, monkeypatch):
     monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path)
-    monkeypatch.setattr("archon.research.store._RESEARCH_MONITORS", {})
-    monkeypatch.setattr("archon.research.store._RESEARCH_RECOVERY_STARTED", False, raising=False)
 
     save_research_job(
         ResearchJobRecord(
-            interaction_id="resume-456",
-            status="in_progress",
+            interaction_id="stream-already-done",
+            status="completed",
             prompt="test query",
             agent="deep-research-pro-preview-12-2025",
             created_at="2099-01-01T00:00:00Z",
             updated_at="2099-01-01T00:00:00Z",
-            summary="Research in progress",
-            output_text="",
+            summary="Already done",
+            output_text="Old answer",
             error="",
-            provider_status="in_progress",
-            last_event_at="2099-01-01T00:00:00Z",
-            stream_status="interaction.status_update",
-            poll_count=1,
-            timeout_minutes=60,
         )
     )
 
-    started = ensure_research_recovery_started(cfg=Config(), hook_bus=None, client=object())
+    captured = []
 
-    assert started is True
-    reloaded = load_research_job("resume-456")
-    assert reloaded is not None
-    assert reloaded.status == "error"
-    assert reloaded.summary == "Research recovery unavailable"
-    assert "Missing last_event_id" in reloaded.error
+    import archon.research.store as _store_mod
+
+    def _capture_emit(**kwargs):
+        captured.append(kwargs)
+
+    monkeypatch.setattr(_store_mod, "_emit_job_completed_event", _capture_emit)
+
+    result = consume_research_stream(
+        "stream-already-done", iter(()), hook_bus="fake-bus", mark_unfinished_as_error=False,
+    )
+    assert result is not None
+    assert len(captured) == 0
+
+
+def test_save_research_stream_error_emits_completed_event(tmp_path, monkeypatch):
+    monkeypatch.setattr("archon.research.store.RESEARCH_JOBS_DIR", tmp_path)
+
+    record = ResearchJobRecord(
+        interaction_id="err-emit-123",
+        status="in_progress",
+        prompt="test query",
+        agent="deep-research-pro-preview-12-2025",
+        created_at="2099-01-01T00:00:00Z",
+        updated_at="2099-01-01T00:00:00Z",
+        summary="Research in progress",
+        output_text="",
+        error="",
+    )
+    save_research_job(record)
+
+    captured = []
+
+    import archon.research.store as _store_mod
+
+    def _capture_emit(**kwargs):
+        captured.append(kwargs)
+
+    monkeypatch.setattr(_store_mod, "_emit_job_completed_event", _capture_emit)
+
+    result = _store_mod._save_research_stream_error(
+        record, "Something broke", hook_bus="fake-bus",
+    )
+    assert result.status == "error"
+    assert len(captured) == 1
+    assert captured[0]["status"] == "error"
+    assert captured[0]["hook_bus"] == "fake-bus"
