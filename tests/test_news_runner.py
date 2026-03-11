@@ -1,9 +1,12 @@
 """Tests for the news runner orchestration."""
 
 import datetime as dt
+from types import SimpleNamespace
 
 from archon.config import Config
+from archon.llm import LLMResponse
 from archon.news.models import NewsItem
+import archon.news.runner as runner_module
 from archon.news.runner import get_or_build_news_digest, run_news
 
 
@@ -157,3 +160,47 @@ class TestNewsRunner:
         assert calls["fetch"] == 1
         assert second.reason == "cache_hit"
         assert "Cached me" in second.digest.markdown
+
+    def test_get_or_build_records_usage_for_default_news_summarizer(self, monkeypatch, tmp_path):
+        config = Config()
+        recorded = []
+
+        fake_llm = SimpleNamespace(
+            provider="google",
+            model="gemini-3.1-pro-preview",
+        )
+        fake_llm.chat = lambda _system_prompt, _messages, tools=None: LLMResponse(
+            text="Summarized digest body",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "Summarized digest body"}],
+            input_tokens=12,
+            output_tokens=4,
+        )
+
+        monkeypatch.setattr(runner_module, "_make_llm_client", lambda _cfg: fake_llm)
+        monkeypatch.setattr(
+            runner_module,
+            "record_usage_event",
+            lambda event: recorded.append(event) or True,
+        )
+
+        result = get_or_build_news_digest(
+            config,
+            now=dt.datetime(2026, 2, 24, 9, 30, 0),
+            cache_path=tmp_path / "news" / "digest-2026-02-24.json",
+            fetch_items_fn=lambda _cfg: [
+                NewsItem(source="HN", title="LLM thing", url="https://x", score=100)
+            ],
+            result_status="preview",
+        )
+
+        assert result.digest is not None
+        assert "Summarized digest body" in result.digest.markdown
+        assert len(recorded) == 1
+        assert recorded[0].session_id == "news-2026-02-24"
+        assert recorded[0].turn_id == "2026-02-24"
+        assert recorded[0].source == "news"
+        assert recorded[0].provider == "google"
+        assert recorded[0].model == "gemini-3.1-pro-preview"
+        assert recorded[0].input_tokens == 12
+        assert recorded[0].output_tokens == 4

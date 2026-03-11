@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 
+from typing import Callable
+
 from archon.news.models import NewsItem
 
 
@@ -46,7 +48,13 @@ def build_news_prompt(items: list[NewsItem]) -> str:
     )
 
 
-def summarize_with_llm(llm, items: list[NewsItem], config) -> str | None:
+def summarize_with_llm(
+    llm,
+    items: list[NewsItem],
+    config,
+    *,
+    usage_recorder: Callable[..., None] | None = None,
+) -> str | None:
     """Summarize ranked items using the configured LLM, retrying on failure."""
     if not items:
         return None
@@ -79,6 +87,17 @@ def summarize_with_llm(llm, items: list[NewsItem], config) -> str | None:
             text = ""
 
         if text:
+            if callable(usage_recorder):
+                input_tokens = getattr(response, "input_tokens", None)
+                output_tokens = getattr(response, "output_tokens", None)
+                if input_tokens is not None and output_tokens is not None:
+                    usage_recorder(
+                        source="news",
+                        provider=str(getattr(llm, "provider", "") or "").strip(),
+                        model=str(getattr(llm, "model", "") or "").strip(),
+                        input_tokens=int(input_tokens),
+                        output_tokens=int(output_tokens),
+                    )
             return text
 
         if attempt < attempts:

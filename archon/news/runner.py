@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import sys
+import time
 from pathlib import Path
 
 from archon.adapters.telegram_client import TelegramBotClient
@@ -21,6 +22,7 @@ from archon.news.state import (
     should_run_today,
 )
 from archon.news.summarize import build_fallback_digest, summarize_with_llm
+from archon.usage import UsageEvent, record_usage_event
 
 
 def run_news(
@@ -188,7 +190,14 @@ def _run_build_only_pipeline(
         return NewsRunResult(status="no_news", reason="no_items_selected")
 
     try:
-        digest_body, used_fallback = summarize_fn(config, digest_items)
+        if summarize_fn is _summarize_items:
+            digest_body, used_fallback = summarize_fn(
+                config,
+                digest_items,
+                date_iso=date_iso,
+            )
+        else:
+            digest_body, used_fallback = summarize_fn(config, digest_items)
     except Exception as e:
         return NewsRunResult(
             status="error",
@@ -210,7 +219,7 @@ def _run_build_only_pipeline(
     return NewsRunResult(status=status, reason="", digest=digest)
 
 
-def _summarize_items(config: Config, items) -> tuple[str, bool]:
+def _summarize_items(config: Config, items, *, date_iso: str | None = None) -> tuple[str, bool]:
     """Summarize using Archon's LLMClient and fall back deterministically."""
     llm = None
     try:
@@ -219,7 +228,41 @@ def _summarize_items(config: Config, items) -> tuple[str, bool]:
         print(f"[news] LLM client init failed: {type(e).__name__}: {e}", file=sys.stderr)
 
     if llm is not None:
-        text = summarize_with_llm(llm, items, config)
+        session_id = f"news-{date_iso or dt.date.today().isoformat()}"
+        turn_id = date_iso or dt.date.today().isoformat()
+
+        def _record_news_usage(**kwargs) -> None:
+            provider = str(kwargs.get("provider", "") or "").strip()
+            model = str(kwargs.get("model", "") or "").strip()
+            input_tokens = kwargs.get("input_tokens")
+            output_tokens = kwargs.get("output_tokens")
+            if not provider or not model:
+                return
+            if input_tokens is None or output_tokens is None:
+                return
+            try:
+                record_usage_event(
+                    UsageEvent(
+                        event_id=f"{turn_id}:news:{time.time_ns()}",
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        source="news",
+                        provider=provider,
+                        model=model,
+                        input_tokens=int(input_tokens),
+                        output_tokens=int(output_tokens),
+                        recorded_at=time.time(),
+                    )
+                )
+            except Exception:
+                return
+
+        text = summarize_with_llm(
+            llm,
+            items,
+            config,
+            usage_recorder=_record_news_usage,
+        )
         if text:
             return text, False
 

@@ -11,6 +11,8 @@ from archon.news.summarize import build_fallback_digest, build_news_prompt, summ
 @dataclass
 class FakeLLM:
     responses: list
+    provider: str = "google"
+    model: str = "gemini-3.1-pro-preview"
 
     def chat(self, system_prompt, messages, tools=None):
         assert system_prompt
@@ -65,3 +67,54 @@ class TestNewsSummarize:
         llm = FakeLLM(responses=[RuntimeError("boom"), RuntimeError("boom")])
         out = summarize_with_llm(llm, _items(), cfg)
         assert out is None
+
+    def test_summarize_with_llm_records_news_usage_when_usage_present(self):
+        cfg = Config()
+        recorded = []
+        llm = FakeLLM(
+            responses=[
+                LLMResponse(
+                    text="LLM summary output",
+                    tool_calls=[],
+                    raw_content=[{"type": "text", "text": "LLM summary output"}],
+                    input_tokens=12,
+                    output_tokens=4,
+                )
+            ]
+        )
+
+        out = summarize_with_llm(
+            llm,
+            _items(),
+            cfg,
+            usage_recorder=lambda **kwargs: recorded.append(kwargs),
+        )
+
+        assert out == "LLM summary output"
+        assert recorded == [
+            {
+                "source": "news",
+                "provider": "google",
+                "model": "gemini-3.1-pro-preview",
+                "input_tokens": 12,
+                "output_tokens": 4,
+            }
+        ]
+
+    def test_summarize_with_llm_does_not_fabricate_usage_for_fallback(self, monkeypatch):
+        cfg = Config()
+        cfg.news.llm.retries = 2
+        cfg.news.llm.retry_delay_sec = 0
+        monkeypatch.setattr("archon.news.summarize.time.sleep", lambda _x: None)
+        recorded = []
+        llm = FakeLLM(responses=[RuntimeError("boom"), RuntimeError("boom")])
+
+        out = summarize_with_llm(
+            llm,
+            _items(),
+            cfg,
+            usage_recorder=lambda **kwargs: recorded.append(kwargs),
+        )
+
+        assert out is None
+        assert recorded == []
