@@ -17,6 +17,9 @@ def test_load_config_calls_defaults(monkeypatch, tmp_path):
     assert cfg.calls.voice_service.mode in {"systemd", "subprocess"}
     assert cfg.agent.llm_request_timeout_sec == 45.0
     assert cfg.agent.llm_retry_attempts == 3
+    assert cfg.agent.wall_clock_timeout_sec == 600.0
+    assert cfg.agent.max_consecutive_tool_errors == 3
+    assert cfg.agent.diagnostic_tool_error_threshold == 2
     assert cfg.agent.tool_result_max_chars == 3000
     assert cfg.agent.tool_result_worker_max_chars == 1500
     assert cfg.orchestrator.enabled is False
@@ -138,6 +141,28 @@ def test_load_config_agent_tool_result_caps(monkeypatch, tmp_path):
 
     assert cfg.agent.tool_result_max_chars == 7000
     assert cfg.agent.tool_result_worker_max_chars == 1800
+
+
+def test_load_config_agent_smart_loop_thresholds(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config" / "archon"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        "\n".join(
+            [
+                "[agent]",
+                "wall_clock_timeout_sec = 90",
+                "max_consecutive_tool_errors = 4",
+                "diagnostic_tool_error_threshold = 3",
+            ]
+        )
+    )
+    monkeypatch.setattr("archon.config.CONFIG_DIR", config_dir)
+
+    cfg = load_config()
+
+    assert cfg.agent.wall_clock_timeout_sec == 90.0
+    assert cfg.agent.max_consecutive_tool_errors == 4
+    assert cfg.agent.diagnostic_tool_error_threshold == 3
 
 
 def test_load_config_mcp_read_only_servers(monkeypatch, tmp_path):

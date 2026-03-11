@@ -44,6 +44,9 @@ class AgentConfig:
     temperature: float = 0.3
     llm_request_timeout_sec: float = 45.0
     llm_retry_attempts: int = 3
+    wall_clock_timeout_sec: float = 600.0
+    max_consecutive_tool_errors: int = 3
+    diagnostic_tool_error_threshold: int = 2
     # Prompt-budget guard: cap tool_result payload size before adding to history.
     tool_result_max_chars: int = 3000
     # Stricter cap for verbose worker/delegation tools.
@@ -235,6 +238,27 @@ def load_config() -> Config:
         )
         cfg.agent.llm_retry_attempts = int(
             agent.get("llm_retry_attempts", cfg.agent.llm_retry_attempts)
+        )
+        cfg.agent.wall_clock_timeout_sec = float(
+            agent.get("wall_clock_timeout_sec", cfg.agent.wall_clock_timeout_sec)
+        )
+        cfg.agent.max_consecutive_tool_errors = max(
+            1,
+            int(
+                agent.get(
+                    "max_consecutive_tool_errors",
+                    cfg.agent.max_consecutive_tool_errors,
+                )
+            ),
+        )
+        cfg.agent.diagnostic_tool_error_threshold = max(
+            1,
+            int(
+                agent.get(
+                    "diagnostic_tool_error_threshold",
+                    cfg.agent.diagnostic_tool_error_threshold,
+                )
+            ),
         )
         cfg.agent.tool_result_max_chars = int(
             agent.get("tool_result_max_chars", cfg.agent.tool_result_max_chars)
