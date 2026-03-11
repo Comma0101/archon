@@ -26,6 +26,7 @@ from archon.control.session_controller import (
     wants_news_force_refresh,
     wants_news_telegram_delivery,
 )
+from archon.execution.contracts import SuspensionRequest
 from archon.execution.turn_executor import execute_turn, execute_turn_stream
 from archon.llm import LLMClient, LLMResponse
 from archon.tools import ToolRegistry
@@ -92,6 +93,18 @@ class Agent:
         self.history_trim_to_chars = int(getattr(config.agent, "history_trim_to_chars", 36000))
         self.llm_request_timeout_sec = float(getattr(config.agent, "llm_request_timeout_sec", 45))
         self.llm_retry_attempts = max(1, int(getattr(config.agent, "llm_retry_attempts", 3)))
+        self.wall_clock_timeout_sec = max(
+            1.0,
+            float(getattr(config.agent, "wall_clock_timeout_sec", 600.0)),
+        )
+        self.max_consecutive_tool_errors = max(
+            1,
+            int(getattr(config.agent, "max_consecutive_tool_errors", 3)),
+        )
+        self.diagnostic_tool_error_threshold = max(
+            1,
+            int(getattr(config.agent, "diagnostic_tool_error_threshold", 2)),
+        )
         self.tool_result_max_chars = max(
             200,
             int(getattr(config.agent, "tool_result_max_chars", 6000)),
@@ -110,6 +123,7 @@ class Agent:
         self.log_label: str = ""
         self._turn_counter = 0
         self.last_turn_id: str = ""
+        self.last_suspension_request: SuspensionRequest | None = None
         self._pending_compactions: list[dict] = []
         self.session_id = f"session-{time.time_ns()}"
         self.tools.hook_bus = self.hooks
@@ -144,10 +158,11 @@ class Agent:
             profile_name=active_profile,
         )
 
-    def run(self, user_message: str, policy_profile: str | None = None) -> str:
+    def run(self, user_message: str, policy_profile: str | None = None) -> str | SuspensionRequest:
         """Run a single user message through the agent loop."""
         turn_id = self._next_turn_id()
         self.last_turn_id = turn_id
+        self.last_suspension_request = None
         active_profile = self._resolve_policy_profile(policy_profile)
         log_prefix = _make_log_prefix(self.log_label, turn_id)
         self._trim_history_if_needed()
@@ -191,6 +206,14 @@ class Agent:
                     max_attempts=self.llm_retry_attempts,
                     request_timeout_sec=self.llm_request_timeout_sec,
                 ),
+                llm_step_no_tools=lambda iter_system_prompt: _chat_with_retry(
+                    self.llm,
+                    iter_system_prompt,
+                    self.history,
+                    [],
+                    max_attempts=self.llm_retry_attempts,
+                    request_timeout_sec=self.llm_request_timeout_sec,
+                ),
             ),
             emit_hook=self._emit_hook,
         )
@@ -203,6 +226,7 @@ class Agent:
         """
         turn_id = self._next_turn_id()
         self.last_turn_id = turn_id
+        self.last_suspension_request = None
         active_profile = self._resolve_policy_profile(policy_profile)
         log_prefix = _make_log_prefix(self.log_label, turn_id)
         self._trim_history_if_needed()
@@ -245,6 +269,14 @@ class Agent:
                     iter_system_prompt,
                     self.history,
                     visible_tool_schemas,
+                    max_attempts=self.llm_retry_attempts,
+                    request_timeout_sec=self.llm_request_timeout_sec,
+                ),
+                llm_step_no_tools=lambda iter_system_prompt: _chat_with_retry(
+                    self.llm,
+                    iter_system_prompt,
+                    self.history,
+                    [],
                     max_attempts=self.llm_retry_attempts,
                     request_timeout_sec=self.llm_request_timeout_sec,
                 ),

@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from archon.setup.store import list_setup_records
+
 _DEEP_SCOPE_SCOPE_PATTERNS = (
     re.compile(r"\brepo\b"),
     re.compile(r"\brepository\b"),
@@ -43,7 +45,7 @@ _AI_NEWS_DIRECT_MARKERS = (
 _AI_NEWS_REFRESH_WORDS = {"refresh", "force", "refetch", "rebuild"}
 _AI_NEWS_DELIVERY_WORDS = {"send", "post", "deliver", "share", "push", "forward"}
 _JOB_REF_PATTERN = re.compile(
-    r"\b(?P<kind>research|worker|call):(?P<id>[A-Za-z0-9_-]+)\b",
+    r"\b(?P<kind>research|worker|call|setup):(?P<id>[A-Za-z0-9_-]+)\b",
     re.IGNORECASE,
 )
 _EXPLICIT_STATUS_PHRASES = (
@@ -161,6 +163,35 @@ def extract_job_ref(text: str) -> str:
     if not kind or not identifier:
         return ""
     return f"{kind}:{identifier}"
+
+
+def match_blocked_setup_job_for_human_reply(
+    text: str,
+    *,
+    list_records_fn: Callable[..., list[Any]] = list_setup_records,
+) -> str:
+    explicit_ref = extract_job_ref(text)
+    kind, identifier = split_job_ref(explicit_ref)
+    if kind == "setup" and identifier:
+        return explicit_ref
+
+    compact = _normalize_text(text)
+    if not compact or compact.startswith("/"):
+        return ""
+
+    matches: list[str] = []
+    for record in list_records_fn(limit=20):
+        if str(getattr(record, "status", "") or "").strip().lower() != "blocked":
+            continue
+        if _blocked_setup_match_score(record, compact) <= 0:
+            continue
+        setup_id = str(getattr(record, "setup_id", "") or "").strip()
+        if setup_id:
+            matches.append(setup_id)
+
+    if len(matches) != 1:
+        return ""
+    return f"setup:{matches[0]}"
 
 
 def split_job_ref(job_ref: str) -> tuple[str, str]:
@@ -319,3 +350,23 @@ def _normalize_text(text: str) -> str:
     compact = re.sub(r"[^a-z0-9\s'’]", " ", str(text or "").lower())
     compact = compact.replace("’", " ").strip()
     return re.sub(r"\s+", " ", compact)
+
+
+def _blocked_setup_match_score(record: Any, compact_text: str) -> int:
+    score = 0
+    project_name = _normalize_text(getattr(record, "project_name", ""))
+    setup_id = _normalize_text(getattr(record, "setup_id", ""))
+    if project_name and project_name in compact_text:
+        score += 3
+    if setup_id and setup_id in compact_text:
+        score += 3
+    for item in getattr(record, "blocked_on", []) or []:
+        if not isinstance(item, dict):
+            continue
+        env_var = _normalize_text(str(item.get("env_var", "") or ""))
+        what = _normalize_text(str(item.get("what", "") or ""))
+        if env_var and env_var in compact_text:
+            score += 2
+        elif what and what in compact_text:
+            score += 1
+    return score

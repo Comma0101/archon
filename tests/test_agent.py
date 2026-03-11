@@ -21,6 +21,7 @@ from archon.agent import (
 from archon.llm import LLMResponse, ToolCall
 from archon.tools import ToolRegistry
 from archon.config import Config, MCPServerConfig, ProfileConfig
+from archon.execution.contracts import SuspensionRequest
 from archon.execution.turn_executor import execute_turn, execute_turn_stream
 from archon.prompt import build_runtime_capability_summary
 
@@ -710,6 +711,49 @@ class TestAgentLoop:
         assert actual["result"] == expected["result"]
         assert actual["history_roles"] == expected["history_roles"]
         assert actual["tool_results"] == expected["tool_results"]
+
+    def test_turn_executor_non_stream_returns_structured_suspension_without_tool_result_history(self, monkeypatch):
+        responses = [
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(id="tc_suspend", name="ask_human", arguments={"question": "Provide key"})],
+                raw_content=[
+                    {
+                        "type": "tool_use",
+                        "id": "tc_suspend",
+                        "name": "ask_human",
+                        "input": {"question": "Provide key"},
+                    }
+                ],
+                input_tokens=12,
+                output_tokens=4,
+            ),
+        ]
+        agent = make_agent(responses)
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        agent.tools.register(
+            "ask_human",
+            "Ask the human for required input",
+            {
+                "properties": {
+                    "question": {"type": "string"},
+                },
+                "required": ["question"],
+            },
+            lambda question: SuspensionRequest(
+                reason="needs_human_input",
+                question=question,
+                project="browser-use",
+            ),
+        )
+
+        trace = capture_non_stream_executor_trace(agent, "need a key")
+
+        assert isinstance(trace["result"], SuspensionRequest)
+        assert trace["result"].question == "Provide key"
+        assert trace["tool_result_count"] == 0
+        assert trace["history_roles"] == ["user", "assistant"]
 
     def test_capture_non_stream_trace_records_mcp_deny_without_execution(self, monkeypatch):
         responses = [
@@ -2367,17 +2411,119 @@ class TestAgentLoop:
                 raw_content=[{"type": "tool_use", "id": f"tc_{i}", "name": "shell", "input": {"command": f"echo {i}"}}],
                 input_tokens=10, output_tokens=10,
             )
-            for i in range(3)
+            for i in range(2)
         ]
+        responses.append(
+            LLMResponse(
+                text="I hit the step limit after two tool attempts.",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "I hit the step limit after two tool attempts."}],
+                input_tokens=5,
+                output_tokens=8,
+            )
+        )
 
         llm = MagicMock()
-        llm.chat = MagicMock(side_effect=responses)
+        seen_tool_sets = []
+
+        def _chat(_prompt, _history, tools, **_kwargs):
+            seen_tool_sets.append([tool.get("name") for tool in tools])
+            return responses.pop(0)
+
+        llm.chat = MagicMock(side_effect=_chat)
         tools = ToolRegistry(archon_source_dir=None)
         agent = Agent(llm, tools, config)
         agent._system_prompt = "test"
 
         result = agent.run("loop forever")
-        assert "Iteration limit" in result
+        assert result == "I hit the step limit after two tool attempts."
+        assert seen_tool_sets[-1] == []
+
+    def test_repeated_tool_errors_bail_out_with_no_tools_summary(self):
+        config = Config()
+        config.agent.max_iterations = 10
+        config.agent.max_consecutive_tool_errors = 3
+        config.agent.diagnostic_tool_error_threshold = 2
+        tool_response = LLMResponse(
+            text=None,
+            tool_calls=[ToolCall(id="tc_err", name="always_error", arguments={"value": "x"})],
+            raw_content=[{"type": "tool_use", "id": "tc_err", "name": "always_error", "input": {"value": "x"}}],
+            input_tokens=10,
+            output_tokens=4,
+        )
+        summary_response = LLMResponse(
+            text="I stopped after repeated tool failures.",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "I stopped after repeated tool failures."}],
+            input_tokens=4,
+            output_tokens=7,
+        )
+        llm = MagicMock()
+        prompts = []
+        responses = [tool_response, tool_response, tool_response, summary_response]
+
+        def _chat(prompt, _history, tools, **_kwargs):
+            prompts.append((prompt, [tool.get("name") for tool in tools]))
+            return responses.pop(0)
+
+        llm.chat = MagicMock(side_effect=_chat)
+        tools = ToolRegistry(archon_source_dir=None)
+        tools.register(
+            "always_error",
+            "Always returns an error",
+            {"properties": {"value": {"type": "string"}}, "required": ["value"]},
+            lambda value: f"Error: still broken: {value}",
+        )
+        agent = Agent(llm, tools, config)
+        agent._system_prompt = "test"
+
+        result = agent.run("keep trying")
+
+        assert result == "I stopped after repeated tool failures."
+        assert llm.chat.call_count == 4
+        assert "[DIAGNOSTIC]" in prompts[2][0]
+        assert prompts[-1][1] == []
+
+    def test_execute_turn_times_out_before_next_iteration_and_uses_no_tools_summary(self, monkeypatch):
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+
+        config = Config()
+        config.agent.max_iterations = 5
+        config.agent.wall_clock_timeout_sec = 1
+        llm = MagicMock()
+        tools = ToolRegistry(archon_source_dir=None)
+        agent = Agent(llm, tools, config)
+        agent._system_prompt = "test"
+        tool_response = LLMResponse(
+            text=None,
+            tool_calls=[ToolCall(id="tc_1", name="shell", arguments={"command": "echo hi"})],
+            raw_content=[{"type": "tool_use", "id": "tc_1", "name": "shell", "input": {"command": "echo hi"}}],
+            input_tokens=10,
+            output_tokens=2,
+        )
+        summary_response = LLMResponse(
+            text="I stopped because the turn exceeded its time budget.",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "I stopped because the turn exceeded its time budget."}],
+            input_tokens=4,
+            output_tokens=7,
+        )
+        monotonic_values = iter([0.0, 0.2, 1.5])
+        monkeypatch.setattr("archon.execution.turn_executor.time.monotonic", lambda: next(monotonic_values))
+
+        result = execute_turn(
+            agent,
+            turn_id="t-timeout",
+            user_message="do work",
+            active_profile="default",
+            log_prefix="[turn=t-timeout]",
+            turn_system_prompt="test prompt",
+            llm_step=lambda _prompt: tool_response,
+            llm_step_no_tools=lambda _prompt: summary_response,
+        )
+
+        assert result == "I stopped because the turn exceeded its time budget."
 
     def test_loop_detection_breaks_early(self):
         # Same tool call repeated triggers loop detection before iteration limit.

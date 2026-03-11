@@ -25,6 +25,8 @@ from archon.research.store import (
     load_research_job_summary,
     purge_completed_jobs,
 )
+from archon.setup.formatting import format_setup_record
+from archon.setup.store import list_setup_job_summaries, load_setup_job_summary, load_setup_record
 from archon.usage import summarize_usage_for_session
 from archon.workers.session_store import list_worker_job_summaries, load_worker_job_summary, purge_stale_sessions
 
@@ -748,18 +750,33 @@ def handle_mcp_command(agent, text: str) -> tuple[bool, str]:
     return True, "Usage: /mcp [servers|show <server>|tools <server>]"
 
 
-def _collect_job_summaries(limit: int = 10):
+def _get_research_refresh_client(agent):
+    creator = getattr(agent, "_create_google_deep_research_client", None)
+    if not callable(creator):
+        return None
+    try:
+        return creator()
+    except Exception:
+        return None
+
+
+def _collect_job_summaries(limit: int = 10, *, refresh_client=None, hook_bus=None):
     max_items = max(1, int(limit))
     jobs = (
         list_worker_job_summaries(limit=max_items)
         + list_call_job_summaries(limit=max_items)
-        + list_research_job_summaries(limit=max_items)
+        + list_research_job_summaries(
+            limit=max_items,
+            refresh_client=refresh_client,
+            hook_bus=hook_bus,
+        )
+        + list_setup_job_summaries(limit=max_items)
     )
     jobs.sort(key=lambda job: (job.last_update_at, job.job_id), reverse=True)
     return jobs[:max_items]
 
 
-def _load_job_summary(job_ref: str):
+def _load_job_summary(job_ref: str, *, refresh_client=None, hook_bus=None):
     ref = str(job_ref or "").strip()
     if not ref:
         return None
@@ -768,18 +785,32 @@ def _load_job_summary(job_ref: str):
     if ref.startswith("call:"):
         return load_call_job_summary(ref.split(":", 1)[1])
     if ref.startswith("research:"):
-        return load_research_job_summary(ref.split(":", 1)[1])
+        return load_research_job_summary(
+            ref.split(":", 1)[1],
+            refresh_client=refresh_client,
+            hook_bus=hook_bus,
+        )
+    if ref.startswith("setup:"):
+        return load_setup_job_summary(ref.split(":", 1)[1])
     job = load_worker_job_summary(ref)
     if job is not None:
         return job
     job = load_call_job_summary(ref)
     if job is not None:
         return job
-    return load_research_job_summary(ref)
+    job = load_research_job_summary(
+        ref,
+        refresh_client=refresh_client,
+        hook_bus=hook_bus,
+    )
+    if job is not None:
+        return job
+    return load_setup_job_summary(ref)
 
 
 _ACTIVE_JOB_STATUSES = {
     "approved",
+    "blocked",
     "in_progress",
     "pending",
     "paused",
@@ -876,8 +907,13 @@ def handle_jobs_command(agent, text: str) -> tuple[bool, str]:
     view, limit = parsed
 
     scan_limit = max(limit, 100) if view == "active" else limit
+    refresh_client = _get_research_refresh_client(agent)
     try:
-        jobs = _collect_job_summaries(limit=scan_limit)
+        jobs = _collect_job_summaries(
+            limit=scan_limit,
+            refresh_client=refresh_client,
+            hook_bus=getattr(agent, "hooks", None),
+        )
     except OSError as e:
         return True, f"Jobs unavailable: {e}"
     return True, _format_jobs_list(jobs, view=view, limit=limit)
@@ -891,7 +927,13 @@ def handle_job_command(agent, text: str) -> tuple[bool, str]:
         return False, ""
     if len(parts) < 2 or not parts[1].strip():
         try:
-            return True, _format_job_selector(_collect_job_summaries(limit=10))
+            return True, _format_job_selector(
+                _collect_job_summaries(
+                    limit=10,
+                    refresh_client=_get_research_refresh_client(agent),
+                    hook_bus=getattr(agent, "hooks", None),
+                )
+            )
         except OSError as e:
             return True, f"Jobs unavailable: {e}"
 
@@ -955,13 +997,23 @@ def _render_job_detail(agent, job_ref: str) -> str:
         interaction_id = ref.split(":", 1)[1]
         job = load_research_job(
             interaction_id,
-            refresh_client=None,
+            refresh_client=_get_research_refresh_client(agent),
             hook_bus=getattr(agent, "hooks", None),
         )
         if job is None:
             return f"Job not found: {ref}"
         return format_research_job_record(job, cfg=getattr(agent, "config", None))
-    job = _load_job_summary(ref)
+    if ref.startswith("setup:"):
+        setup_id = ref.split(":", 1)[1]
+        record = load_setup_record(setup_id)
+        if record is None:
+            return f"Job not found: {ref}"
+        return format_setup_record(record)
+    job = _load_job_summary(
+        ref,
+        refresh_client=_get_research_refresh_client(agent),
+        hook_bus=getattr(agent, "hooks", None),
+    )
     if job is None:
         return f"Job not found: {ref}"
     return format_job_summary(job)

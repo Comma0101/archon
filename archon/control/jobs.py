@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from archon.calls.models import CallMission
     from archon.research.models import ResearchJobRecord
+    from archon.setup.models import SetupRecord
     from archon.workers.session_store_models import WorkerSessionRecord
 
 
@@ -72,6 +73,32 @@ def job_summary_from_research_record(record: "ResearchJobRecord") -> JobSummary:
     )
 
 
+def job_summary_from_setup_record(record: "SetupRecord") -> JobSummary:
+    project_name = str(getattr(record, "project_name", "") or "").strip()
+    blockers = list(getattr(record, "blocked_steps", lambda: [])() or [])
+    steps = list(getattr(record, "steps", []) or [])
+    done_count = int(getattr(record, "completed_step_count", lambda: 0)() or 0)
+    summary = str(getattr(record, "summary", "") or "").strip()
+    if not summary:
+        step_total = len(steps)
+        if blockers:
+            summary = (
+                f"{project_name or record.setup_id}: {done_count}/{step_total} steps, "
+                f"waiting for {len(blockers)} human step(s)"
+            ).strip()
+        elif step_total > 0:
+            summary = f"{project_name or record.setup_id}: {done_count}/{step_total} steps".strip()
+        else:
+            summary = f"Project setup for {project_name or record.setup_id}".strip()
+    return JobSummary(
+        job_id=f"setup:{record.setup_id}",
+        kind="project_setup",
+        status=str(record.status or "").strip(),
+        summary=summary,
+        last_update_at=_first_non_empty(record.updated_at, record.created_at),
+    )
+
+
 def format_job_summary(job: JobSummary) -> str:
     return "\n".join(
         [
@@ -128,3 +155,4 @@ def _timestamp_to_iso(value: object) -> str:
 summarize_worker_session = job_summary_from_worker_record
 summarize_call_mission = job_summary_from_call_mission
 summarize_research_job = job_summary_from_research_record
+summarize_setup_job = job_summary_from_setup_record
