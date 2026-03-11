@@ -2,14 +2,62 @@
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING, Callable, Generator
 
 from archon.control.policy import evaluate_mcp_policy, evaluate_tool_policy
+from archon.execution.contracts import SuspensionRequest
 from archon.llm import LLMResponse
 from archon.security.redaction import redact_secret_like_text
 
 if TYPE_CHECKING:
     from archon.agent import Agent
+
+
+def _drop_last_assistant_tool_use(agent: "Agent") -> None:
+    if not getattr(agent, "history", None):
+        return
+    from archon.agent import _is_assistant_tool_use_message
+
+    if _is_assistant_tool_use_message(agent.history[-1]):
+        agent.history.pop()
+
+
+def _maybe_add_diagnostic_hint(agent: "Agent", prompt: str, consecutive_tool_errors: int) -> str:
+    if consecutive_tool_errors < getattr(agent, "diagnostic_tool_error_threshold", 2):
+        return prompt
+    return (
+        prompt
+        + "\n\n[DIAGNOSTIC]\n"
+        + "You've hit repeated tool errors. Before acting again, identify the likely cause, "
+        + "avoid repeating the same failed action, and stop if user input or an environment fix is required."
+    )
+
+
+def _finalize_without_tools(
+    agent: "Agent",
+    turn_system_prompt: str,
+    instruction: str,
+    llm_step_no_tools: Callable[[str], LLMResponse] | None,
+    *,
+    fallback_text: str,
+) -> str:
+    if llm_step_no_tools is None:
+        return fallback_text
+    response = llm_step_no_tools(f"{turn_system_prompt}\n\n{instruction}")
+    agent.total_input_tokens += response.input_tokens
+    agent.total_output_tokens += response.output_tokens
+    try:
+        agent._record_llm_usage(
+            turn_id=getattr(agent, "last_turn_id", "") or "turn",
+            source="chat",
+            response=response,
+        )
+    except Exception:
+        pass
+    text = response.text or fallback_text
+    agent.history.append(agent._make_assistant_msg(response))
+    return text
 
 
 def execute_turn(
@@ -21,7 +69,8 @@ def execute_turn(
     log_prefix: str,
     turn_system_prompt: str,
     llm_step: Callable[[str], LLMResponse],
-) -> str:
+    llm_step_no_tools: Callable[[str], LLMResponse] | None = None,
+) -> str | SuspensionRequest:
     """Execute a single non-streaming assistant turn.
 
     The caller is responsible for turn preparation (history repair, user message
@@ -30,8 +79,28 @@ def execute_turn(
     from archon.agent import _detect_tool_loop, _print_tool_call, _print_tool_result
 
     recent_tool_calls: list[tuple[str, dict]] = []
+    consecutive_tool_errors = 0
+    started_at = time.monotonic()
 
     for iteration in range(agent.max_iterations):
+        if time.monotonic() - started_at > agent.wall_clock_timeout_sec:
+            return _finalize_without_tools(
+                agent,
+                turn_system_prompt,
+                "The turn exceeded its wall-clock time budget. Summarize what happened, what failed, and what the user should do next. Do not call tools.",
+                llm_step_no_tools,
+                fallback_text="I stopped because the turn exceeded its time budget.",
+            )
+
+        if iteration == agent.max_iterations - 1:
+            return _finalize_without_tools(
+                agent,
+                turn_system_prompt,
+                "You reached the step limit for this turn. Summarize what you accomplished, what failed, and what the user should do next. Do not call tools.",
+                llm_step_no_tools,
+                fallback_text="[Iteration limit reached]",
+            )
+
         if iteration > 0:
             iteration_hint = (
                 f"\n\n[Iteration {iteration + 1}/{agent.max_iterations}. "
@@ -40,6 +109,12 @@ def execute_turn(
             iter_system_prompt = turn_system_prompt + iteration_hint
         else:
             iter_system_prompt = turn_system_prompt
+
+        iter_system_prompt = _maybe_add_diagnostic_hint(
+            agent,
+            iter_system_prompt,
+            consecutive_tool_errors,
+        )
 
         if agent.on_thinking:
             agent.on_thinking()
@@ -88,6 +163,7 @@ def execute_turn(
                         f"Error: Policy denied tool '{call.name}' "
                         f"({policy_decision.reason})"
                     )
+                    consecutive_tool_errors += 1
                     agent._emit_hook(
                         "post_tool",
                         {
@@ -106,6 +182,15 @@ def execute_turn(
                             "content": denied_result,
                         }
                     )
+                    if consecutive_tool_errors >= agent.max_consecutive_tool_errors:
+                        _drop_last_assistant_tool_use(agent)
+                        return _finalize_without_tools(
+                            agent,
+                            turn_system_prompt,
+                            "You hit repeated tool errors. Summarize what failed, what you tried, and what the user should do next. Do not call tools.",
+                            llm_step_no_tools,
+                            fallback_text="I stopped after repeated tool failures.",
+                        )
                     continue
 
                 if call.name == "mcp_call":
@@ -132,6 +217,7 @@ def execute_turn(
                             f"'{server_name or 'unknown'}' "
                             f"({mcp_policy_decision.reason})"
                         )
+                        consecutive_tool_errors += 1
                         agent._emit_hook(
                             "post_tool",
                             {
@@ -150,6 +236,15 @@ def execute_turn(
                                 "content": denied_result,
                             }
                         )
+                        if consecutive_tool_errors >= agent.max_consecutive_tool_errors:
+                            _drop_last_assistant_tool_use(agent)
+                            return _finalize_without_tools(
+                                agent,
+                                turn_system_prompt,
+                                "You hit repeated tool errors. Summarize what failed, what you tried, and what the user should do next. Do not call tools.",
+                                llm_step_no_tools,
+                                fallback_text="I stopped after repeated tool failures.",
+                            )
                         continue
 
                 agent._emit_hook(
@@ -169,12 +264,31 @@ def execute_turn(
                 if agent.on_tool_call:
                     agent.on_tool_call(call.name, call.arguments)
                 result = agent.tools.execute(call.name, call.arguments)
+                if isinstance(result, SuspensionRequest):
+                    agent.last_suspension_request = result
+                    agent._emit_hook(
+                        "post_tool",
+                        {
+                            "turn_id": turn_id,
+                            "name": call.name,
+                            "result_is_error": False,
+                            "result_length": 0,
+                            "result_kind": "suspension",
+                            "policy_decision": policy_decision.decision,
+                            "job_id": result.job_id,
+                        },
+                    )
+                    return result
                 result_text = redact_secret_like_text(str(result))
                 _print_tool_result(
                     result_text,
                     prefix=log_prefix,
                     activity_feed=getattr(agent, "terminal_activity_feed", None),
                 )
+                if result_text.startswith("Error:"):
+                    consecutive_tool_errors += 1
+                else:
+                    consecutive_tool_errors = 0
                 history_result = agent._truncate_tool_result_for_history(
                     call.name,
                     result_text,
@@ -197,12 +311,17 @@ def execute_turn(
                         "content": history_result,
                     }
                 )
+                if consecutive_tool_errors >= agent.max_consecutive_tool_errors:
+                    _drop_last_assistant_tool_use(agent)
+                    return _finalize_without_tools(
+                        agent,
+                        turn_system_prompt,
+                        "You hit repeated tool errors. Summarize what failed, what you tried, and what the user should do next. Do not call tools.",
+                        llm_step_no_tools,
+                        fallback_text="I stopped after repeated tool failures.",
+                    )
         except Exception:
-            if agent.history:
-                from archon.agent import _is_assistant_tool_use_message
-
-                if _is_assistant_tool_use_message(agent.history[-1]):
-                    agent.history.pop()
+            _drop_last_assistant_tool_use(agent)
             raise
 
         for call in response.tool_calls:
@@ -234,6 +353,7 @@ def execute_turn_stream(
     log_prefix: str,
     turn_system_prompt: str,
     llm_stream_step: Callable[[str], tuple[list[str], LLMResponse | None]],
+    llm_step_no_tools: Callable[[str], LLMResponse] | None = None,
 ) -> Generator[str, None, None]:
     """Execute a single streaming assistant turn.
 
@@ -243,8 +363,30 @@ def execute_turn_stream(
     from archon.agent import _detect_tool_loop, _print_tool_call, _print_tool_result
 
     recent_tool_calls: list[tuple[str, dict]] = []
+    consecutive_tool_errors = 0
+    started_at = time.monotonic()
 
     for iteration in range(agent.max_iterations):
+        if time.monotonic() - started_at > agent.wall_clock_timeout_sec:
+            yield _finalize_without_tools(
+                agent,
+                turn_system_prompt,
+                "The turn exceeded its wall-clock time budget. Summarize what happened, what failed, and what the user should do next. Do not call tools.",
+                llm_step_no_tools,
+                fallback_text="I stopped because the turn exceeded its time budget.",
+            )
+            return
+
+        if iteration == agent.max_iterations - 1:
+            yield _finalize_without_tools(
+                agent,
+                turn_system_prompt,
+                "You reached the step limit for this turn. Summarize what you accomplished, what failed, and what the user should do next. Do not call tools.",
+                llm_step_no_tools,
+                fallback_text="[Iteration limit reached]",
+            )
+            return
+
         if iteration > 0:
             iteration_hint = (
                 f"\n\n[Iteration {iteration + 1}/{agent.max_iterations}. "
@@ -253,6 +395,12 @@ def execute_turn_stream(
             iter_system_prompt = turn_system_prompt + iteration_hint
         else:
             iter_system_prompt = turn_system_prompt
+
+        iter_system_prompt = _maybe_add_diagnostic_hint(
+            agent,
+            iter_system_prompt,
+            consecutive_tool_errors,
+        )
 
         if agent.on_thinking:
             agent.on_thinking()
@@ -310,6 +458,7 @@ def execute_turn_stream(
                         f"Error: Policy denied tool '{call.name}' "
                         f"({policy_decision.reason})"
                     )
+                    consecutive_tool_errors += 1
                     agent._emit_hook(
                         "post_tool",
                         {
@@ -328,6 +477,16 @@ def execute_turn_stream(
                             "content": denied_result,
                         }
                     )
+                    if consecutive_tool_errors >= agent.max_consecutive_tool_errors:
+                        _drop_last_assistant_tool_use(agent)
+                        yield _finalize_without_tools(
+                            agent,
+                            turn_system_prompt,
+                            "You hit repeated tool errors. Summarize what failed, what you tried, and what the user should do next. Do not call tools.",
+                            llm_step_no_tools,
+                            fallback_text="I stopped after repeated tool failures.",
+                        )
+                        return
                     continue
 
                 if call.name == "mcp_call":
@@ -354,6 +513,7 @@ def execute_turn_stream(
                             f"'{server_name or 'unknown'}' "
                             f"({mcp_policy_decision.reason})"
                         )
+                        consecutive_tool_errors += 1
                         agent._emit_hook(
                             "post_tool",
                             {
@@ -372,6 +532,16 @@ def execute_turn_stream(
                                 "content": denied_result,
                             }
                         )
+                        if consecutive_tool_errors >= agent.max_consecutive_tool_errors:
+                            _drop_last_assistant_tool_use(agent)
+                            yield _finalize_without_tools(
+                                agent,
+                                turn_system_prompt,
+                                "You hit repeated tool errors. Summarize what failed, what you tried, and what the user should do next. Do not call tools.",
+                                llm_step_no_tools,
+                                fallback_text="I stopped after repeated tool failures.",
+                            )
+                            return
                         continue
 
                 agent._emit_hook(
@@ -391,12 +561,31 @@ def execute_turn_stream(
                 if agent.on_tool_call:
                     agent.on_tool_call(call.name, call.arguments)
                 result = agent.tools.execute(call.name, call.arguments)
+                if isinstance(result, SuspensionRequest):
+                    agent.last_suspension_request = result
+                    agent._emit_hook(
+                        "post_tool",
+                        {
+                            "turn_id": turn_id,
+                            "name": call.name,
+                            "result_is_error": False,
+                            "result_length": 0,
+                            "result_kind": "suspension",
+                            "policy_decision": policy_decision.decision,
+                            "job_id": result.job_id,
+                        },
+                    )
+                    return
                 result_text = redact_secret_like_text(str(result))
                 _print_tool_result(
                     result_text,
                     prefix=log_prefix,
                     activity_feed=getattr(agent, "terminal_activity_feed", None),
                 )
+                if result_text.startswith("Error:"):
+                    consecutive_tool_errors += 1
+                else:
+                    consecutive_tool_errors = 0
                 history_result = agent._truncate_tool_result_for_history(
                     call.name,
                     result_text,
@@ -419,12 +608,18 @@ def execute_turn_stream(
                         "content": history_result,
                     }
                 )
+                if consecutive_tool_errors >= agent.max_consecutive_tool_errors:
+                    _drop_last_assistant_tool_use(agent)
+                    yield _finalize_without_tools(
+                        agent,
+                        turn_system_prompt,
+                        "You hit repeated tool errors. Summarize what failed, what you tried, and what the user should do next. Do not call tools.",
+                        llm_step_no_tools,
+                        fallback_text="I stopped after repeated tool failures.",
+                    )
+                    return
         except Exception:
-            if agent.history:
-                from archon.agent import _is_assistant_tool_use_message
-
-                if _is_assistant_tool_use_message(agent.history[-1]):
-                    agent.history.pop()
+            _drop_last_assistant_tool_use(agent)
             raise
 
         for call in response.tool_calls:
