@@ -1,4 +1,4 @@
-"""Usage event models and persistence helpers."""
+"""Persistent token usage ledger helpers."""
 
 from archon.usage.models import UsageEvent
 from archon.usage.store import (
