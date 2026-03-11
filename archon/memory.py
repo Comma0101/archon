@@ -467,10 +467,10 @@ def lookup(query: str, limit: int = 5) -> list[dict]:
 
 def prefetch_for_query(
     query: str,
-    limit: int = 2,
-    min_score: float = 6.0,
-    max_lines_per_file: int = 24,
-    max_chars_per_file: int = 1000,
+    limit: int = 4,
+    min_score: float = 5.0,
+    max_lines_per_file: int = 40,
+    max_chars_per_file: int = 1800,
 ) -> list[dict]:
     """Return compact memory snippets for a query using the index (best-effort)."""
     hits = lookup(query, limit=max(1, min(int(limit), 5)))
