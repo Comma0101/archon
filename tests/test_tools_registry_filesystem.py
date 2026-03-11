@@ -24,9 +24,9 @@ def make_registry_allow_all():
     )
 
 class TestRegistry:
-    def test_schemas_has_36_tools(self):
+    def test_schemas_has_37_tools(self):
         reg = make_registry()
-        assert len(reg.get_schemas()) == 36
+        assert len(reg.get_schemas()) == 37
 
     def test_schema_names(self):
         reg = make_registry()
@@ -41,7 +41,8 @@ class TestRegistry:
                         "web_search", "web_read", "delegate_code_task",
                         "worker_status", "worker_list", "worker_start",
                         "worker_send", "worker_poll", "worker_cancel", "worker_approve",
-                        "worker_reconcile"}
+                        "worker_reconcile",
+                        "ask_human"}
 
     def test_unknown_tool(self):
         reg = make_registry()

@@ -5,6 +5,7 @@ from typing import Callable
 
 from archon.config import Config
 from archon.control.policy import resolve_profile
+from archon.execution.contracts import SuspensionRequest
 from archon.safety import Level, confirm
 from archon.tooling import (
     register_call_mission_tools,
@@ -13,6 +14,7 @@ from archon.tooling import (
     register_filesystem_tools,
     register_memory_tools,
     register_mcp_tools,
+    register_setup_tools,
     register_worker_tools,
 )
 
@@ -90,7 +92,7 @@ class ToolRegistry:
             # Event handler must never affect tool execution semantics.
             return
 
-    def execute(self, name: str, arguments: dict) -> str:
+    def execute(self, name: str, arguments: dict) -> str | SuspensionRequest:
         self._emit_execute_event(
             "pre_execute",
             {"name": name, "arguments": arguments},
@@ -110,6 +112,19 @@ class ToolRegistry:
             return result
         try:
             result = handler(**arguments)
+            if isinstance(result, SuspensionRequest):
+                self._emit_execute_event(
+                    "post_execute",
+                    {
+                        "name": name,
+                        "arguments": arguments,
+                        "status": "suspended",
+                        "result_is_error": False,
+                        "result_kind": "suspension",
+                        "job_id": result.job_id,
+                    },
+                )
+                return result
             self._emit_execute_event(
                 "post_execute",
                 {
@@ -166,6 +181,7 @@ class ToolRegistry:
         register_memory_tools(self)
         register_content_tools(self)
         register_mcp_tools(self)
+        register_setup_tools(self)
         register_call_service_tools(self)
         register_call_mission_tools(self)
 
