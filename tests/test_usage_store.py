@@ -1,170 +1,94 @@
-"""Tests for persistent usage ledger storage."""
+from __future__ import annotations
 
-import json
-
-
-def _usage_event(**overrides):
-    from archon.usage.models import UsageEvent
-
-    payload = {
-        "event_id": "evt-1",
-        "session_id": "session-1",
-        "turn_id": "turn-1",
-        "source": "chat",
-        "provider": "openai",
-        "model": "gpt-4o-mini",
-        "input_tokens": 11,
-        "output_tokens": 7,
-        "recorded_at": 1_700_000_000.0,
-    }
-    payload.update(overrides)
-    return UsageEvent(**payload)
+from archon.usage.models import UsageEvent
+from archon.usage.store import (
+    load_usage_events,
+    record_usage_event,
+    summarize_usage_by_source,
+    summarize_usage_for_session,
+)
 
 
-def _read_jsonl(path):
-    return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+def _event(
+    *,
+    event_id: str = "evt-1",
+    session_id: str = "sess-1",
+    turn_id: str = "t001",
+    source: str = "chat",
+    provider: str = "google",
+    model: str = "gemini-3.1-pro-preview",
+    input_tokens: int | None = 10,
+    output_tokens: int | None = 5,
+) -> UsageEvent:
+    return UsageEvent(
+        event_id=event_id,
+        session_id=session_id,
+        turn_id=turn_id,
+        source=source,
+        provider=provider,
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
 
 
 class TestUsageStore:
-    def test_record_usage_event_appends_jsonl_entry(self, monkeypatch, tmp_path):
-        from archon.usage.store import record_usage_event
+    def test_record_usage_event_appends_jsonl_and_loads_it_back(self, tmp_path):
+        ledger_path = tmp_path / "usage.jsonl"
 
-        ledger_path = tmp_path / "usage" / "ledger.jsonl"
-        monkeypatch.setattr("archon.usage.store.USAGE_LEDGER_PATH", ledger_path)
-
-        record_usage_event(_usage_event())
-        record_usage_event(
-            _usage_event(
-                event_id="evt-2",
-                turn_id="turn-2",
-                input_tokens=3,
-                output_tokens=2,
-                recorded_at=1_700_000_001.0,
-            )
+        recorded = record_usage_event(
+            _event(),
+            path=ledger_path,
         )
 
-        rows = _read_jsonl(ledger_path)
-        assert len(rows) == 2
-        assert rows[0]["event_id"] == "evt-1"
-        assert rows[0]["session_id"] == "session-1"
-        assert rows[0]["source"] == "chat"
-        assert rows[0]["input_tokens"] == 11
-        assert rows[0]["output_tokens"] == 7
-        assert rows[1]["event_id"] == "evt-2"
-        assert rows[1]["turn_id"] == "turn-2"
+        assert recorded is True
+        assert ledger_path.exists()
+        events = load_usage_events(path=ledger_path)
+        assert len(events) == 1
+        assert events[0].event_id == "evt-1"
+        assert events[0].session_id == "sess-1"
+        assert events[0].input_tokens == 10
+        assert events[0].output_tokens == 5
 
-    def test_summarize_usage_for_session_totals_input_and_output_tokens(
-        self, monkeypatch, tmp_path
-    ):
-        from archon.usage.store import record_usage_event, summarize_usage_for_session
+    def test_summarize_usage_for_session_totals_input_and_output_tokens(self, tmp_path):
+        ledger_path = tmp_path / "usage.jsonl"
+        record_usage_event(_event(event_id="evt-1", session_id="sess-1", input_tokens=10, output_tokens=5), path=ledger_path)
+        record_usage_event(_event(event_id="evt-2", session_id="sess-1", turn_id="t002", input_tokens=7, output_tokens=2), path=ledger_path)
+        record_usage_event(_event(event_id="evt-3", session_id="sess-2", turn_id="t001", input_tokens=99, output_tokens=1), path=ledger_path)
 
-        ledger_path = tmp_path / "usage" / "ledger.jsonl"
-        monkeypatch.setattr("archon.usage.store.USAGE_LEDGER_PATH", ledger_path)
+        summary = summarize_usage_for_session("sess-1", path=ledger_path)
 
-        record_usage_event(_usage_event(input_tokens=11, output_tokens=7))
-        record_usage_event(
-            _usage_event(
-                event_id="evt-2",
-                turn_id="turn-2",
-                source="news",
-                input_tokens=5,
-                output_tokens=3,
-                recorded_at=1_700_000_001.0,
-            )
-        )
-        record_usage_event(
-            _usage_event(
-                event_id="evt-3",
-                session_id="session-2",
-                turn_id="turn-1",
-                input_tokens=99,
-                output_tokens=88,
-                recorded_at=1_700_000_002.0,
-            )
-        )
-
-        summary = summarize_usage_for_session("session-1")
-
-        assert summary["session_id"] == "session-1"
-        assert summary["event_count"] == 2
-        assert summary["input_tokens"] == 16
-        assert summary["output_tokens"] == 10
-
-    def test_summarize_usage_by_source_keeps_chat_and_news_distinct(
-        self, monkeypatch, tmp_path
-    ):
-        from archon.usage.store import record_usage_event, summarize_usage_by_source
-
-        ledger_path = tmp_path / "usage" / "ledger.jsonl"
-        monkeypatch.setattr("archon.usage.store.USAGE_LEDGER_PATH", ledger_path)
-
-        record_usage_event(_usage_event(input_tokens=11, output_tokens=7))
-        record_usage_event(
-            _usage_event(
-                event_id="evt-2",
-                turn_id="turn-2",
-                source="chat",
-                input_tokens=13,
-                output_tokens=5,
-                recorded_at=1_700_000_001.0,
-            )
-        )
-        record_usage_event(
-            _usage_event(
-                event_id="evt-3",
-                turn_id="turn-3",
-                source="news",
-                input_tokens=17,
-                output_tokens=4,
-                recorded_at=1_700_000_002.0,
-            )
-        )
-
-        grouped = summarize_usage_by_source(session_id="session-1")
-
-        assert set(grouped) == {"chat", "news"}
-        assert grouped["chat"]["event_count"] == 2
-        assert grouped["chat"]["input_tokens"] == 24
-        assert grouped["chat"]["output_tokens"] == 12
-        assert grouped["news"]["event_count"] == 1
-        assert grouped["news"]["input_tokens"] == 17
-        assert grouped["news"]["output_tokens"] == 4
-
-    def test_record_usage_event_ignores_missing_usage_data(
-        self, monkeypatch, tmp_path
-    ):
-        from archon.usage.store import (
-            record_usage_event,
-            summarize_usage_by_source,
-            summarize_usage_for_session,
-        )
-
-        ledger_path = tmp_path / "usage" / "ledger.jsonl"
-        monkeypatch.setattr("archon.usage.store.USAGE_LEDGER_PATH", ledger_path)
-
-        record_usage_event(_usage_event(input_tokens=11, output_tokens=7))
-        record_usage_event(
-            _usage_event(
-                event_id="evt-2",
-                turn_id="turn-2",
-                source="news",
-                input_tokens=None,
-                output_tokens=None,
-                recorded_at=1_700_000_001.0,
-            )
-        )
-
-        summary = summarize_usage_for_session("session-1")
-        grouped = summarize_usage_by_source(session_id="session-1")
-        rows = _read_jsonl(ledger_path)
-
-        assert summary["event_count"] == 1
-        assert summary["input_tokens"] == 11
+        assert summary["session_id"] == "sess-1"
+        assert summary["input_tokens"] == 17
         assert summary["output_tokens"] == 7
-        assert set(grouped) == {"chat"}
-        assert len(rows) == 1
-        assert rows[0]["event_id"] == "evt-1"
+        assert summary["total_tokens"] == 24
+        assert summary["event_count"] == 2
+
+    def test_summarize_usage_by_source_keeps_chat_and_news_distinct(self, tmp_path):
+        ledger_path = tmp_path / "usage.jsonl"
+        record_usage_event(_event(event_id="evt-1", source="chat", input_tokens=10, output_tokens=5), path=ledger_path)
+        record_usage_event(_event(event_id="evt-2", source="news", turn_id="news-1", input_tokens=4, output_tokens=1), path=ledger_path)
+        record_usage_event(_event(event_id="evt-3", source="chat", turn_id="t002", input_tokens=7, output_tokens=2), path=ledger_path)
+
+        summary = summarize_usage_by_source(path=ledger_path)
+
+        assert summary["chat"]["input_tokens"] == 17
+        assert summary["chat"]["output_tokens"] == 7
+        assert summary["chat"]["total_tokens"] == 24
+        assert summary["chat"]["event_count"] == 2
+        assert summary["news"]["input_tokens"] == 4
+        assert summary["news"]["output_tokens"] == 1
+        assert summary["news"]["total_tokens"] == 5
+        assert summary["news"]["event_count"] == 1
+
+    def test_record_usage_event_ignores_missing_usage_data(self, tmp_path):
+        ledger_path = tmp_path / "usage.jsonl"
+
+        recorded = record_usage_event(
+            _event(event_id="evt-empty", input_tokens=None, output_tokens=None),
+            path=ledger_path,
+        )
+
+        assert recorded is False
+        assert load_usage_events(path=ledger_path) == []
+
