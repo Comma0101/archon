@@ -29,6 +29,7 @@ from archon.control.session_controller import (
 from archon.execution.turn_executor import execute_turn, execute_turn_stream
 from archon.llm import LLMClient, LLMResponse
 from archon.tools import ToolRegistry
+from archon.usage import UsageEvent, record_usage_event
 from archon.prompt import (
     build_runtime_capability_summary,
     build_skill_guidance,
@@ -110,6 +111,7 @@ class Agent:
         self._turn_counter = 0
         self.last_turn_id: str = ""
         self._pending_compactions: list[dict] = []
+        self.session_id = f"session-{time.time_ns()}"
         self.tools.hook_bus = self.hooks
         self.tools.set_execute_event_handler(self._on_tool_execute_event)
         try:
@@ -263,6 +265,52 @@ class Agent:
         self.history.clear()
         self.total_input_tokens = 0
         self.total_output_tokens = 0
+
+    def _record_llm_usage(self, *, turn_id: str, source: str, response: LLMResponse) -> bool:
+        """Persist and emit normalized usage for an LLM response."""
+        session_id = str(getattr(self, "session_id", "") or "").strip()
+        provider = str(getattr(self.llm, "provider", "") or "").strip()
+        model = str(getattr(self.llm, "model", "") or "").strip()
+        input_tokens = getattr(response, "input_tokens", None)
+        output_tokens = getattr(response, "output_tokens", None)
+
+        payload = {
+            "source": str(source or "").strip() or "chat",
+            "session_id": session_id,
+            "provider": provider,
+            "model": model,
+            "input_tokens": None if input_tokens is None else int(input_tokens),
+            "output_tokens": None if output_tokens is None else int(output_tokens),
+        }
+
+        recorded = False
+        if (
+            session_id
+            and provider
+            and model
+            and payload["input_tokens"] is not None
+            and payload["output_tokens"] is not None
+        ):
+            try:
+                event = UsageEvent(
+                    event_id=f"{turn_id}:{payload['source']}:{time.time_ns()}",
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    source=payload["source"],
+                    provider=provider,
+                    model=model,
+                    input_tokens=payload["input_tokens"],
+                    output_tokens=payload["output_tokens"],
+                    recorded_at=time.time(),
+                )
+                recorded = record_usage_event(event)
+            except Exception:
+                recorded = False
+
+        hook_payload = dict(payload)
+        hook_payload["recorded"] = recorded
+        self._emit_hook("usage.recorded", hook_payload)
+        return recorded
 
     def compact_context(self) -> dict:
         """Explicitly compact current conversation history into a session artifact."""

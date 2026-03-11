@@ -47,6 +47,14 @@ def execute_turn(
         response = llm_step(iter_system_prompt)
         agent.total_input_tokens += response.input_tokens
         agent.total_output_tokens += response.output_tokens
+        try:
+            agent._record_llm_usage(
+                turn_id=turn_id,
+                source="chat",
+                response=response,
+            )
+        except Exception:
+            pass
 
         if not response.tool_calls:
             text = response.text or ""
@@ -256,6 +264,14 @@ def execute_turn_stream(
 
         agent.total_input_tokens += response.input_tokens
         agent.total_output_tokens += response.output_tokens
+        try:
+            agent._record_llm_usage(
+                turn_id=turn_id,
+                source="chat",
+                response=response,
+            )
+        except Exception:
+            pass
 
         if not response.tool_calls:
             agent.history.append(agent._make_assistant_msg(response))

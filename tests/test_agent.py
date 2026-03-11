@@ -2412,8 +2412,15 @@ class TestAgentLoop:
         assert agent.total_input_tokens == 100
         assert agent.total_output_tokens == 50
 
-    def test_run_records_usage_ledger_event_for_non_streaming_turn(self):
+    def test_run_records_usage_ledger_event_for_non_streaming_turn(self, monkeypatch):
         usage_events = []
+        persisted_events = []
+
+        def _record_usage_event(event):
+            persisted_events.append(event)
+            return True
+
+        monkeypatch.setattr(agent_module, "record_usage_event", _record_usage_event)
 
         responses = [
             LLMResponse(
@@ -2435,6 +2442,14 @@ class TestAgentLoop:
         assert result == "ok"
         assert agent.total_input_tokens == 100
         assert agent.total_output_tokens == 50
+        assert len(persisted_events) == 1
+        assert persisted_events[0].session_id == "sess-usage"
+        assert persisted_events[0].turn_id == agent.last_turn_id
+        assert persisted_events[0].source == "chat"
+        assert persisted_events[0].provider == "google"
+        assert persisted_events[0].model == "gemini-3.1-pro-preview"
+        assert persisted_events[0].input_tokens == 100
+        assert persisted_events[0].output_tokens == 50
         assert len(usage_events) == 1
         assert usage_events[0].task_id == agent.last_turn_id
         payload = usage_events[0].payload
@@ -2473,8 +2488,15 @@ class TestAgentLoop:
         assert agent.total_input_tokens == 10
         assert len(agent.history) == 2  # user + assistant
 
-    def test_run_stream_records_usage_ledger_event_for_streaming_turn(self):
+    def test_run_stream_records_usage_ledger_event_for_streaming_turn(self, monkeypatch):
         usage_events = []
+        persisted_events = []
+
+        def _record_usage_event(event):
+            persisted_events.append(event)
+            return True
+
+        monkeypatch.setattr(agent_module, "record_usage_event", _record_usage_event)
 
         final_resp = LLMResponse(
             text="Hello world",
@@ -2495,6 +2517,14 @@ class TestAgentLoop:
         assert chunks == ["Hello", " ", "world"]
         assert agent.total_input_tokens == 10
         assert agent.total_output_tokens == 5
+        assert len(persisted_events) == 1
+        assert persisted_events[0].session_id == "sess-stream"
+        assert persisted_events[0].turn_id == agent.last_turn_id
+        assert persisted_events[0].source == "chat"
+        assert persisted_events[0].provider == "google"
+        assert persisted_events[0].model == "gemini-3.1-pro-preview"
+        assert persisted_events[0].input_tokens == 10
+        assert persisted_events[0].output_tokens == 5
         assert len(usage_events) == 1
         assert usage_events[0].task_id == agent.last_turn_id
         payload = usage_events[0].payload
