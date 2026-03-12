@@ -65,8 +65,11 @@ def run_heartbeat(
     """Run proactive checks and notify only for actionable results."""
     active_items = items if items is not None else load_heartbeat_items()
     for item in active_items:
-        agent = agent_factory()
-        result = str(agent.run(build_heartbeat_prompt(item), policy_profile=policy_profile) or "").strip()
-        if result == HEARTBEAT_OK or not result:
+        try:
+            agent = agent_factory()
+            result = str(agent.run(build_heartbeat_prompt(item), policy_profile=policy_profile) or "").strip()
+            if result == HEARTBEAT_OK or not result:
+                continue
+            notify_fn(f"Heartbeat: {item.text}\n{result}")
+        except Exception:
             continue
-        notify_fn(f"Heartbeat: {item.text}\n{result}")

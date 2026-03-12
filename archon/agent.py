@@ -414,6 +414,7 @@ class Agent:
         if session_profile:
             return session_profile
         orchestrator_cfg = getattr(self.config, "orchestrator", None)
+        cfg_profile = ""
         if orchestrator_cfg is not None:
             cfg_profile = str(
                 getattr(orchestrator_cfg, "default_profile", "default") or "default"
@@ -1034,7 +1035,7 @@ def _build_turn_system_prompt(
             lines.append(f"summary: {summary}")
 
     try:
-        prefetched = memory_store.prefetch_for_query(user_message, limit=2)
+        prefetched = memory_store.prefetch_for_query(user_message)
     except Exception:
         prefetched = []
     if not prefetched:

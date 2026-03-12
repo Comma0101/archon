@@ -307,6 +307,11 @@ def _loaded_markdown_skills() -> dict[str, MarkdownSkill]:
         return {}
 
 
+def reload_markdown_skills() -> None:
+    """Clear the cached markdown skills so they are reloaded from disk on next access."""
+    _loaded_markdown_skills.cache_clear()
+
+
 def find_markdown_skill_match(text: str) -> MarkdownSkill | None:
     """Match user text against markdown skill triggers."""
     lowered = str(text or "").strip().lower()

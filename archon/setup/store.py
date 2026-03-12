@@ -20,7 +20,8 @@ def _ensure_dirs() -> None:
 
 
 def setup_record_path(setup_id: str) -> Path:
-    return SETUP_RECORDS_DIR / f"{setup_id}.json"
+    safe_id = str(setup_id).replace("/", "_").replace("\\", "_").replace("..", "_")
+    return SETUP_RECORDS_DIR / f"{safe_id}.json"
 
 
 def _read_json_object(path: Path) -> dict[str, object] | None:

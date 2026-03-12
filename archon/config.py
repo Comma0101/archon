@@ -580,6 +580,7 @@ def ensure_dirs():
     """Create all XDG directories if they don't exist."""
     for d in [
         CONFIG_DIR,
+        SKILLS_DIR,
         MEMORY_DIR,
         HISTORY_DIR,
         CACHE_DIR,
