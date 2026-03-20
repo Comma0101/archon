@@ -15,6 +15,7 @@ from archon.agent import (
     Agent,
     _chat_stream_collect_with_retry,
     _chat_with_retry,
+    _estimate_history_chars,
     _print_tool_call,
     _print_tool_result,
 )
@@ -989,7 +990,8 @@ class TestAgentLoop:
             expected_llm_calls=3,
         )
 
-        assert fixture.tool_result_text == "loop"
+        assert "exit_code: 0" in fixture.tool_result_text
+        assert fixture.tool_result_text.endswith("output:\nloop")
 
     def test_stream_parity_fixture_text_only_response(self):
         final_resp = LLMResponse(
@@ -1034,7 +1036,8 @@ class TestAgentLoop:
             expected_chat_stream_calls=2,
         )
 
-        assert fixture.tool_result_text == "hi"
+        assert "exit_code: 0" in fixture.tool_result_text
+        assert fixture.tool_result_text.endswith("output:\nhi")
 
     def test_stream_parity_fixture_mcp_denied_round_trip(self, monkeypatch):
         tool_resp = LLMResponse(
@@ -1126,7 +1129,8 @@ class TestAgentLoop:
             expected_chat_stream_calls=3,
         )
 
-        assert fixture.tool_result_text == "loop"
+        assert "exit_code: 0" in fixture.tool_result_text
+        assert fixture.tool_result_text.endswith("output:\nloop")
 
     def test_compact_context_persists_history_artifact_and_clears_history(self, monkeypatch):
         agent = make_agent([])
@@ -1442,6 +1446,124 @@ class TestAgentLoop:
         assert isinstance(tool_result, str)
         assert len(tool_result) <= 300
         assert "chars omitted" in tool_result
+
+    def test_shell_history_result_keeps_command_and_exit_code_but_not_full_output(self, monkeypatch):
+        responses = [
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(id="tc_shell", name="shell", arguments={"command": "for i in $(seq 1 80); do echo line-$i; done; exit 7"})],
+                raw_content=[{"type": "tool_use", "id": "tc_shell", "name": "shell", "input": {"command": "for i in $(seq 1 80); do echo line-$i; done; exit 7"}}],
+                input_tokens=20,
+                output_tokens=10,
+            ),
+            LLMResponse(
+                text="Done!",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "Done!"}],
+                input_tokens=30,
+                output_tokens=5,
+            ),
+        ]
+        llm = MagicMock()
+        llm.chat = MagicMock(side_effect=responses)
+        tools = ToolRegistry(archon_source_dir=None, confirmer=lambda *_a, **_k: True)
+        agent = Agent(llm, tools, Config())
+        agent._system_prompt = "test prompt"
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+
+        result = agent.run("run the long shell command")
+
+        assert result == "Done!"
+        tool_result = agent.history[2]["content"][0]["content"]
+        assert isinstance(tool_result, str)
+        assert "command:" in tool_result
+        assert "exit_code: 7" in tool_result
+        assert "line-1" in tool_result
+        assert "line-80" in tool_result
+        assert "omitted" in tool_result
+        assert len(tool_result) < 1200
+
+    def test_read_file_history_result_keeps_path_and_requested_range_but_not_full_payload(self, monkeypatch, tmp_path):
+        target = tmp_path / "sample.txt"
+        target.write_text("\n".join(f"line {i}" for i in range(1, 121)))
+
+        responses = [
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(id="tc_read", name="read_file", arguments={"path": str(target), "offset": 0, "limit": 120})],
+                raw_content=[{"type": "tool_use", "id": "tc_read", "name": "read_file", "input": {"path": str(target), "offset": 0, "limit": 120}}],
+                input_tokens=20,
+                output_tokens=10,
+            ),
+            LLMResponse(
+                text="Done!",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "Done!"}],
+                input_tokens=30,
+                output_tokens=5,
+            ),
+        ]
+        llm = MagicMock()
+        llm.chat = MagicMock(side_effect=responses)
+        tools = ToolRegistry(archon_source_dir=None, confirmer=lambda *_a, **_k: True)
+        agent = Agent(llm, tools, Config())
+        agent._system_prompt = "test prompt"
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+
+        result = agent.run("read the big file")
+
+        assert result == "Done!"
+        tool_result = agent.history[2]["content"][0]["content"]
+        assert isinstance(tool_result, str)
+        assert str(target) in tool_result
+        assert "offset: 0" in tool_result
+        assert "limit: 120" in tool_result
+        assert "line 1" in tool_result
+        assert "line 120" not in tool_result
+        assert "omitted" in tool_result
+        assert len(tool_result) < 1200
+
+    def test_grep_history_result_keeps_count_and_first_matches_not_full_result_set(self, monkeypatch, tmp_path):
+        target = tmp_path / "matches.txt"
+        target.write_text("\n".join(f"match value {i}" for i in range(1, 81)))
+
+        responses = [
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall(id="tc_grep", name="grep", arguments={"pattern": "match", "root": str(tmp_path), "limit": 80})],
+                raw_content=[{"type": "tool_use", "id": "tc_grep", "name": "grep", "input": {"pattern": "match", "root": str(tmp_path), "limit": 80}}],
+                input_tokens=20,
+                output_tokens=10,
+            ),
+            LLMResponse(
+                text="Done!",
+                tool_calls=[],
+                raw_content=[{"type": "text", "text": "Done!"}],
+                input_tokens=30,
+                output_tokens=5,
+            ),
+        ]
+        llm = MagicMock()
+        llm.chat = MagicMock(side_effect=responses)
+        tools = ToolRegistry(archon_source_dir=None, confirmer=lambda *_a, **_k: True)
+        agent = Agent(llm, tools, Config())
+        agent._system_prompt = "test prompt"
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+
+        result = agent.run("grep the tree")
+
+        assert result == "Done!"
+        tool_result = agent.history[2]["content"][0]["content"]
+        assert isinstance(tool_result, str)
+        assert "matches:" in tool_result
+        assert str(target) in tool_result
+        assert "match value 1" in tool_result
+        assert "match value 80" not in tool_result
+        assert "omitted" in tool_result
+        assert len(tool_result) < 1200
 
     def test_tool_result_redacts_api_keys_before_terminal_render_and_history(self, monkeypatch, capsys):
         responses = [
@@ -3629,6 +3751,236 @@ class TestAgentLoop:
             or "[Compacted Context]" not in str(msg.get("content"))
             for msg in sent_history
         )
+
+    def test_run_compacts_older_history_before_second_llm_call_when_prompt_pressure_spikes(self, monkeypatch):
+        first = LLMResponse(
+            text=None,
+            tool_calls=[ToolCall(id="tc_pressure", name="shell", arguments={"command": "echo pressure"})],
+            raw_content=[
+                {
+                    "type": "tool_use",
+                    "id": "tc_pressure",
+                    "name": "shell",
+                    "input": {"command": "echo pressure"},
+                }
+            ],
+            input_tokens=32000,
+            output_tokens=12,
+        )
+        second = LLMResponse(
+            text="done",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "done"}],
+            input_tokens=8000,
+            output_tokens=5,
+        )
+        llm = MagicMock()
+        llm.chat = MagicMock(side_effect=[first, second])
+        config = Config()
+        config.agent.prompt_pressure_max_input_tokens = 20000
+        agent = Agent(llm, ToolRegistry(archon_source_dir=None), config)
+        agent._system_prompt = "test prompt"
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+
+        compaction_calls = []
+
+        def fake_compact_history(messages, layer="session", summary_id="latest", max_entries=8):
+            compaction_calls.append((layer, list(messages)))
+            return {
+                "path": "compactions/tasks/history-t001.md",
+                "layer": "task",
+                "summary": "prompt pressure compaction",
+            }
+
+        monkeypatch.setattr("archon.agent.memory_store.compact_history", fake_compact_history)
+        agent.history_max_messages = 0
+        agent.history_trim_to = 0
+        agent.history_max_chars = 0
+        agent.history_trim_to_chars = 0
+        agent.history = [
+            {"role": "user", "content": "older thread " + ("x" * 120)},
+            {"role": "assistant", "content": [{"type": "text", "text": "older answer"}]},
+        ]
+
+        result = agent.run("check prompt pressure")
+
+        assert result == "done"
+        assert llm.chat.call_count == 2
+        second_prompt = llm.chat.call_args_list[1][0][0]
+        assert compaction_calls, "expected prompt-pressure compaction before the second model call"
+        assert "[Compacted Context]" in second_prompt
+        assert "compactions/tasks/history-t001.md" in second_prompt
+        assert "prompt pressure compaction" in second_prompt
+
+    def test_run_prompt_pressure_compaction_keeps_newest_user_turn_and_tool_round_trip(self, monkeypatch):
+        first = LLMResponse(
+            text=None,
+            tool_calls=[ToolCall(id="tc_pressure", name="shell", arguments={"command": "echo pressure"})],
+            raw_content=[
+                {
+                    "type": "tool_use",
+                    "id": "tc_pressure",
+                    "name": "shell",
+                    "input": {"command": "echo pressure"},
+                }
+            ],
+            input_tokens=32000,
+            output_tokens=12,
+        )
+        second = LLMResponse(
+            text="done",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "done"}],
+            input_tokens=8000,
+            output_tokens=5,
+        )
+        llm = MagicMock()
+        llm.chat = MagicMock(side_effect=[first, second])
+        config = Config()
+        config.agent.prompt_pressure_max_input_tokens = 20000
+        agent = Agent(llm, ToolRegistry(archon_source_dir=None), config)
+        agent._system_prompt = "test prompt"
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+
+        compaction_calls = []
+
+        def fake_compact_history(messages, layer="session", summary_id="latest", max_entries=8):
+            compaction_calls.append((layer, list(messages)))
+            return {
+                "path": "compactions/tasks/history-t001.md",
+                "layer": "task",
+                "summary": "prompt pressure compaction",
+            }
+
+        monkeypatch.setattr("archon.agent.memory_store.compact_history", fake_compact_history)
+        agent.history_max_messages = 0
+        agent.history_trim_to = 0
+        agent.history_max_chars = 0
+        agent.history_trim_to_chars = 0
+        agent.history = [
+            {"role": "user", "content": "older thread " + ("x" * 120)},
+            {"role": "assistant", "content": [{"type": "text", "text": "older answer"}]},
+        ]
+
+        result = agent.run("check prompt pressure")
+
+        assert result == "done"
+        assert compaction_calls, "expected prompt-pressure compaction before the second model call"
+        second_history = llm.chat.call_args_list[1][0][1]
+        assert any(msg.get("content") == "check prompt pressure" for msg in second_history)
+        assert any(
+            msg.get("role") == "assistant"
+            and isinstance(msg.get("content"), list)
+            and any(
+                isinstance(block, dict) and block.get("type") == "tool_use"
+                for block in msg["content"]
+            )
+            for msg in second_history
+        )
+        assert any(
+            msg.get("role") == "user"
+            and isinstance(msg.get("content"), list)
+            and any(
+                isinstance(block, dict) and block.get("type") == "tool_result"
+                for block in msg["content"]
+            )
+            for msg in second_history
+        )
+
+    def test_run_high_noise_loop_sends_smaller_history_than_naive_raw_append(self, monkeypatch, tmp_path):
+        noisy_file = tmp_path / "inspect.txt"
+        noisy_file.write_text("\n".join(f"line {i}" for i in range(1, 201)))
+
+        first = LLMResponse(
+            text=None,
+            tool_calls=[ToolCall(id="tc_shell", name="shell", arguments={"command": "for i in $(seq 1 160); do echo line-$i; done"})],
+            raw_content=[
+                {
+                    "type": "tool_use",
+                    "id": "tc_shell",
+                    "name": "shell",
+                    "input": {"command": "for i in $(seq 1 160); do echo line-$i; done"},
+                }
+            ],
+            input_tokens=24000,
+            output_tokens=10,
+        )
+        second = LLMResponse(
+            text=None,
+            tool_calls=[ToolCall(id="tc_read", name="read_file", arguments={"path": str(noisy_file), "offset": 0, "limit": 200})],
+            raw_content=[
+                {
+                    "type": "tool_use",
+                    "id": "tc_read",
+                    "name": "read_file",
+                    "input": {"path": str(noisy_file), "offset": 0, "limit": 200},
+                }
+            ],
+            input_tokens=24000,
+            output_tokens=10,
+        )
+        third = LLMResponse(
+            text="done",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "done"}],
+            input_tokens=5000,
+            output_tokens=5,
+        )
+        llm = MagicMock()
+        llm.chat = MagicMock(side_effect=[first, second, third])
+        config = Config()
+        config.agent.prompt_pressure_max_input_tokens = 20000
+        tools = ToolRegistry(archon_source_dir=None, confirmer=lambda *_a, **_k: True)
+        agent = Agent(llm, tools, config)
+        agent._system_prompt = "test prompt"
+        monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+        monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+        monkeypatch.setattr(
+            "archon.agent.memory_store.compact_history",
+            lambda messages, layer="session", summary_id="latest", max_entries=8: {
+                "path": f"compactions/{layer}s/{summary_id}.md",
+                "layer": layer,
+                "summary": f"{layer} compaction",
+            },
+        )
+        agent.history_max_messages = 0
+        agent.history_trim_to = 0
+        agent.history_max_chars = 0
+        agent.history_trim_to_chars = 0
+        agent.history = [
+            {"role": "user", "content": "older thread " + ("x" * 120)},
+            {"role": "assistant", "content": [{"type": "text", "text": "older answer"}]},
+        ]
+
+        result = agent.run("inspect the system and file")
+
+        assert result == "done"
+        assert llm.chat.call_count == 3
+        final_history = llm.chat.call_args_list[2][0][1]
+        actual_chars = _estimate_history_chars(final_history)
+
+        raw_shell_result = tools.handlers["shell"]("for i in $(seq 1 160); do echo line-$i; done")
+        raw_read_result = tools.handlers["read_file"](str(noisy_file), 0, 200)
+        naive_history = [
+            {"role": "user", "content": "older thread " + ("x" * 120)},
+            {"role": "assistant", "content": [{"type": "text", "text": "older answer"}]},
+            {"role": "user", "content": "inspect the system and file"},
+            {"role": "assistant", "content": first.raw_content},
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "tc_shell", "tool_name": "shell", "content": raw_shell_result}],
+            },
+            {"role": "assistant", "content": second.raw_content},
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "tc_read", "tool_name": "read_file", "content": raw_read_result}],
+            },
+        ]
+        naive_chars = _estimate_history_chars(naive_history)
+
+        assert actual_chars < naive_chars
 
     def test_run_repairs_tool_sequence_after_message_count_trim(self, monkeypatch):
         response = LLMResponse(

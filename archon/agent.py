@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 import queue
 import threading
@@ -38,6 +39,7 @@ from archon.prompt import (
     build_system_prompt,
 )
 from archon.config import Config
+from archon.context_metrics import estimate_tokens_from_chars
 from archon.security.redaction import redact_secret_like_text
 from archon.research import store as research_store
 
@@ -57,6 +59,9 @@ _WORKER_TOOL_NAMES = {
     "worker_poll",
     "worker_list",
 }
+
+_HISTORY_SAMPLE_TOOLS = {"list_dir", "glob", "grep"}
+_SHELL_EXIT_CODE_RE = re.compile(r"\n?\[exit_code=(-?\d+)\]\s*$")
 
 
 def _detect_tool_loop(recent_calls: list[tuple[str, dict]], window: int = 6, min_repeats: int = 3) -> bool:
@@ -91,6 +96,24 @@ class Agent:
         self.history_trim_to = int(getattr(config.agent, "history_trim_to_messages", 60))
         self.history_max_chars = int(getattr(config.agent, "history_max_chars", 48000))
         self.history_trim_to_chars = int(getattr(config.agent, "history_trim_to_chars", 36000))
+        self.prompt_pressure_max_input_tokens = _read_config_int(
+            getattr(config, "agent", None),
+            "prompt_pressure_max_input_tokens",
+            20000,
+            minimum=0,
+        )
+        self.prompt_pressure_max_history_tokens = _read_config_int(
+            getattr(config, "agent", None),
+            "prompt_pressure_max_history_tokens",
+            0,
+            minimum=0,
+        )
+        self.prompt_pressure_retain_messages = _read_config_int(
+            getattr(config, "agent", None),
+            "prompt_pressure_retain_messages",
+            1,
+            minimum=1,
+        )
         self.llm_request_timeout_sec = float(getattr(config.agent, "llm_request_timeout_sec", 45))
         self.llm_retry_attempts = max(1, int(getattr(config.agent, "llm_retry_attempts", 3)))
         self.wall_clock_timeout_sec = max(
@@ -116,6 +139,8 @@ class Agent:
         self._system_prompt: str | None = None
         self.total_input_tokens = 0
         self.total_output_tokens = 0
+        self.last_input_tokens = 0
+        self.last_output_tokens = 0
         self.on_thinking: Callable[[], None] | None = None  # Called when LLM call starts
         self.on_tool_call: Callable[[str, dict], None] | None = None  # Called on tool use
         self.hooks = HookBus()
@@ -297,6 +322,8 @@ class Agent:
         self.history.clear()
         self.total_input_tokens = 0
         self.total_output_tokens = 0
+        self.last_input_tokens = 0
+        self.last_output_tokens = 0
 
     def _record_llm_usage(self, *, turn_id: str, source: str, response: LLMResponse) -> bool:
         """Persist and emit normalized usage for an LLM response."""
@@ -305,6 +332,8 @@ class Agent:
         model = str(getattr(self.llm, "model", "") or "").strip()
         input_tokens = getattr(response, "input_tokens", None)
         output_tokens = getattr(response, "output_tokens", None)
+        self.last_input_tokens = max(0, int(input_tokens or 0))
+        self.last_output_tokens = max(0, int(output_tokens or 0))
 
         payload = {
             "source": str(source or "").strip() or "chat",
@@ -563,15 +592,66 @@ class Agent:
         name = (tool_name or "").strip().lower()
         if name in _WORKER_TOOL_NAMES:
             limit = min(limit, self.tool_result_worker_max_chars)
-        if limit <= 0 or len(result_text) <= limit:
-            return result_text
-        omitted = len(result_text) - limit
-        head_size = int(limit * 0.65)
-        tail_size = int(limit * 0.25)
-        middle = f"\n... [{omitted} chars omitted] ...\n"
-        if head_size + tail_size + len(middle) >= len(result_text):
-            return result_text
-        return result_text[:head_size] + middle + result_text[-tail_size:]
+        return _truncate_text_for_history(result_text, limit)
+
+    def _shape_tool_result_for_history(
+        self,
+        tool_name: str,
+        tool_args: dict,
+        result_text: str,
+    ) -> str:
+        name = (tool_name or "").strip().lower()
+        if name in _WORKER_TOOL_NAMES:
+            return self._truncate_tool_result_for_history(name, result_text)
+        if name == "shell":
+            return self._shape_shell_result_for_history(tool_args, result_text)
+        if name == "read_file":
+            return self._shape_read_file_result_for_history(tool_args, result_text)
+        if name in _HISTORY_SAMPLE_TOOLS:
+            return self._shape_sampled_result_for_history(name, tool_args, result_text)
+        return self._truncate_tool_result_for_history(name, result_text)
+
+    def _shape_shell_result_for_history(self, tool_args: dict, result_text: str) -> str:
+        body, exit_code = _split_shell_exit_code(result_text)
+        excerpt = _summarize_lines_with_head_tail(body or "(no output)", head=6, tail=4)
+        command = redact_secret_like_text(str(tool_args.get("command", "") or ""))
+        lines = []
+        if command:
+            lines.append(f"command: {command}")
+        if exit_code is not None:
+            lines.append(f"exit_code: {exit_code}")
+        lines.extend(["output:", excerpt])
+        return _truncate_text_for_history("\n".join(lines), self.tool_result_max_chars)
+
+    def _shape_read_file_result_for_history(self, tool_args: dict, result_text: str) -> str:
+        lines = [
+            f"path: {redact_secret_like_text(str(tool_args.get('path', '') or ''))}",
+            f"offset: {int(tool_args.get('offset', 0) or 0)}",
+            f"limit: {int(tool_args.get('limit', 2000) or 2000)}",
+            "excerpt:",
+            _summarize_lines_head_only(result_text or "(empty file)", head=12),
+        ]
+        return _truncate_text_for_history("\n".join(lines), self.tool_result_max_chars)
+
+    def _shape_sampled_result_for_history(self, tool_name: str, tool_args: dict, result_text: str) -> str:
+        lines: list[str] = []
+        if tool_name == "list_dir":
+            lines.append(f"path: {redact_secret_like_text(str(tool_args.get('path', '.') or '.'))}")
+            label = "entries"
+        elif tool_name == "glob":
+            lines.append(f"root: {redact_secret_like_text(str(tool_args.get('root', '.') or '.'))}")
+            lines.append(f"pattern: {str(tool_args.get('pattern', '') or '')}")
+            label = "matches"
+        else:
+            lines.append(f"root: {redact_secret_like_text(str(tool_args.get('root', '.') or '.'))}")
+            lines.append(f"pattern: {str(tool_args.get('pattern', '') or '')}")
+            glob_value = str(tool_args.get("glob", "") or "").strip()
+            if glob_value:
+                lines.append(f"glob: {glob_value}")
+            label = "matches"
+        lines.append(f"{label}: {_count_result_items(result_text)}")
+        lines.extend(["sample:", _summarize_lines_head_only(result_text or "(no matches)", head=8)])
+        return _truncate_text_for_history("\n".join(lines), self.tool_result_max_chars)
 
     def _repair_history_tool_sequence(self) -> None:
         """Drop malformed tool-turn fragments before provider calls.
@@ -620,24 +700,87 @@ class Agent:
         """
         max_chars = self.history_max_chars
         trim_to = self.history_trim_to_chars
-        if max_chars <= 0 or trim_to <= 0:
-            return
         current = _estimate_history_chars(self.history)
-        if current <= max_chars:
+        if max_chars > 0 and trim_to > 0 and current > max_chars:
+            original_chars = current
+            dropped_count = 0
+            while len(self.history) > 2 and current > trim_to:
+                dropped = self.history.pop(0)
+                current -= _estimate_message_chars(dropped)
+                dropped_count += 1
+            if dropped_count > 0:
+                logger.info(
+                    "Auto-compact: dropped %d oldest messages (was %d chars, now %d)",
+                    dropped_count,
+                    original_chars,
+                    current,
+                )
+
+        if not self._should_compact_for_prompt_pressure(current):
             return
-        original_chars = current
-        dropped_count = 0
-        while len(self.history) > 2 and current > trim_to:
-            dropped = self.history.pop(0)
-            current -= _estimate_message_chars(dropped)
-            dropped_count += 1
-        if dropped_count > 0:
-            logger.info(
-                "Auto-compact: dropped %d oldest messages (was %d chars, now %d)",
-                dropped_count,
-                original_chars,
-                current,
-            )
+
+        retain_from = self._prompt_pressure_retain_from_index()
+        if retain_from <= 0:
+            return
+
+        dropped_for_compaction = list(self.history[:retain_from])
+        artifact = self._compact_history_segment(
+            dropped_for_compaction,
+            layer="task",
+        )
+        if artifact is None:
+            return
+
+        self.history = self.history[retain_from:]
+        self._pending_compactions = list(self._pending_compactions) + [artifact]
+        self._repair_history_tool_sequence()
+        logger.info(
+            "Prompt-pressure compacted %d older messages after %d input tokens",
+            len(dropped_for_compaction),
+            self.last_input_tokens,
+        )
+
+    def _should_compact_for_prompt_pressure(self, history_chars: int) -> bool:
+        input_limit = max(0, int(getattr(self, "prompt_pressure_max_input_tokens", 0) or 0))
+        history_limit = max(0, int(getattr(self, "prompt_pressure_max_history_tokens", 0) or 0))
+        if input_limit <= 0 and history_limit <= 0:
+            return False
+        if input_limit > 0 and self.last_input_tokens >= input_limit:
+            return True
+        if history_limit > 0 and estimate_tokens_from_chars(history_chars) >= history_limit:
+            return True
+        return False
+
+    def _prompt_pressure_retain_from_index(self) -> int:
+        if not self.history:
+            return 0
+
+        retain_from = len(self.history) - 1
+        if _is_user_tool_result_message(self.history[-1]):
+            retain_from = len(self.history) - 1
+            if len(self.history) >= 2 and _is_assistant_tool_use_message(self.history[-2]):
+                retain_from = len(self.history) - 2
+                if (
+                    retain_from - 1 >= 0
+                    and isinstance(self.history[retain_from - 1], dict)
+                    and self.history[retain_from - 1].get("role") == "user"
+                    and not _is_user_tool_result_message(self.history[retain_from - 1])
+                ):
+                    retain_from -= 1
+        else:
+            for index in range(len(self.history) - 1, -1, -1):
+                message = self.history[index]
+                if (
+                    isinstance(message, dict)
+                    and message.get("role") == "user"
+                    and not _is_user_tool_result_message(message)
+                ):
+                    retain_from = index
+                    break
+
+        retain_messages = max(1, int(getattr(self, "prompt_pressure_retain_messages", 1) or 1))
+        retain_floor = max(0, len(self.history) - retain_messages)
+        return min(retain_from, retain_floor)
 
     def _trim_history_if_needed(self) -> None:
         """Trim old history with a lightweight dual budget to avoid unbounded growth.
@@ -719,6 +862,10 @@ class Agent:
         artifacts = list(self._pending_compactions)
         self._pending_compactions = []
         return artifacts
+
+    def _consume_pending_compactions_into_prompt(self, prompt: str) -> str:
+        artifacts = self._consume_pending_compactions()
+        return _append_compactions_to_prompt(prompt, artifacts)
 
 
 def _emit_tool_trace_line(text: str, *, activity_feed=None, ansi: str = "") -> None:
@@ -875,6 +1022,63 @@ def _estimate_message_chars(message: object) -> int:
     return len(str(message))
 
 
+def _truncate_text_for_history(text: str, limit: int) -> str:
+    if limit <= 0 or len(text) <= limit:
+        return text
+    omitted = len(text) - limit
+    head_size = int(limit * 0.65)
+    tail_size = int(limit * 0.25)
+    middle = f"\n... [{omitted} chars omitted] ...\n"
+    if head_size + tail_size + len(middle) >= len(text):
+        return text
+    return text[:head_size] + middle + text[-tail_size:]
+
+
+def _summarize_lines_head_only(text: str, *, head: int) -> str:
+    lines = text.splitlines()
+    if len(lines) <= head:
+        return text
+    omitted = len(lines) - head
+    return "\n".join(lines[:head] + [f"... [{omitted} lines omitted] ..."])
+
+
+def _summarize_lines_with_head_tail(text: str, *, head: int, tail: int) -> str:
+    lines = text.splitlines()
+    if len(lines) <= head + tail:
+        return text
+    omitted = len(lines) - head - tail
+    return "\n".join(lines[:head] + [f"... [{omitted} lines omitted] ..."] + lines[-tail:])
+
+
+def _split_shell_exit_code(result_text: str) -> tuple[str, int | None]:
+    match = _SHELL_EXIT_CODE_RE.search(result_text)
+    if not match:
+        return result_text, None
+    body = result_text[:match.start()].rstrip("\n")
+    try:
+        exit_code = int(match.group(1))
+    except (TypeError, ValueError):
+        exit_code = None
+    return body, exit_code
+
+
+def _count_result_items(result_text: str) -> int:
+    stripped = result_text.strip()
+    if not stripped or stripped in {"(no matches)", "(empty directory)"}:
+        return 0
+    count = 0
+    for line in result_text.splitlines():
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        if cleaned.startswith("... (") and cleaned.endswith("more entries)"):
+            continue
+        if cleaned.startswith("... (") and cleaned.endswith("more lines)"):
+            continue
+        count += 1
+    return count
+
+
 def _chat_with_retry(
     llm,
     system_prompt: str,
@@ -1021,18 +1225,7 @@ def _build_turn_system_prompt(
     if skill_guidance:
         lines.extend(["", skill_guidance])
 
-    for artifact in compactions or []:
-        path = str(artifact.get("path", "")).strip()
-        if not path:
-            continue
-        lines.extend(["", "[Compacted Context]"])
-        lines.append(f"path: {path}")
-        layer = str(artifact.get("layer", "")).strip()
-        if layer:
-            lines.append(f"layer: {layer}")
-        summary = str(artifact.get("summary", "")).strip()
-        if summary:
-            lines.append(f"summary: {summary}")
+    _append_compaction_lines(lines, compactions)
 
     try:
         prefetched = memory_store.prefetch_for_query(user_message)
@@ -1057,3 +1250,47 @@ def _build_turn_system_prompt(
         if excerpt:
             lines.append(excerpt)
     return "\n".join(lines)
+
+
+def _append_compactions_to_prompt(prompt: str, compactions: list[dict] | None) -> str:
+    if not compactions:
+        return prompt
+    lines = [prompt]
+    _append_compaction_lines(lines, compactions)
+    return "\n".join(lines)
+
+
+def _append_compaction_lines(lines: list[str], compactions: list[dict] | None) -> None:
+    for artifact in compactions or []:
+        path = str(artifact.get("path", "")).strip()
+        if not path:
+            continue
+        lines.extend(["", "[Compacted Context]"])
+        lines.append(f"path: {path}")
+        layer = str(artifact.get("layer", "")).strip()
+        if layer:
+            lines.append(f"layer: {layer}")
+        summary = str(artifact.get("summary", "")).strip()
+        if summary:
+            lines.append(f"summary: {summary}")
+
+
+def _read_config_int(cfg: object, name: str, default: int, *, minimum: int | None = None) -> int:
+    if cfg is None:
+        value = default
+    else:
+        raw = vars(cfg).get(name) if hasattr(cfg, "__dict__") and name in vars(cfg) else default
+        if raw is default:
+            try:
+                raw = getattr(cfg, name)
+            except Exception:
+                raw = default
+        value = default
+        if isinstance(raw, (int, float, str)):
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                value = default
+    if minimum is not None:
+        return max(minimum, value)
+    return value

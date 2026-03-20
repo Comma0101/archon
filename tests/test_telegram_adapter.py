@@ -322,6 +322,79 @@ class TestTelegramAdapterCommands:
         agent = adapter._agents[99]  # type: ignore[attr-defined]
         assert agent.run_calls == []
 
+    def test_local_context_command_reports_richer_pressure_snapshot(self, monkeypatch):
+        def _agent_factory():
+            agent = _TelegramLocalCommandAgent()
+            agent.history = [{"role": "user", "content": "hello"}]
+            agent._pending_compactions = [{"path": "compactions/sessions/history-manual.md"}]
+            agent.last_input_tokens = 32000
+            return agent
+
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=_agent_factory,
+            poll_timeout_sec=1,
+        )
+        sent = []
+
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260306-170002")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: None,
+        )
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+        adapter._handle_message({"text": "/context", "chat": {"id": 99}, "from": {"id": 42}})
+
+        assert sent[-1][0] == 99
+        assert sent[-1][1].startswith("Context:")
+        assert "history_messages=1" in sent[-1][1]
+        assert "pending_compactions=1" in sent[-1][1]
+        assert "history_chars=" in sent[-1][1]
+        assert "approx_history_tokens=" in sent[-1][1]
+        assert "last_input_tokens=32000" in sent[-1][1]
+        assert "pressure=high" in sent[-1][1]
+        assert "recommend=" not in sent[-1][1]
+
+        agent = adapter._agents[99]  # type: ignore[attr-defined]
+        assert agent.run_calls == []
+
+    def test_local_new_command_clears_history_without_model_turn(self, monkeypatch):
+        def _agent_factory():
+            agent = _TelegramLocalCommandAgent()
+            agent.history = [{"role": "user", "content": "hello"}]
+            agent.last_input_tokens = 32000
+            return agent
+
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=_agent_factory,
+            poll_timeout_sec=1,
+        )
+        sent = []
+
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260306-170003")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: None,
+        )
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+        adapter._handle_message({"text": "/new", "chat": {"id": 99}, "from": {"id": 42}})
+        adapter._handle_message({"text": "/context", "chat": {"id": 99}, "from": {"id": 42}})
+
+        assert sent[0] == (99, "Cleared 1 messages. Fresh chat context in the same session.")
+        assert sent[1][0] == 99
+        assert sent[1][1].startswith("Context:")
+        assert "history_messages=0" in sent[1][1]
+        assert "pressure=ok" in sent[1][1]
+        assert "recommend=" not in sent[1][1]
+
+        agent = adapter._agents[99]  # type: ignore[attr-defined]
+        assert agent.run_calls == []
+
     def test_regular_chat_messages_are_persisted_to_history(self, monkeypatch):
         adapter = _adapter()
         saved = []
@@ -429,6 +502,73 @@ class TestTelegramAdapterCommands:
         assert sent == [(99, "ok")]
         assert ("telegram", "voice reply failed for 99: RuntimeError: tts unavailable") in events
 
+    def test_approvals_status_omits_expired_pending_request(self, monkeypatch):
+        adapter = _adapter()
+        sent = []
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+        adapter._pending_approvals[99] = {  # type: ignore[attr-defined]
+            "approval_id": "deadbeef",
+            "status": "pending",
+            "blocked_command_preview": "pacman -Q | head",
+            "expires_at": 100.0,
+        }
+        monkeypatch.setattr("archon.adapters.telegram.time.time", lambda: 101.0)
+
+        adapter._handle_message(
+            {
+                "text": "/approvals",
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        assert sent[-1][1] == (
+            "Approvals: dangerous_mode=off | pending_request=none | allow_once_remaining=0 | "
+            "replay=/approve | allow_once=/approve_next | deny=/deny"
+        )
+        assert adapter._pending_approvals.get(99) is None  # type: ignore[attr-defined]
+
+    def test_approvals_status_reports_effective_dangerous_mode_while_elevated(self, monkeypatch):
+        adapter = _adapter()
+        sent = []
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+        monkeypatch.setattr("archon.adapters.telegram.time.time", lambda: 100.0)
+        adapter._approval_elevated_until[99] = 220.0  # type: ignore[attr-defined]
+
+        adapter._handle_message(
+            {
+                "text": "/approvals",
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        assert sent[-1][1] == (
+            "Approvals: dangerous_mode=on | pending_request=none | allow_once_remaining=0 | "
+            "elevated_ttl_sec=120 | replay=/approve | allow_once=/approve_next | deny=/deny"
+        )
+
+    def test_approve_next_reports_effective_dangerous_mode_while_elevated(self, monkeypatch):
+        adapter = _adapter()
+        sent = []
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+        monkeypatch.setattr("archon.adapters.telegram.time.time", lambda: 100.0)
+        adapter._approval_elevated_until[99] = 220.0  # type: ignore[attr-defined]
+
+        adapter._handle_message(
+            {
+                "text": "/approve_next",
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        assert (
+            sent[-1][1]
+            == "Approval: result=allow_once_armed | dangerous_mode=on | pending_request=none | "
+            "allow_once_remaining=1 | next=one_future_dangerous_action_allowed | review=/approvals"
+        )
+
 def test_voice_message_voice_upload_falls_back_to_wav_document(monkeypatch):
     adapter = _adapter()
     sent = []
@@ -509,6 +649,7 @@ def test_chat_agent_wires_terminal_feed_proxy_from_activity_sink():
 
         assert sent
         assert "Core: /status, /approvals, /jobs, /skills, /mcp, /reset" in sent[0][1]
+        assert "Context: /new, /clear, /compact, /context, /cost" in sent[0][1]
         assert "Advanced:" in sent[0][1]
         assert "/plugins" in sent[0][1]
         assert "/jobs show <job-id>" in sent[0][1]
@@ -1318,6 +1459,10 @@ def test_chat_agent_wires_terminal_feed_proxy_from_activity_sink():
                         {"command": "start", "description": "Connect and show basics"},
                         {"command": "help", "description": "Show command guide"},
                         {"command": "status", "description": "Show session status"},
+                        {"command": "new", "description": "Fresh chat context"},
+                        {"command": "compact", "description": "Compact chat context"},
+                        {"command": "context", "description": "Show context state"},
+                        {"command": "cost", "description": "Show token usage"},
                         {"command": "jobs", "description": "List background jobs"},
                         {"command": "approvals", "description": "Show approval state"},
                         {"command": "skills", "description": "List available skills"},
@@ -1398,12 +1543,35 @@ def test_chat_agent_wires_terminal_feed_proxy_from_activity_sink():
                 "from": {"id": 42},
             }
         )
+        assert (
+            sent[-1][1]
+            == "Approval: result=allow_once_armed | dangerous_mode=off | pending_request=none | "
+            "allow_once_remaining=1 | next=one_future_dangerous_action_allowed | review=/approvals"
+        )
 
         # First dangerous action after /approve_next is allowed, next one is blocked again.
         allowed2 = adapter._confirm_for_chat(99, "pacman -Q | head", Level.DANGEROUS)
         allowed3 = adapter._confirm_for_chat(99, "pacman -Q | head", Level.DANGEROUS)
         assert allowed2 is True
         assert allowed3 is False
+
+    def test_approvals_status_uses_same_structured_state_text(self, monkeypatch):
+        adapter = _adapter()
+        sent = []
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+        adapter._handle_message(
+            {
+                "text": "/approvals",
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        assert sent[-1][1] == (
+            "Approvals: dangerous_mode=off | pending_request=none | allow_once_remaining=0 | "
+            "replay=/approve | allow_once=/approve_next | deny=/deny"
+        )
 
     def test_approvals_on_off_toggles_dangerous_actions(self, monkeypatch):
         adapter = _adapter()
@@ -1418,7 +1586,10 @@ def test_chat_agent_wires_terminal_feed_proxy_from_activity_sink():
             }
         )
         assert adapter._confirm_for_chat(99, "pacman -Q | head", Level.DANGEROUS) is True
-        assert any("enabled" in msg for _chat, msg in sent)
+        assert (
+            "Approvals: result=dangerous_mode_enabled | dangerous_mode=on | pending_request=none | "
+            "allow_once_remaining=0 | replay=/approve | allow_once=/approve_next | deny=/deny"
+        ) in [msg for _chat, msg in sent]
 
         adapter._handle_message(
             {
@@ -1428,7 +1599,10 @@ def test_chat_agent_wires_terminal_feed_proxy_from_activity_sink():
             }
         )
         assert adapter._confirm_for_chat(99, "pacman -Q | head", Level.DANGEROUS) is False
-        assert any("disabled" in msg for _chat, msg in sent)
+        assert (
+            "Approvals: result=dangerous_mode_disabled | dangerous_mode=off | pending_request=none | "
+            "allow_once_remaining=0 | replay=/approve | allow_once=/approve_next | deny=/deny"
+        ) in [msg for _chat, msg in sent]
 
     def test_blocked_dangerous_action_creates_pending_request_and_suppresses_duplicate_reply(self, monkeypatch):
         adapter = TelegramAdapter(
@@ -1482,9 +1656,41 @@ def test_chat_agent_wires_terminal_feed_proxy_from_activity_sink():
         adapter._handle_message({"text": "check system packages", "chat": {"id": 99}, "from": {"id": 42}})
         adapter._handle_message({"text": "/approve", "chat": {"id": 99}, "from": {"id": 42}})
 
+        assert (
+            "Approval: result=approved_replaying | replayed_request=pacman -Q | head | dangerous_mode=off | "
+            "pending_request=none | allow_once_remaining=0 | next=original_request_replayed_now | review=/approvals"
+        ) in [msg for _chat, msg in sent]
         assert any("dangerous command output" in msg for _chat, msg in sent)
         pending = adapter._pending_approvals.get(99)  # type: ignore[attr-defined]
         assert pending is None or pending.get("status") in {"approved", "replayed", "cleared"}
+
+    def test_deny_command_reports_cleared_pending_request(self, monkeypatch):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: _DangerousAgent(),
+            poll_timeout_sec=1,
+        )
+        sent = []
+        monkeypatch.setattr(adapter, "_send_typing", lambda chat_id: None)
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: None,
+        )
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+        monkeypatch.setattr(
+            adapter._bot,
+            "send_message",
+            lambda chat_id, text, **kwargs: sent.append((chat_id, text)) or {"message_id": 508},
+        )
+
+        adapter._handle_message({"text": "check system packages", "chat": {"id": 99}, "from": {"id": 42}})
+        adapter._handle_message({"text": "/deny", "chat": {"id": 99}, "from": {"id": 42}})
+
+        assert (
+            "Approval: result=denied | denied_request=pacman -Q | head | dangerous_mode=off | "
+            "pending_request=none | allow_once_remaining=0 | review=/approvals"
+        ) in [msg for _chat, msg in sent]
 
     def test_new_blocked_request_replaces_pending_user_text_for_replay(self, monkeypatch):
         adapter = TelegramAdapter(
@@ -1571,3 +1777,71 @@ def test_chat_agent_wires_terminal_feed_proxy_from_activity_sink():
         assert callbacks and callbacks[0][0] == "cb-1"
         assert edits
         assert any("dangerous command output" in msg for _chat, msg in sent)
+
+
+def test_help_groups_commands_by_operator_workflow():
+    adapter = _adapter()
+    sent = []
+    adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+    adapter._handle_message(
+        {
+            "text": "/help",
+            "chat": {"id": 99},
+            "from": {"id": 42},
+        }
+    )
+
+    assert sent
+    assert "Inspect: /status, /context" in sent[0][1]
+    assert "Recover: /compact, /new" in sent[0][1]
+    assert "Approvals: /approvals, /approve, /approve_next, /deny" in sent[0][1]
+
+
+def test_approve_blocked_dangerous_action_prompt_mentions_pending_request_and_replay_commands(monkeypatch):
+    adapter = TelegramAdapter(
+        token="123:abc",
+        allowed_user_ids=[42],
+        agent_factory=lambda: _DangerousAgent(),
+        poll_timeout_sec=1,
+    )
+    sent = []
+    monkeypatch.setattr(adapter, "_send_typing", lambda chat_id: None)
+    monkeypatch.setattr(
+        "archon.adapters.telegram.save_exchange",
+        lambda session_id, user_msg, assistant_msg: None,
+    )
+    adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        adapter._bot,
+        "send_message",
+        lambda chat_id, text, **kwargs: sent.append((chat_id, text)) or {"message_id": 506},
+    )
+
+    adapter._handle_message({"text": "check system packages", "chat": {"id": 99}, "from": {"id": 42}})
+
+    assert len(sent) == 1
+    assert "pending_request=pacman -Q | head" in sent[0][1]
+    assert "replay=/approve" in sent[0][1]
+    assert "replay_effect=replays_pending_request" in sent[0][1]
+    assert "allow_once=/approve_next" in sent[0][1]
+    assert "allow_once_effect=arms_one_future_dangerous_action" in sent[0][1]
+    assert "review=/approvals" in sent[0][1]
+
+
+def test_blocked_dangerous_action_without_user_text_uses_state_first_fallback():
+    adapter = _adapter()
+    sent = []
+    adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+    allowed = adapter._confirm_for_chat(99, "pacman -Q | head", Level.DANGEROUS)
+
+    assert allowed is False
+    assert sent
+    assert "pending_request=pacman -Q | head" in sent[0][1]
+    assert "replay=/approve" in sent[0][1]
+    assert "replay_effect=replays_pending_request_when_original_message_is_available" in sent[0][1]
+    assert "allow_once=/approve_next" in sent[0][1]
+    assert "allow_once_effect=arms_one_future_dangerous_action" in sent[0][1]
+    assert "state=original_request_missing" in sent[0][1]
+    assert adapter._pending_approvals.get(99) is None  # type: ignore[attr-defined]

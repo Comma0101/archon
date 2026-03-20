@@ -57,6 +57,12 @@ class AgentConfig:
     # Approximate character budget for history payload (lightweight token proxy).
     history_max_chars: int = 48000
     history_trim_to_chars: int = 36000
+    # Trigger mid-turn compaction when the provider reports prompt usage above this threshold.
+    prompt_pressure_max_input_tokens: int = 20000
+    # Optional coarse fallback using local history estimation. Set to 0 to disable.
+    prompt_pressure_max_history_tokens: int = 0
+    # Always retain at least this many newest messages when compacting for prompt pressure.
+    prompt_pressure_retain_messages: int = 1
 
 
 @dataclass
@@ -281,6 +287,33 @@ def load_config() -> Config:
         )
         cfg.agent.history_trim_to_chars = int(
             agent.get("history_trim_to_chars", cfg.agent.history_trim_to_chars)
+        )
+        cfg.agent.prompt_pressure_max_input_tokens = max(
+            0,
+            int(
+                agent.get(
+                    "prompt_pressure_max_input_tokens",
+                    cfg.agent.prompt_pressure_max_input_tokens,
+                )
+            ),
+        )
+        cfg.agent.prompt_pressure_max_history_tokens = max(
+            0,
+            int(
+                agent.get(
+                    "prompt_pressure_max_history_tokens",
+                    cfg.agent.prompt_pressure_max_history_tokens,
+                )
+            ),
+        )
+        cfg.agent.prompt_pressure_retain_messages = max(
+            1,
+            int(
+                agent.get(
+                    "prompt_pressure_retain_messages",
+                    cfg.agent.prompt_pressure_retain_messages,
+                )
+            ),
         )
 
         orchestrator = data.get("orchestrator", {})

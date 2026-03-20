@@ -80,3 +80,87 @@ def test_enforce_iteration_budget_noop_when_under():
     agent._enforce_iteration_budget()
 
     assert len(agent.history) == original_len
+
+
+def test_enforce_iteration_budget_compacts_when_prompt_pressure_is_high(monkeypatch):
+    """High prompt pressure should trigger compaction even if char budget is disabled."""
+    config = _make_config(max_chars=0, trim_to_chars=0)
+    config.agent.prompt_pressure_max_input_tokens = 20000
+    llm = MagicMock()
+    tools = MagicMock()
+    tools.get_schemas.return_value = []
+
+    agent = Agent(llm=llm, tools=tools, config=config)
+    agent.last_input_tokens = 32000
+    agent.history = [
+        {"role": "user", "content": "older context " + ("a" * 120)},
+        {"role": "assistant", "content": [{"type": "text", "text": "older answer"}]},
+        {"role": "user", "content": "latest question"},
+    ]
+
+    compaction_calls = []
+
+    def fake_compact_history(messages, layer="session", summary_id="latest", max_entries=8):
+        compaction_calls.append((layer, list(messages)))
+        return {
+            "path": "compactions/tasks/history-budget.md",
+            "layer": "task",
+            "summary": "prompt pressure trim",
+        }
+
+    monkeypatch.setattr("archon.agent.memory_store.compact_history", fake_compact_history)
+
+    agent._enforce_iteration_budget()
+
+    assert compaction_calls, "expected prompt-pressure budget compaction when prompt usage is high"
+    assert any(msg.get("content") == "latest question" for msg in agent.history)
+
+
+def test_enforce_iteration_budget_prompt_pressure_keeps_latest_tool_round_trip(monkeypatch):
+    """Prompt-pressure trimming should preserve the newest tool-use and tool-result pair."""
+    config = _make_config(max_chars=0, trim_to_chars=0)
+    config.agent.prompt_pressure_max_input_tokens = 20000
+    llm = MagicMock()
+    tools = MagicMock()
+    tools.get_schemas.return_value = []
+
+    agent = Agent(llm=llm, tools=tools, config=config)
+    agent.last_input_tokens = 32000
+    agent.history = [
+        {"role": "user", "content": "older context " + ("a" * 120)},
+        {"role": "assistant", "content": [{"type": "text", "text": "older answer"}]},
+        {"role": "user", "content": "latest question"},
+        {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "tc_latest", "name": "shell", "input": {"command": "echo hi"}}],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "tc_latest", "tool_name": "shell", "content": "ok"}],
+        },
+    ]
+
+    monkeypatch.setattr(
+        "archon.agent.memory_store.compact_history",
+        lambda messages, layer="session", summary_id="latest", max_entries=8: {
+            "path": "compactions/tasks/history-budget.md",
+            "layer": "task",
+            "summary": "prompt pressure trim",
+        },
+    )
+
+    agent._enforce_iteration_budget()
+
+    assert not any(msg.get("content") == "older context " + ("a" * 120) for msg in agent.history)
+    assert any(
+        msg.get("role") == "assistant"
+        and isinstance(msg.get("content"), list)
+        and any(isinstance(block, dict) and block.get("type") == "tool_use" for block in msg["content"])
+        for msg in agent.history
+    )
+    assert any(
+        msg.get("role") == "user"
+        and isinstance(msg.get("content"), list)
+        and any(isinstance(block, dict) and block.get("type") == "tool_result" for block in msg["content"])
+        for msg in agent.history
+    )

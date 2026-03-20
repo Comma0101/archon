@@ -22,6 +22,9 @@ def test_load_config_calls_defaults(monkeypatch, tmp_path):
     assert cfg.agent.diagnostic_tool_error_threshold == 2
     assert cfg.agent.tool_result_max_chars == 3000
     assert cfg.agent.tool_result_worker_max_chars == 1500
+    assert cfg.agent.prompt_pressure_max_input_tokens == 20000
+    assert cfg.agent.prompt_pressure_max_history_tokens == 0
+    assert cfg.agent.prompt_pressure_retain_messages == 1
     assert cfg.orchestrator.enabled is False
     assert cfg.orchestrator.mode == "legacy"
     assert cfg.orchestrator.shadow_eval is True
@@ -163,6 +166,28 @@ def test_load_config_agent_smart_loop_thresholds(monkeypatch, tmp_path):
     assert cfg.agent.wall_clock_timeout_sec == 90.0
     assert cfg.agent.max_consecutive_tool_errors == 4
     assert cfg.agent.diagnostic_tool_error_threshold == 3
+
+
+def test_load_config_agent_prompt_pressure_thresholds(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config" / "archon"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        "\n".join(
+            [
+                "[agent]",
+                "prompt_pressure_max_input_tokens = 24000",
+                "prompt_pressure_max_history_tokens = 7000",
+                "prompt_pressure_retain_messages = 2",
+            ]
+        )
+    )
+    monkeypatch.setattr("archon.config.CONFIG_DIR", config_dir)
+
+    cfg = load_config()
+
+    assert cfg.agent.prompt_pressure_max_input_tokens == 24000
+    assert cfg.agent.prompt_pressure_max_history_tokens == 7000
+    assert cfg.agent.prompt_pressure_retain_messages == 2
 
 
 def test_load_config_mcp_read_only_servers(monkeypatch, tmp_path):

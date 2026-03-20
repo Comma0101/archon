@@ -18,6 +18,7 @@ from archon.control.skills import (
     is_session_skill_profile_name,
     list_builtin_skills,
 )
+from archon.context_metrics import build_context_snapshot
 from archon.mcp import MCPClient
 from archon.research.formatting import format_research_job_record, research_status_terminal
 from archon.research.store import (
@@ -29,6 +30,14 @@ from archon.research.store import (
 )
 from archon.setup.formatting import format_setup_record
 from archon.setup.store import list_setup_job_summaries, load_setup_job_summary, load_setup_record
+from archon.ux.operator_messages import (
+    build_approval_result_message,
+    build_approvals_overview_message,
+    build_compact_result_text,
+    build_fresh_start_text,
+    build_operator_help_workflows,
+    build_pressure_recommendation,
+)
 from archon.usage import summarize_usage_for_session
 from archon.workers.session_store import list_worker_job_summaries, load_worker_job_summary, purge_stale_sessions
 
@@ -58,8 +67,11 @@ _EXPLICIT_SKILL_PATTERNS = (
     re.compile(rf"^\s*{_SKILL_REQUEST_PREFIX}enter (?P<skill>{_SKILL_REQUEST_PATTERN}) mode\b", re.IGNORECASE),
 )
 _TERMINAL_HELP_TEXT = (
-    "Core: /status, /approvals, /jobs, /skills, /mcp, /reset, /clear\n"
-    "Advanced: /cost, /compact, /context, /doctor, /permissions, /plugins, /model, "
+    build_operator_help_workflows()
+    + "\n"
+    "Core: /status, /approvals, /jobs, /skills, /mcp, /reset\n"
+    "Context: /new, /clear, /compact, /context, /cost\n"
+    "Advanced: /doctor, /permissions, /plugins, /model, "
     "/calls, /profile, /jobs show <job-id>, /paste\n"
     "Use / to browse commands."
 )
@@ -88,10 +100,7 @@ def handle_status_command(agent, text: str) -> tuple[bool, str]:
     provider = str(getattr(llm, "provider", "") or getattr(getattr(cfg, "llm", None), "provider", "") or "").strip() or "unknown"
     model = str(getattr(llm, "model", "") or getattr(getattr(cfg, "llm", None), "model", "") or "").strip() or "unknown"
     profile_display, _resolved_name, _profile, _profile_missing = _resolve_profile_diagnostics(agent, cfg)
-    total_tokens = max(
-        0,
-        int(getattr(agent, "total_input_tokens", 0) or 0) + int(getattr(agent, "total_output_tokens", 0) or 0),
-    )
+    snapshot = build_context_snapshot(agent)
     parts = [
         f"model={provider}/{model}",
         f"profile={profile_display}",
@@ -105,7 +114,26 @@ def handle_status_command(agent, text: str) -> tuple[bool, str]:
     calls_state = "on" if bool(getattr(getattr(cfg, "calls", None), "enabled", False)) else "off"
     parts.append(f"calls={calls_state}")
     parts.append(f"mcp={_format_mcp_counts(cfg)}")
-    parts.append(f"tokens={total_tokens:,}")
+    parts.append(f"tokens={snapshot.total_tokens:,}")
+    parts.append(f"pressure={snapshot.pressure}")
+    if snapshot.pending_compactions:
+        parts.append(f"pending_compactions={snapshot.pending_compactions}")
+    approval_getter = getattr(agent, "get_terminal_approval_status", None)
+    if callable(approval_getter):
+        try:
+            approval_status = approval_getter() or {}
+        except Exception:
+            approval_status = {}
+        pending_preview = str(
+            approval_status.get("pending_command_preview")
+            or approval_status.get("pending")
+            or ""
+        ).strip()
+        if pending_preview and pending_preview.lower() != "none":
+            parts.append(f"approval_pending={pending_preview}")
+    recommendation = _pressure_recommendation(snapshot)
+    if recommendation:
+        parts.append(f"recommend={recommendation}")
     return True, "Status: " + " | ".join(parts)
 
 
@@ -187,20 +215,27 @@ def handle_compact_command(agent, text: str) -> tuple[bool, str]:
     result = agent.compact_context()
     compacted = result.get("compacted_messages", 0)
     path = result.get("path", "")
-    summary = result.get("summary", "")
-    return True, f"Compact: history_messages={compacted} | path={path} | summary={summary}"
+    pending_compactions = len(getattr(agent, "_pending_compactions", []) or [])
+    return True, build_compact_result_text(
+        compacted_messages=compacted,
+        path=path,
+        pending_compactions=pending_compactions,
+    )
 
 
 def handle_clear_command(agent, text: str) -> tuple[bool, str]:
-    """Handle /clear — reset conversation history."""
+    """Handle /clear and /new — reset conversation history."""
     raw = (text or "").strip().lower()
-    if raw != "/clear":
+    if raw not in {"/clear", "/new"}:
         return False, ""
     count = len(agent.history)
     agent.history.clear()
+    agent._pending_compactions = []
     agent.total_input_tokens = 0
     agent.total_output_tokens = 0
-    return True, f"Cleared {count} messages. Fresh start."
+    agent.last_input_tokens = 0
+    agent.last_output_tokens = 0
+    return True, build_fresh_start_text(cleared_messages=count)
 
 
 def handle_context_command(agent, text: str) -> tuple[bool, str]:
@@ -208,12 +243,26 @@ def handle_context_command(agent, text: str) -> tuple[bool, str]:
     raw = (text or "").strip().lower()
     if raw != "/context":
         return False, ""
+    snapshot = build_context_snapshot(agent)
+    message = (
+        "Context: "
+        f"history_messages={snapshot.history_messages} | "
+        f"history_chars={snapshot.history_chars} | "
+        f"approx_history_tokens={snapshot.approx_history_tokens} | "
+        f"pending_compactions={snapshot.pending_compactions} | "
+        f"last_input_tokens={snapshot.last_input_tokens} | "
+        f"pressure={snapshot.pressure}"
+    )
+    recommendation = _pressure_recommendation(snapshot)
+    if recommendation:
+        message += f" | recommend={recommendation}"
+    return True, message
 
-    history = getattr(agent, "history", []) or []
-    messages = len(history)
-    pending = getattr(agent, "_pending_compactions", []) or []
-    pending_count = len(pending)
-    return True, f"Context: history_messages={messages} | pending_compactions={pending_count}"
+
+def _pressure_recommendation(snapshot) -> str:
+    if max(0, int(getattr(snapshot, "pending_compactions", 0) or 0)) > 0:
+        return ""
+    return build_pressure_recommendation(getattr(snapshot, "pressure", ""))
 
 
 def handle_skills_command(agent, text: str) -> tuple[bool, str]:
@@ -549,21 +598,25 @@ def handle_approvals_command(agent, text: str) -> tuple[bool, str]:
             result = setter(sub == "on")
             if isinstance(result, str) and result.strip():
                 return True, result
-        return True, f"Approvals: requested={sub} | state=unavailable"
+        return True, build_approval_result_message(
+            state="unavailable",
+            requested=sub,
+        ).replace("Approval:", "Approvals:", 1)
 
     getter = getattr(agent, "get_terminal_approval_status", None)
     if callable(getter):
         status = getter() or {}
-        mode = "on" if bool(status.get("dangerous_mode", False)) else "off"
-        pending = str(status.get("pending") or status.get("pending_command_preview") or "none").strip() or "none"
-        approve_next_tokens = max(0, int(status.get("approve_next_tokens", 0) or 0))
-        return True, (
-            f"Approvals: dangerous_mode={mode} | "
-            f"pending={pending} | "
-            f"approve_next_tokens={approve_next_tokens}"
+        return True, build_approvals_overview_message(
+            dangerous_mode=bool(status.get("dangerous_mode", False)),
+            pending_request=str(status.get("pending_command_preview") or status.get("pending") or ""),
+            allow_once_remaining=max(0, int(status.get("approve_next_tokens", 0) or 0)),
         )
 
-    return True, "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0"
+    return True, build_approvals_overview_message(
+        dangerous_mode=False,
+        pending_request="none",
+        allow_once_remaining=0,
+    )
 
 
 def handle_approve_command(agent, text: str) -> tuple[bool, str]:
@@ -580,7 +633,10 @@ def handle_approve_command(agent, text: str) -> tuple[bool, str]:
         if isinstance(result, str) and result.strip():
             return True, result
 
-    return True, "No pending dangerous request to approve."
+    return True, build_approval_result_message(
+        result="no_pending_request",
+        pending_request="none",
+    )
 
 
 def handle_deny_command(agent, text: str) -> tuple[bool, str]:
@@ -597,7 +653,10 @@ def handle_deny_command(agent, text: str) -> tuple[bool, str]:
         if isinstance(result, str) and result.strip():
             return True, result
 
-    return True, "No pending dangerous request to deny."
+    return True, build_approval_result_message(
+        result="no_pending_request",
+        pending_request="none",
+    )
 
 
 def handle_approve_next_command(agent, text: str) -> tuple[bool, str]:
@@ -613,9 +672,18 @@ def handle_approve_next_command(agent, text: str) -> tuple[bool, str]:
         result = approver()
         if isinstance(result, str) and result.strip():
             return True, result
-        return True, "Approved next dangerous action."
+        return True, build_approval_result_message(
+            result="allow_once_armed",
+            dangerous_mode=False,
+            pending_request="none",
+            allow_once_remaining=1,
+            next_step="one_future_dangerous_action_allowed",
+        )
 
-    return True, "Approve-next unavailable: session approval state not wired."
+    return True, build_approval_result_message(
+        state="unavailable",
+        requested="/approve_next",
+    )
 
 
 def handle_profile_command(agent, text: str) -> tuple[bool, str]:

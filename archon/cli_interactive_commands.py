@@ -6,6 +6,10 @@ from archon.cli_ui import _format_terminal_approval_required
 from archon.cli_repl_commands import _maybe_auto_activate_skill
 from archon.control.contracts import HookEvent
 from archon.safety import Level
+from archon.ux.operator_messages import (
+    build_approval_result_message,
+    build_approvals_overview_message,
+)
 from archon.ux.events import UXEvent
 from archon.ux.terminal_feed import TerminalActivityFeed
 
@@ -182,48 +186,96 @@ def chat_cmd(
 
     def format_terminal_approval_status() -> str:
         status = get_terminal_approval_status()
-        mode = "on" if bool(status.get("dangerous_mode", False)) else "off"
-        pending = str(status.get("pending") or "none").strip() or "none"
-        approve_next_tokens = max(0, int(status.get("approve_next_tokens", 0) or 0))
-        return (
-            f"Approvals: dangerous_mode={mode} | "
-            f"pending={pending} | "
-            f"approve_next_tokens={approve_next_tokens}"
+        return build_approvals_overview_message(
+            dangerous_mode=bool(status.get("dangerous_mode", False)),
+            pending_request=str(status.get("pending_command_preview") or ""),
+            allow_once_remaining=max(0, int(status.get("approve_next_tokens", 0) or 0)),
         )
 
     def set_terminal_approval_mode(enabled: bool) -> str:
         approval_state["dangerous_mode"] = bool(enabled)
-        return format_terminal_approval_status()
+        status = get_terminal_approval_status()
+        return build_approvals_overview_message(
+            result="dangerous_mode_enabled" if enabled else "dangerous_mode_disabled",
+            dangerous_mode=bool(status.get("dangerous_mode", False)),
+            pending_request=str(status.get("pending_command_preview") or ""),
+            allow_once_remaining=max(0, int(status.get("approve_next_tokens", 0) or 0)),
+        )
 
     def approve_pending_request() -> str:
         pending = clear_expired_pending()
         if pending is None:
-            return "No pending dangerous request to approve."
+            return build_approval_result_message(
+                result="no_pending_request",
+                pending_request="none",
+            )
         status = str(pending.get("status") or "").strip().lower()
+        preview = str(pending.get("blocked_command_preview") or "").strip()
         if status == "approved":
-            return "Pending dangerous request already approved. Replaying request..."
+            current_status = get_terminal_approval_status()
+            return build_approval_result_message(
+                result="approved_replaying",
+                replayed_request=preview,
+                dangerous_mode=bool(current_status.get("dangerous_mode", False)),
+                pending_request=str(current_status.get("pending_command_preview") or ""),
+                allow_once_remaining=max(0, int(current_status.get("approve_next_tokens", 0) or 0)),
+                next_step="original_request_replayed_now",
+            )
         blocked_user_input = str(pending.get("blocked_user_input") or "").strip()
         if not blocked_user_input:
-            return "Pending dangerous request approved. Replay unavailable."
+            current_status = get_terminal_approval_status()
+            return build_approval_result_message(
+                result="approved_replay_unavailable",
+                replayed_request=preview,
+                dangerous_mode=bool(current_status.get("dangerous_mode", False)),
+                pending_request=str(current_status.get("pending_command_preview") or ""),
+                allow_once_remaining=max(0, int(current_status.get("approve_next_tokens", 0) or 0)),
+            )
         pending["status"] = "approved"
         approval_state["pending_replay_input"] = blocked_user_input
         approval_state["pending_request"] = None
-        return "Pending dangerous request approved. Replaying request..."
+        current_status = get_terminal_approval_status()
+        return build_approval_result_message(
+            result="approved_replaying",
+            replayed_request=preview,
+            dangerous_mode=bool(current_status.get("dangerous_mode", False)),
+            pending_request=str(current_status.get("pending_command_preview") or ""),
+            allow_once_remaining=max(0, int(current_status.get("approve_next_tokens", 0) or 0)),
+            next_step="original_request_replayed_now",
+        )
 
     def deny_pending_request() -> str:
         pending = clear_expired_pending()
         if pending is None:
-            return "No pending dangerous request to deny."
+            return build_approval_result_message(
+                result="no_pending_request",
+                pending_request="none",
+            )
+        preview = str(pending.get("blocked_command_preview") or "").strip()
         pending["status"] = "denied"
         approval_state["pending_request"] = None
-        return "Denied pending dangerous request."
+        current_status = get_terminal_approval_status()
+        return build_approval_result_message(
+            result="denied",
+            denied_request=preview,
+            dangerous_mode=bool(current_status.get("dangerous_mode", False)),
+            pending_request=str(current_status.get("pending_command_preview") or ""),
+            allow_once_remaining=max(0, int(current_status.get("approve_next_tokens", 0) or 0)),
+        )
 
     def approve_next_dangerous_action() -> str:
         approval_state["approve_next_tokens"] = max(
             0,
             int(approval_state.get("approve_next_tokens", 0) or 0),
         ) + 1
-        return format_terminal_approval_status()
+        current_status = get_terminal_approval_status()
+        return build_approval_result_message(
+            result="allow_once_armed",
+            dangerous_mode=bool(current_status.get("dangerous_mode", False)),
+            pending_request=str(current_status.get("pending_command_preview") or ""),
+            allow_once_remaining=max(0, int(current_status.get("approve_next_tokens", 0) or 0)),
+            next_step="one_future_dangerous_action_allowed",
+        )
 
     def consume_terminal_pending_replay() -> str:
         replay_input = str(approval_state.get("pending_replay_input") or "").strip()
@@ -331,7 +383,7 @@ def chat_cmd(
 
     click_echo_fn(f"Archon v{version} | model: {agent.config.llm.model}")
     click_echo_fn(f"Session: {session_id}")
-    click_echo_fn("Type 'exit' or Ctrl-D to quit, 'reset' to clear history. Use /help for commands.\n")
+    click_echo_fn("Type 'exit' or Ctrl-D to quit, 'reset' to clear history. Use /new for a fresh chat or /help for commands.\n")
 
     try:
         while True:

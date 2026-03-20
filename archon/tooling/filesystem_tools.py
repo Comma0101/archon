@@ -60,7 +60,10 @@ def register_filesystem_tools(registry) -> None:
                 timeout=timeout,
             )
             output = result.stdout + result.stderr
-            return truncate_text(output, 10000) or "(no output)"
+            body = truncate_text(output, 9800) or "(no output)"
+            if body.endswith("\n"):
+                return f"{body}[exit_code={result.returncode}]"
+            return f"{body}\n[exit_code={result.returncode}]"
         except subprocess.TimeoutExpired:
             return f"Error: Command timed out after {timeout}s"
 

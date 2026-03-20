@@ -83,6 +83,8 @@ def execute_turn(
     started_at = time.monotonic()
 
     for iteration in range(agent.max_iterations):
+        turn_system_prompt = agent._consume_pending_compactions_into_prompt(turn_system_prompt)
+
         if time.monotonic() - started_at > agent.wall_clock_timeout_sec:
             return _finalize_without_tools(
                 agent,
@@ -289,8 +291,9 @@ def execute_turn(
                     consecutive_tool_errors += 1
                 else:
                     consecutive_tool_errors = 0
-                history_result = agent._truncate_tool_result_for_history(
+                history_result = agent._shape_tool_result_for_history(
                     call.name,
+                    call.arguments,
                     result_text,
                 )
                 agent._emit_hook(
@@ -367,6 +370,8 @@ def execute_turn_stream(
     started_at = time.monotonic()
 
     for iteration in range(agent.max_iterations):
+        turn_system_prompt = agent._consume_pending_compactions_into_prompt(turn_system_prompt)
+
         if time.monotonic() - started_at > agent.wall_clock_timeout_sec:
             yield _finalize_without_tools(
                 agent,
@@ -586,8 +591,9 @@ def execute_turn_stream(
                     consecutive_tool_errors += 1
                 else:
                     consecutive_tool_errors = 0
-                history_result = agent._truncate_tool_result_for_history(
+                history_result = agent._shape_tool_result_for_history(
                     call.name,
+                    call.arguments,
                     result_text,
                 )
                 agent._emit_hook(

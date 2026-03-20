@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from archon.ux.operator_messages import (
+    build_approval_status_message,
+    build_blocked_action_message,
+)
+
 
 PENDING_APPROVAL_TTL_SEC = 5 * 60
 ELEVATED_APPROVAL_TTL_SEC = 15 * 60
@@ -24,17 +29,19 @@ def truncate_approval_command(command: str, limit: int = APPROVAL_COMMAND_PREVIE
 
 def build_pending_approval_text(command_preview: str) -> str:
     return (
-        "Dangerous action blocked and needs approval.\n\n"
-        f"Command preview:\n`{command_preview}`\n\n"
-        "Approve this request to replay it now, Allow 15m for this chat, or deny."
+        build_blocked_action_message(
+            command_preview,
+            heading="Dangerous action blocked and needs approval.",
+        )
+        + "\n"
+        + "inline_allow=Allow 15m"
     )
 
 
 def build_approval_status_text(command_preview: str, status_text: str) -> str:
-    return (
-        "Dangerous action approval\n\n"
-        f"{status_text}\n\n"
-        f"Command preview:\n`{command_preview}`"
+    return build_approval_status_message(
+        command_preview,
+        status_text,
     )
 
 

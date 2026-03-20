@@ -33,6 +33,7 @@ from archon.cli import (
 from archon.cli_interactive_commands import chat_cmd as _chat_cmd
 from archon.cli_interactive_commands import telegram_cmd as _telegram_cmd
 from archon.cli_interactive_commands import _tool_spinner_label
+from archon.context_metrics import build_context_snapshot
 from archon.cli_repl_commands import _maybe_auto_activate_skill
 from archon.control.hooks import HookBus
 from archon.prompt import build_skill_guidance as _build_skill_guidance
@@ -177,6 +178,34 @@ class TestCliFormatting:
         assert "fast=1" in out
         assert "job=2" in out
 
+    def test_context_snapshot_uses_local_history_estimator_when_agent_private_helper_breaks(self, monkeypatch):
+        import archon.agent as agent_module
+
+        def _boom(_history):
+            raise RuntimeError("broken private helper")
+
+        monkeypatch.setattr(agent_module, "_estimate_history_chars", _boom)
+
+        agent = SimpleNamespace(
+            history=[
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "world"},
+            ],
+            _pending_compactions=[],
+            total_input_tokens=0,
+            total_output_tokens=0,
+            last_input_tokens=0,
+            last_output_tokens=0,
+            tools=None,
+            config=None,
+        )
+
+        snapshot = build_context_snapshot(agent)
+
+        assert snapshot.history_messages == 2
+        assert snapshot.history_chars > 0
+        assert snapshot.approx_history_tokens > 0
+
 
 class TestCliPasteMode:
     def test_is_paste_command_accepts_common_forms(self):
@@ -243,7 +272,7 @@ class TestCliCommands:
 
     def test_slash_commands_include_local_shell_status_commands(self):
         names = {name for name, _desc in _SLASH_COMMANDS}
-        assert {"/status", "/cost", "/doctor", "/permissions"} <= names
+        assert {"/status", "/cost", "/doctor", "/permissions", "/new"} <= names
         assert "/model" in names
         assert "/model-list" not in names
         assert "/model-set" not in names
@@ -255,6 +284,7 @@ class TestCliCommands:
     def test_slash_command_descriptions_group_shell_controls(self):
         descriptions = dict(_SLASH_COMMANDS)
         assert descriptions["/status"] == "Shell: current status"
+        assert descriptions["/new"] == "Shell: fresh chat context"
         assert descriptions["/skills"] == "Shell: skills"
         assert descriptions["/plugins"] == "Shell: plugins"
         assert descriptions["/model"] == "Model: current or set provider/model"
@@ -422,13 +452,21 @@ class TestCliCommands:
         action, msg = _handle_repl_command(SimpleNamespace(), "/approvals")
 
         assert action == "approvals"
-        assert msg == "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0"
+        assert (
+            msg
+            == "Approvals: dangerous_mode=off | pending_request=none | allow_once_remaining=0 | "
+            "replay=/approve | allow_once=/approve_next | deny=/deny"
+        )
 
     def test_handle_repl_command_approvals_status_alias_reports_default_state(self):
         action, msg = _handle_repl_command(SimpleNamespace(), "/approvals status")
 
         assert action == "approvals"
-        assert msg == "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0"
+        assert (
+            msg
+            == "Approvals: dangerous_mode=off | pending_request=none | allow_once_remaining=0 | "
+            "replay=/approve | allow_once=/approve_next | deny=/deny"
+        )
 
     def test_handle_repl_command_help_lists_approvals_status_alias(self):
         action, msg = _handle_repl_command(SimpleNamespace(), "/help")
@@ -445,16 +483,24 @@ class TestCliCommands:
         assert "/job <id>" not in msg
         assert "Use / to browse commands." in msg
 
+    def test_handle_repl_command_help_groups_commands_by_operator_workflow(self):
+        action, msg = _handle_repl_command(SimpleNamespace(), "/help")
+
+        assert action == "help"
+        assert "Inspect: /status, /context" in msg
+        assert "Recover: /compact, /new" in msg
+        assert "Approvals: /approvals, /approve, /approve_next, /deny" in msg
+
     def test_handle_repl_command_approvals_toggle_reports_requested_mode_without_state(self):
         action, msg = _handle_repl_command(SimpleNamespace(), "/approvals on")
 
         assert action == "approvals"
-        assert msg == "Approvals: requested=on | state=unavailable"
+        assert msg == "Approvals: state=unavailable | requested=on | review=/approvals"
 
         action, msg = _handle_repl_command(SimpleNamespace(), "/approvals off")
 
         assert action == "approvals"
-        assert msg == "Approvals: requested=off | state=unavailable"
+        assert msg == "Approvals: state=unavailable | requested=off | review=/approvals"
 
     @pytest.mark.parametrize("command", ["/approvals foo", "/approvals on extra"])
     def test_handle_repl_command_approvals_rejects_invalid_forms(self, command):
@@ -467,18 +513,26 @@ class TestCliCommands:
         action, msg = _handle_repl_command(SimpleNamespace(), "/approve")
 
         assert action == "approve"
-        assert msg == "No pending dangerous request to approve."
+        assert (
+            msg
+            == "Approval: result=no_pending_request | pending_request=none | "
+            "replay=/approve | allow_once=/approve_next | deny=/deny | review=/approvals"
+        )
 
         action, msg = _handle_repl_command(SimpleNamespace(), "/deny")
 
         assert action == "deny"
-        assert msg == "No pending dangerous request to deny."
+        assert (
+            msg
+            == "Approval: result=no_pending_request | pending_request=none | "
+            "replay=/approve | allow_once=/approve_next | deny=/deny | review=/approvals"
+        )
 
     def test_handle_repl_command_approve_next_reports_missing_session_state(self):
         action, msg = _handle_repl_command(SimpleNamespace(), "/approve_next")
 
         assert action == "approve_next"
-        assert msg == "Approve-next unavailable: session approval state not wired."
+        assert msg == "Approval: state=unavailable | requested=/approve_next | review=/approvals"
 
     @pytest.mark.parametrize(
         ("command", "expected_action", "expected_msg"),
@@ -1621,7 +1675,45 @@ class TestCliCommands:
         action, msg = _handle_repl_command(agent, "/status")
 
         assert action == "status"
-        assert msg == "Status: model=openai/gpt-5-mini | profile=safe | calls=on | mcp=1/2 | tokens=150"
+        assert msg.startswith("Status:")
+        assert "model=openai/gpt-5-mini" in msg
+        assert "profile=safe" in msg
+        assert "calls=on" in msg
+        assert "mcp=1/2" in msg
+        assert "tokens=150" in msg
+        assert "pressure=ok" in msg
+
+    def test_handle_repl_command_status_recommends_compact_or_new_when_pressure_is_high(self):
+        agent = self._make_local_command_agent()
+        agent.last_input_tokens = 32000
+
+        action, msg = _handle_repl_command(agent, "/status")
+
+        assert action == "status"
+        assert "pressure=high" in msg
+        assert "recommend=/compact or /new" in msg
+
+    def test_handle_repl_command_status_surfaces_waiting_state_for_approvals_and_compactions(self):
+        agent = self._make_local_command_agent()
+        agent._pending_compactions = [{"path": "compactions/sessions/history-manual.md"}]
+        agent.last_input_tokens = 32000
+        agent.get_terminal_approval_status = lambda: {
+            "dangerous_mode": False,
+            "approve_next_tokens": 0,
+            "pending": "rm important.txt",
+            "pending_command_preview": "rm important.txt",
+            "pending_request": {
+                "blocked_command_preview": "rm important.txt",
+                "status": "pending",
+            },
+        }
+
+        action, msg = _handle_repl_command(agent, "/status")
+
+        assert action == "status"
+        assert "pending_compactions=1" in msg
+        assert "approval_pending=rm important.txt" in msg
+        assert "recommend=" not in msg
 
     def test_handle_repl_command_cost_reports_session_token_totals(self):
         agent = self._make_local_command_agent()
@@ -1947,18 +2039,38 @@ class TestCliCommands:
 
         assert action == "compact"
         assert msg == (
-            "Compact: history_messages=2 | path=compactions/sessions/history-manual.md | summary=user: hello"
+            "Compact: history_messages=2 | path=compactions/sessions/history-manual.md | "
+            "pending_compactions=1 | next_turn=uses_compacted_context"
         )
 
     def test_handle_repl_command_context_reports_history_and_pending_compactions(self):
         agent = self._make_local_command_agent()
         agent.history = [{"role": "user", "content": "hello"}]
         agent._pending_compactions = [{"path": "compactions/sessions/history-manual.md"}]
+        agent.last_input_tokens = 32000
 
         action, msg = _handle_repl_command(agent, "/context")
 
         assert action == "context"
-        assert msg == "Context: history_messages=1 | pending_compactions=1"
+        assert msg.startswith("Context:")
+        assert "history_messages=1" in msg
+        assert "pending_compactions=1" in msg
+        assert "history_chars=" in msg
+        assert "approx_history_tokens=" in msg
+        assert "last_input_tokens=32000" in msg
+        assert "pressure=high" in msg
+        assert "recommend=" not in msg
+
+    def test_context_snapshot_disables_history_pressure_signal_when_threshold_is_zero(self):
+        agent = self._make_local_command_agent()
+        agent.config.agent.prompt_pressure_max_history_tokens = 0
+        agent.history = [{"role": "user", "content": "x" * 30000}]
+        agent.last_input_tokens = 0
+
+        snapshot = build_context_snapshot(agent)
+
+        assert snapshot.approx_history_tokens > 0
+        assert snapshot.pressure == "ok"
 
     def test_chat_cmd_handles_status_locally_without_model_turn(self):
         outputs = []
@@ -3082,20 +3194,48 @@ class TestCliLocalInteractiveCommands:
     @pytest.mark.parametrize(
         ("command", "expected"),
         [
-            ("/status", "Status: model=openai/gpt-5-mini | profile=safe | calls=on | mcp=1/2 | tokens=150"),
+            ("/status", "Status: model=openai/gpt-5-mini | profile=safe | calls=on | mcp=1/2 | tokens=150 | pressure=ok"),
             ("/cost", "Cost: chat_session_tokens=150 | workflow_total_tokens=150 | input=120 | output=30"),
             ("/doctor", "Doctor: llm=ok | profile=ok | calls=on | mcp=1/2"),
             ("/permissions", "Permissions: permission_mode=confirm_all | profile=safe | mode=review | tools=2 [read_file,shell]"),
             ("/permissions status", "Permissions: permission_mode=confirm_all | profile=safe | mode=review | tools=2 [read_file,shell]"),
-            ("/approvals", "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0"),
-            ("/approvals status", "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0"),
-            ("/approvals on", "Approvals: dangerous_mode=on | pending=none | approve_next_tokens=0"),
-            ("/approvals off", "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0"),
-            ("/approve", "No pending dangerous request to approve."),
+            (
+                "/approvals",
+                "Approvals: dangerous_mode=off | pending_request=none | allow_once_remaining=0 | "
+                "replay=/approve | allow_once=/approve_next | deny=/deny",
+            ),
+            (
+                "/approvals status",
+                "Approvals: dangerous_mode=off | pending_request=none | allow_once_remaining=0 | "
+                "replay=/approve | allow_once=/approve_next | deny=/deny",
+            ),
+            (
+                "/approvals on",
+                "Approvals: result=dangerous_mode_enabled | dangerous_mode=on | pending_request=none | "
+                "allow_once_remaining=0 | replay=/approve | allow_once=/approve_next | deny=/deny",
+            ),
+            (
+                "/approvals off",
+                "Approvals: result=dangerous_mode_disabled | dangerous_mode=off | pending_request=none | "
+                "allow_once_remaining=0 | replay=/approve | allow_once=/approve_next | deny=/deny",
+            ),
+            (
+                "/approve",
+                "Approval: result=no_pending_request | pending_request=none | "
+                "replay=/approve | allow_once=/approve_next | deny=/deny | review=/approvals",
+            ),
             ("/approve extra", "Usage: /approve"),
-            ("/deny", "No pending dangerous request to deny."),
+            (
+                "/deny",
+                "Approval: result=no_pending_request | pending_request=none | "
+                "replay=/approve | allow_once=/approve_next | deny=/deny | review=/approvals",
+            ),
             ("/deny extra", "Usage: /deny"),
-            ("/approve_next", "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=1"),
+            (
+                "/approve_next",
+                "Approval: result=allow_once_armed | dangerous_mode=off | pending_request=none | "
+                "allow_once_remaining=1 | next=one_future_dangerous_action_allowed | review=/approvals",
+            ),
             ("/approve_next extra", "Usage: /approve_next"),
         ],
     )
@@ -3147,6 +3287,8 @@ class TestCliLocalInteractiveCommands:
     def test_local_context_commands_do_not_call_agent_run(self):
         agent = _LocalCommandAgent()
         agent.history = [{"role": "user", "content": "hello"}]
+        agent._pending_compactions = []
+        agent.last_input_tokens = 32000
 
         outputs = [
             re.sub(r"\x1b\[[0-9;]*m", "", text)
@@ -3156,9 +3298,30 @@ class TestCliLocalInteractiveCommands:
             )
         ]
 
-        assert "Context: history_messages=1 | pending_compactions=0" in outputs
-        assert "Compact: history_messages=1 | path=compactions/sessions/local-shell.md | summary=assistant: local shell compaction" in outputs
-        assert "Context: history_messages=0 | pending_compactions=1" in outputs
+        assert any(
+            text.startswith("Context:")
+            and "history_messages=1" in text
+            and "pending_compactions=0" in text
+            and "history_chars=" in text
+            and "approx_history_tokens=" in text
+            and "last_input_tokens=32000" in text
+            and "pressure=high" in text
+            for text in outputs
+        )
+        assert (
+            "Compact: history_messages=1 | path=compactions/sessions/local-shell.md | "
+            "pending_compactions=1 | next_turn=uses_compacted_context"
+        ) in outputs
+        assert any(
+            text.startswith("Context:")
+            and "history_messages=0" in text
+            and "pending_compactions=1" in text
+            and "history_chars=" in text
+            and "approx_history_tokens=" in text
+            and "pressure=" in text
+            and "recommend=" not in text
+            for text in outputs
+        )
         assert agent.run_calls == []
 
     def test_local_clear_command_does_not_call_agent_run(self):
@@ -3166,20 +3329,108 @@ class TestCliLocalInteractiveCommands:
         agent.history = [{"role": "user", "content": "hello"}]
         agent.total_input_tokens = 10
         agent.total_output_tokens = 5
+        agent.last_input_tokens = 32000
+        agent.last_output_tokens = 120
 
         outputs = [
             re.sub(r"\x1b\[[0-9;]*m", "", text)
             for text, _err in _run_local_command_session(
                 agent,
-                ["/clear", "quit"],
+                ["/clear", "/status", "/context", "quit"],
             )
         ]
 
-        assert "Cleared 1 messages. Fresh start." in outputs
+        assert "Cleared 1 messages. Fresh chat context in the same session." in outputs
+        assert "Status: model=openai/gpt-5-mini | profile=safe | calls=on | mcp=1/2 | tokens=0 | pressure=ok" in outputs
+        assert any(
+            text.startswith("Context:")
+            and "history_messages=0" in text
+            and "last_input_tokens=0" in text
+            and "pressure=ok" in text
+            and "recommend=" not in text
+            for text in outputs
+        )
         assert agent.run_calls == []
         assert agent.history == []
         assert agent.total_input_tokens == 0
         assert agent.total_output_tokens == 0
+        assert agent.last_input_tokens == 0
+        assert agent.last_output_tokens == 0
+
+    def test_local_new_command_aliases_clear_without_calling_agent_run(self):
+        agent = _LocalCommandAgent()
+        agent.history = [{"role": "user", "content": "hello"}]
+        agent.total_input_tokens = 10
+        agent.total_output_tokens = 5
+        agent.last_input_tokens = 32000
+        agent.last_output_tokens = 120
+
+        outputs = [
+            re.sub(r"\x1b\[[0-9;]*m", "", text)
+            for text, _err in _run_local_command_session(
+                agent,
+                ["/new", "/status", "/context", "quit"],
+            )
+        ]
+
+        assert "Cleared 1 messages. Fresh chat context in the same session." in outputs
+        assert "Status: model=openai/gpt-5-mini | profile=safe | calls=on | mcp=1/2 | tokens=0 | pressure=ok" in outputs
+        assert any(
+            text.startswith("Context:")
+            and "history_messages=0" in text
+            and "last_input_tokens=0" in text
+            and "pressure=ok" in text
+            and "recommend=" not in text
+            for text in outputs
+        )
+        assert agent.run_calls == []
+
+    def test_local_context_command_recommends_action_when_pressure_is_high(self):
+        agent = _LocalCommandAgent()
+        agent.history = [{"role": "user", "content": "hello"}]
+        agent.last_input_tokens = 32000
+
+        outputs = [
+            re.sub(r"\x1b\[[0-9;]*m", "", text)
+            for text, _err in _run_local_command_session(
+                agent,
+                ["/context", "quit"],
+            )
+        ]
+
+        assert any(
+            text.startswith("Context:")
+            and "pressure=high" in text
+            and "recommend=/compact or /new" in text
+            for text in outputs
+        )
+
+    def test_local_clear_command_clears_pending_compactions_after_compact(self):
+        agent = _LocalCommandAgent()
+        agent.history = [{"role": "user", "content": "hello"}]
+        agent._pending_compactions = []
+
+        outputs = [
+            re.sub(r"\x1b\[[0-9;]*m", "", text)
+            for text, _err in _run_local_command_session(
+                agent,
+                ["/compact", "/clear", "/context", "quit"],
+            )
+        ]
+
+        assert (
+            "Compact: history_messages=1 | path=compactions/sessions/local-shell.md | "
+            "pending_compactions=1 | next_turn=uses_compacted_context"
+        ) in outputs
+        assert "Cleared 0 messages. Fresh chat context in the same session." in outputs
+        assert any(
+            text.startswith("Context:")
+            and "history_messages=0" in text
+            and "pending_compactions=0" in text
+            and "recommend=" not in text
+            for text in outputs
+        )
+        assert agent.run_calls == []
 
 
 class TestCliPendingApprovalInteractiveChat:
@@ -3194,16 +3445,36 @@ class TestCliPendingApprovalInteractiveChat:
 
         approval_output = next(text for text in outputs if "approval required" in text.lower())
         assert "approval required: dangerous action blocked" in approval_output.lower()
-        assert "request: rm important.txt" in approval_output
-        assert "use /approve, /deny, /approve_next, or /approvals" in approval_output
+        assert "pending_request=rm important.txt" in approval_output
+        assert "replay=/approve" in approval_output
+        assert "replay_effect=replays_pending_request" in approval_output
+        assert "allow_once=/approve_next" in approval_output
+        assert "allow_once_effect=arms_one_future_dangerous_action" in approval_output
+        assert "review=/approvals" in approval_output
         assert "Command rejected by safety gate." not in outputs
-        assert "Approvals: dangerous_mode=off | pending=rm important.txt | approve_next_tokens=0" in outputs
+        assert (
+            "Approvals: dangerous_mode=off | pending_request=rm important.txt | allow_once_remaining=0 | "
+            "replay=/approve | allow_once=/approve_next | deny=/deny"
+        ) in outputs
 
         status = agent.get_terminal_approval_status()
         pending = status["pending_request"]
         assert pending["status"] == "pending"
         assert pending["blocked_command_preview"] == "rm important.txt"
         assert pending["blocked_user_input"] == "danger"
+
+    def test_chat_approve_feedback_uses_structured_replay_fields(self):
+        agent = _DangerousActionAgent({"danger": "rm important.txt"})
+
+        outputs = self._plain_outputs(_run_local_command_session(agent, ["danger", "quit"]))
+
+        approval_output = next(text for text in outputs if "approval required" in text.lower())
+        assert "pending_request=rm important.txt" in approval_output
+        assert "replay=/approve" in approval_output
+        assert "replay_effect=replays_pending_request" in approval_output
+        assert "allow_once=/approve_next" in approval_output
+        assert "allow_once_effect=arms_one_future_dangerous_action" in approval_output
+        assert "review=/approvals" in approval_output
 
     def test_chat_pending_approval_replaces_the_previous_request(self):
         agent = _DangerousActionAgent(
@@ -3216,7 +3487,10 @@ class TestCliPendingApprovalInteractiveChat:
         outputs = self._plain_outputs(_run_local_command_session(agent, ["first", "second", "/approvals", "quit"]))
 
         assert outputs.count("Command rejected by safety gate.") == 0
-        assert "Approvals: dangerous_mode=off | pending=systemctl restart nginx | approve_next_tokens=0" in outputs
+        assert (
+            "Approvals: dangerous_mode=off | pending_request=systemctl restart nginx | allow_once_remaining=0 | "
+            "replay=/approve | allow_once=/approve_next | deny=/deny"
+        ) in outputs
 
         status = agent.get_terminal_approval_status()
         pending = status["pending_request"]
@@ -3231,8 +3505,34 @@ class TestCliPendingApprovalInteractiveChat:
             _run_local_command_session(agent, ["/approvals on", "/approvals", "/approvals off", "/approvals", "quit"])
         )
 
-        assert outputs.count("Approvals: dangerous_mode=on | pending=none | approve_next_tokens=0") == 2
-        assert outputs.count("Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0") == 2
+        assert (
+            outputs.count(
+                "Approvals: result=dangerous_mode_enabled | dangerous_mode=on | pending_request=none | "
+                "allow_once_remaining=0 | replay=/approve | allow_once=/approve_next | deny=/deny"
+            )
+            == 1
+        )
+        assert (
+            outputs.count(
+                "Approvals: dangerous_mode=on | pending_request=none | allow_once_remaining=0 | "
+                "replay=/approve | allow_once=/approve_next | deny=/deny"
+            )
+            == 1
+        )
+        assert (
+            outputs.count(
+                "Approvals: result=dangerous_mode_disabled | dangerous_mode=off | pending_request=none | "
+                "allow_once_remaining=0 | replay=/approve | allow_once=/approve_next | deny=/deny"
+            )
+            == 1
+        )
+        assert (
+            outputs.count(
+                "Approvals: dangerous_mode=off | pending_request=none | allow_once_remaining=0 | "
+                "replay=/approve | allow_once=/approve_next | deny=/deny"
+            )
+            == 1
+        )
         assert agent.run_calls == []
 
     def test_chat_approve_next_updates_interactive_session_state(self):
@@ -3240,7 +3540,14 @@ class TestCliPendingApprovalInteractiveChat:
 
         outputs = self._plain_outputs(_run_local_command_session(agent, ["/approve_next", "/approvals", "quit"]))
 
-        assert outputs.count("Approvals: dangerous_mode=off | pending=none | approve_next_tokens=1") == 2
+        assert (
+            "Approval: result=allow_once_armed | dangerous_mode=off | pending_request=none | "
+            "allow_once_remaining=1 | next=one_future_dangerous_action_allowed | review=/approvals"
+        ) in outputs
+        assert (
+            "Approvals: dangerous_mode=off | pending_request=none | allow_once_remaining=1 | "
+            "replay=/approve | allow_once=/approve_next | deny=/deny"
+        ) in outputs
         assert agent.run_calls == []
 
     def test_chat_approve_replays_pending_request_and_clears_state(self):
@@ -3248,9 +3555,15 @@ class TestCliPendingApprovalInteractiveChat:
 
         outputs = self._plain_outputs(_run_local_command_session(agent, ["danger", "/approve", "/approvals", "quit"]))
 
-        assert "Pending dangerous request approved. Replaying request..." in outputs
+        assert (
+            "Approval: result=approved_replaying | replayed_request=rm important.txt | dangerous_mode=off | "
+            "pending_request=none | allow_once_remaining=0 | next=original_request_replayed_now | review=/approvals"
+        ) in outputs
         assert "ran:rm important.txt" in outputs
-        assert "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0" in outputs
+        assert (
+            "Approvals: dangerous_mode=off | pending_request=none | allow_once_remaining=0 | "
+            "replay=/approve | allow_once=/approve_next | deny=/deny"
+        ) in outputs
         assert agent.run_calls == ["danger", "danger"]
 
     def test_chat_approve_replay_does_not_leave_a_spare_dangerous_token(self):
@@ -3267,7 +3580,10 @@ class TestCliPendingApprovalInteractiveChat:
 
         assert "ran:rm important.txt" in outputs
         assert any("approval required: dangerous action blocked" in text.lower() for text in outputs)
-        assert "Approvals: dangerous_mode=off | pending=rm second.txt | approve_next_tokens=0" in outputs
+        assert (
+            "Approvals: dangerous_mode=off | pending_request=rm second.txt | allow_once_remaining=0 | "
+            "replay=/approve | allow_once=/approve_next | deny=/deny"
+        ) in outputs
         assert agent.run_calls == ["danger", "danger", "second"]
 
     def test_chat_approve_replay_does_not_leak_approval_when_replay_turn_is_safe(self):
@@ -3277,10 +3593,16 @@ class TestCliPendingApprovalInteractiveChat:
             _run_local_command_session(agent, ["danger", "/approve", "later", "/approvals", "quit"])
         )
 
-        assert "Pending dangerous request approved. Replaying request..." in outputs
+        assert (
+            "Approval: result=approved_replaying | replayed_request=rm important.txt | dangerous_mode=off | "
+            "pending_request=none | allow_once_remaining=0 | next=original_request_replayed_now | review=/approvals"
+        ) in outputs
         assert "safe replay" in outputs
         assert any("approval required: dangerous action blocked" in text.lower() for text in outputs)
-        assert "Approvals: dangerous_mode=off | pending=rm later.txt | approve_next_tokens=0" in outputs
+        assert (
+            "Approvals: dangerous_mode=off | pending_request=rm later.txt | allow_once_remaining=0 | "
+            "replay=/approve | allow_once=/approve_next | deny=/deny"
+        ) in outputs
         assert agent.run_calls == ["danger", "danger", "later"]
 
     def test_chat_deny_clears_pending_state(self):
@@ -3290,8 +3612,14 @@ class TestCliPendingApprovalInteractiveChat:
             _run_local_command_session(agent, ["danger", "/deny", "/approvals", "quit"])
         )
 
-        assert "Denied pending dangerous request." in outputs
-        assert "Approvals: dangerous_mode=off | pending=none | approve_next_tokens=0" in outputs
+        assert (
+            "Approval: result=denied | denied_request=rm important.txt | dangerous_mode=off | "
+            "pending_request=none | allow_once_remaining=0 | review=/approvals"
+        ) in outputs
+        assert (
+            "Approvals: dangerous_mode=off | pending_request=none | allow_once_remaining=0 | "
+            "replay=/approve | allow_once=/approve_next | deny=/deny"
+        ) in outputs
         assert agent.run_calls == ["danger"]
 
     def test_chat_approve_next_allows_exactly_one_dangerous_action(self):
@@ -3308,7 +3636,10 @@ class TestCliPendingApprovalInteractiveChat:
 
         assert "ran:rm first.txt" in outputs
         assert any("approval required: dangerous action blocked" in text.lower() for text in outputs)
-        assert "Approvals: dangerous_mode=off | pending=rm second.txt | approve_next_tokens=0" in outputs
+        assert (
+            "Approvals: dangerous_mode=off | pending_request=rm second.txt | allow_once_remaining=0 | "
+            "replay=/approve | allow_once=/approve_next | deny=/deny"
+        ) in outputs
         assert agent.run_calls == ["first", "second"]
 
     def test_chat_approvals_on_allows_dangerous_actions_until_turned_off(self):
@@ -3328,7 +3659,10 @@ class TestCliPendingApprovalInteractiveChat:
 
         assert "ran:rm first.txt" in outputs
         assert any("approval required: dangerous action blocked" in text.lower() for text in outputs)
-        assert "Approvals: dangerous_mode=off | pending=rm second.txt | approve_next_tokens=0" in outputs
+        assert (
+            "Approvals: dangerous_mode=off | pending_request=rm second.txt | allow_once_remaining=0 | "
+            "replay=/approve | allow_once=/approve_next | deny=/deny"
+        ) in outputs
         assert agent.run_calls == ["first", "second"]
 
     def test_local_control_commands_do_not_mutate_agent_history(self):

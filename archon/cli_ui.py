@@ -6,6 +6,7 @@ import sys
 import threading
 
 from archon.control.orchestrator import describe_route_path
+from archon.ux.operator_messages import build_blocked_action_message
 
 
 ANSI_RESET = "\033[0m"
@@ -83,11 +84,16 @@ def _format_chat_response(text: str) -> str:
 def _format_terminal_approval_required(command_preview: str) -> str:
     """Format a compact shell-local approval prompt for blocked dangerous actions."""
     preview = (command_preview or "").strip() or "(unknown command)"
-    return (
-        f"{ANSI_ERROR}approval required{ANSI_RESET}: dangerous action blocked\n"
-        f"request: {preview}\n"
-        f"{ANSI_DIM}use /approve, /deny, /approve_next, or /approvals{ANSI_RESET}"
-    )
+    lines = build_blocked_action_message(
+        preview,
+        heading="approval required: dangerous action blocked",
+    ).splitlines()
+    if lines:
+        lines[0] = f"{ANSI_ERROR}approval required{ANSI_RESET}: dangerous action blocked"
+    if len(lines) > 2:
+        for index in range(2, len(lines)):
+            lines[index] = f"{ANSI_DIM}{lines[index]}{ANSI_RESET}"
+    return "\n".join(lines)
 
 
 def _format_turn_stats(

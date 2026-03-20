@@ -27,6 +27,7 @@ SLASH_COMMAND_GROUPS = (
             ("/context", "context state"),
             ("/doctor", "health checks"),
             ("/permissions", "policy permissions"),
+            ("/new", "fresh chat context"),
             ("/approvals", "approvals status/on/off"),
             ("/approve", "approve pending request"),
             ("/deny", "deny pending request"),
