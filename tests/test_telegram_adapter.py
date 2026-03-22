@@ -569,6 +569,30 @@ class TestTelegramAdapterCommands:
             "allow_once_remaining=1 | next=one_future_dangerous_action_allowed | review=/approvals"
         )
 
+
+def test_get_updates_retries_transient_connection_reset_once(monkeypatch):
+    adapter = _adapter()
+    calls = []
+
+    def fake_api_call(method, payload, timeout=10):
+        calls.append((method, payload, timeout))
+        if len(calls) == 1:
+            raise RuntimeError(
+                "Telegram API getUpdates network error: [Errno 104] Connection reset by peer"
+            )
+        return {
+            "ok": True,
+            "result": [],
+        }
+
+    monkeypatch.setattr(adapter, "_api_call", fake_api_call)
+
+    updates = adapter._get_updates()
+
+    assert updates == []
+    assert len(calls) == 2
+
+
 def test_voice_message_voice_upload_falls_back_to_wav_document(monkeypatch):
     adapter = _adapter()
     sent = []

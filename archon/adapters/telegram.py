@@ -268,7 +268,15 @@ class TelegramAdapter:
         }
         if self._offset is not None:
             payload["offset"] = self._offset
-        data = self._api_call("getUpdates", payload, timeout=self.poll_timeout_sec + 10)
+        attempts = 0
+        while True:
+            try:
+                data = self._api_call("getUpdates", payload, timeout=self.poll_timeout_sec + 10)
+                break
+            except Exception as e:
+                if attempts >= 1 or not _is_transient_get_updates_error(e):
+                    raise
+                attempts += 1
         result = data.get("result")
         if not isinstance(result, list):
             raise RuntimeError("Telegram getUpdates returned invalid result payload")
@@ -1261,3 +1269,18 @@ class TelegramAdapter:
 
     def _api_call(self, method: str, payload: dict, timeout: int) -> dict:
         return self._bot.api_call(method, payload, timeout=timeout)
+
+
+def _is_transient_get_updates_error(error: Exception) -> bool:
+    text = str(error or "").strip().lower()
+    if "telegram api getupdates" not in text:
+        return False
+    transient_markers = (
+        "network error",
+        "connection reset by peer",
+        "remote end closed connection",
+        "timed out",
+        "temporarily unavailable",
+        "connection aborted",
+    )
+    return any(marker in text for marker in transient_markers)
