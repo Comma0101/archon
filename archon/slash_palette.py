@@ -150,14 +150,11 @@ def read_interactive_input(
     hook_set = getattr(readline_module, "set_startup_hook", None)
     hook_clear = getattr(readline_module, "set_startup_hook", None)
     insert_text = getattr(readline_module, "insert_text", None)
-    redisplay = getattr(readline_module, "redisplay", None)
     if callable(set_visible_input_fn):
         set_visible_input_fn(first_text)
     if callable(hook_set) and callable(insert_text):
         def _startup_hook() -> None:
             insert_text(first_text)
-            if callable(redisplay):
-                redisplay()
             if callable(set_visible_input_fn):
                 set_visible_input_fn(None)
             try:

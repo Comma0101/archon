@@ -158,6 +158,7 @@ class _FakeReadline:
     def __init__(self):
         self._startup_hook = None
         self.inserted = []
+        self.redisplay_calls = 0
 
     def set_startup_hook(self, hook):
         self._startup_hook = hook
@@ -166,6 +167,7 @@ class _FakeReadline:
         self.inserted.append(text)
 
     def redisplay(self):
+        self.redisplay_calls += 1
         return None
 
 
@@ -196,6 +198,34 @@ def test_read_interactive_input_tracks_and_clears_transient_first_character(monk
 
     assert (result, used_palette) == ("hello", False)
     assert events == ["h", None]
+
+
+def test_read_interactive_input_does_not_force_redisplay_for_first_character(monkeypatch):
+    readline = _FakeReadline()
+
+    monkeypatch.setattr("archon.slash_palette.termios.tcgetattr", lambda _fd: [0])
+    monkeypatch.setattr("archon.slash_palette.termios.tcsetattr", lambda *_args: None)
+    monkeypatch.setattr("archon.slash_palette.tty.setraw", lambda _fd: None)
+    monkeypatch.setattr("archon.slash_palette.os.read", lambda _fd, _n: b"h")
+
+    def _fallback_read(_prompt):
+        assert callable(readline._startup_hook)
+        readline._startup_hook()
+        return "hello"
+
+    result, used_palette = read_interactive_input(
+        prompt="you> ",
+        fallback_read_fn=_fallback_read,
+        readline_module=readline,
+        slash_commands=build_slash_commands(),
+        slash_subvalues=build_slash_subvalues(MODEL_CATALOG, _config()),
+        input_stream=_FakeInputStream(),
+        output_stream=io.StringIO(),
+    )
+
+    assert (result, used_palette) == ("hello", False)
+    assert readline.inserted == ["h"]
+    assert readline.redisplay_calls == 0
 
 
 def test_run_live_slash_palette_clears_visible_query_when_backspacing_from_root(monkeypatch):
