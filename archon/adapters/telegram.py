@@ -60,7 +60,7 @@ from archon.ux.operator_messages import (
     build_approval_result_message,
     build_approvals_overview_message,
     build_blocked_action_message,
-    build_operator_help_workflows,
+    build_operator_help_text,
 )
 from archon.safety import Level
 from archon.ux.events import ActivityEvent, UXEvent
@@ -73,13 +73,13 @@ MAX_TELEGRAM_MESSAGE_LEN = DEFAULT_TELEGRAM_MESSAGE_LIMIT
 _TELEGRAM_BOT_COMMANDS: tuple[tuple[str, str], ...] = (
     ("start", "Connect and show basics"),
     ("help", "Show command guide"),
-    ("status", "Show session status"),
+    ("status", "Inspect session state"),
     ("new", "Fresh chat context"),
-    ("compact", "Compact chat context"),
-    ("context", "Show context state"),
+    ("compact", "Reduce context pressure"),
+    ("context", "Inspect context state"),
     ("cost", "Show token usage"),
     ("jobs", "List background jobs"),
-    ("approvals", "Show approval state"),
+    ("approvals", "Inspect approval state"),
     ("skills", "List available skills"),
     ("mcp", "Inspect MCP servers"),
     ("reset", "Reset chat session"),
@@ -335,12 +335,12 @@ class TelegramAdapter:
             self._send_text_and_record(
                 chat_id,
                 body,
-                "Archon is connected.\n"
-                + build_operator_help_workflows()
-                + "\n"
-                "Core: /status, /approvals, /jobs, /skills, /mcp, /reset\n"
-                "Context: /new, /clear, /compact, /context, /cost\n"
-                "Use /help for the compact command guide.",
+                build_operator_help_text(
+                    intro="Archon is connected.",
+                    core="/status, /approvals, /jobs, /skills, /mcp, /reset",
+                    context="/new, /clear, /compact, /context, /cost",
+                    footer="Use /help for the compact command guide.",
+                ),
             )
             return
 
@@ -348,13 +348,13 @@ class TelegramAdapter:
             self._send_text_and_record(
                 chat_id,
                 body,
-                build_operator_help_workflows()
-                + "\n"
-                "Core: /status, /approvals, /jobs, /skills, /mcp, /reset\n"
-                "Context: /new, /clear, /compact, /context, /cost\n"
-                "Advanced: /doctor, /permissions, /plugins, /profile, /jobs show <job-id>, "
-                "/approve, /deny, /approve_next, /news, /news_status\n"
-                "Dangerous commands can be approved with inline buttons or /approve.",
+                build_operator_help_text(
+                    core="/status, /approvals, /jobs, /skills, /mcp, /reset",
+                    context="/new, /clear, /compact, /context, /cost",
+                    advanced="/doctor, /permissions, /plugins, /profile, /jobs show <job-id>, "
+                    "/approve, /deny, /approve_next, /news, /news_status",
+                    footer="Dangerous commands can be approved with inline buttons or /approve.",
+                ),
             )
             return
 

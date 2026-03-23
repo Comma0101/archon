@@ -170,7 +170,35 @@ def build_approval_status_message(
 
 def build_operator_help_workflows() -> str:
     return (
-        "Inspect: /status, /context\n"
-        "Recover: /compact, /new\n"
-        "Approvals: /approvals, /approve, /approve_next, /deny"
+        "Inspect state: /status, /context\n"
+        "Reduce pressure: /compact, /new\n"
+        "Handle blocked actions: /approvals, /approve, /approve_next, /deny"
     )
+
+
+def build_operator_help_text(
+    *,
+    core: str,
+    context: str | None = None,
+    advanced: str | None = None,
+    footer: str | None = None,
+    intro: str | None = None,
+) -> str:
+    lines: list[str] = []
+    intro_text = str(intro or "").strip()
+    if intro_text:
+        lines.append(intro_text)
+    lines.append(build_operator_help_workflows())
+    core_text = str(core or "").strip()
+    if core_text:
+        lines.append(f"Core: {core_text}")
+    context_text = str(context or "").strip()
+    if context_text:
+        lines.append(f"Context: {context_text}")
+    advanced_text = str(advanced or "").strip()
+    if advanced_text:
+        lines.append(f"Advanced: {advanced_text}")
+    footer_text = str(footer or "").strip()
+    if footer_text:
+        lines.append(footer_text)
+    return "\n".join(lines)

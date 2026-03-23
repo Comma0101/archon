@@ -283,6 +283,7 @@ def execute_turn(
                     return result
                 result_text = redact_secret_like_text(str(result))
                 _print_tool_result(
+                    call.name,
                     result_text,
                     prefix=log_prefix,
                     activity_feed=getattr(agent, "terminal_activity_feed", None),
@@ -583,6 +584,7 @@ def execute_turn_stream(
                     return
                 result_text = redact_secret_like_text(str(result))
                 _print_tool_result(
+                    call.name,
                     result_text,
                     prefix=log_prefix,
                     activity_feed=getattr(agent, "terminal_activity_feed", None),

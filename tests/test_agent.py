@@ -3299,10 +3299,11 @@ class TestAgentLoop:
 
     def test_tool_trace_uses_distinct_call_and_result_colors(self, capsys):
         _print_tool_call("shell", {"command": "echo hi"}, prefix="[turn=t001]")
-        _print_tool_result("ok", prefix="[turn=t001]")
+        _print_tool_result("shell", "ok\n[exit_code=0]", prefix="[turn=t001]")
         err = capsys.readouterr().err
         assert "\x1b[96m" in err  # bright cyan tool call
         assert "\x1b[37m" in err  # readable result lines (white/light gray)
+        assert "result=ok | exit_code=0 | output=ok" in err
 
     def test_print_tool_call_redacts_secret_like_shell_arguments(self, capsys):
         _print_tool_call(
@@ -3332,17 +3333,28 @@ class TestAgentLoop:
             activity_feed=feed,
         )
         _print_tool_result(
-            "ok\nsecond line",
+            "shell",
+            "ok\nsecond line\n[exit_code=0]",
             prefix="[telegram chat=99 turn=t001]",
             activity_feed=feed,
         )
 
         assert messages == [
             "[telegram chat=99 turn=t001] > echo hi",
-            "[telegram chat=99 turn=t001]   ok",
+            "[telegram chat=99 turn=t001]   result=ok | exit_code=0 | output=ok",
             "[telegram chat=99 turn=t001]   ... (1 more lines)",
         ]
         assert capsys.readouterr().err == ""
+
+    def test_print_tool_result_surfaces_nonzero_shell_exit_code_as_error(self, capsys):
+        _print_tool_result(
+            "shell",
+            "permission denied\n[exit_code=7]",
+            prefix="[turn=t001]",
+        )
+
+        err = capsys.readouterr().err
+        assert "result=error | exit_code=7 | output=permission denied" in err
 
     def test_run_trims_history_at_turn_start(self, monkeypatch):
         responses = [

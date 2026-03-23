@@ -1482,13 +1482,13 @@ def test_chat_agent_wires_terminal_feed_proxy_from_activity_sink():
                     "commands": [
                         {"command": "start", "description": "Connect and show basics"},
                         {"command": "help", "description": "Show command guide"},
-                        {"command": "status", "description": "Show session status"},
+                        {"command": "status", "description": "Inspect session state"},
                         {"command": "new", "description": "Fresh chat context"},
-                        {"command": "compact", "description": "Compact chat context"},
-                        {"command": "context", "description": "Show context state"},
+                        {"command": "compact", "description": "Reduce context pressure"},
+                        {"command": "context", "description": "Inspect context state"},
                         {"command": "cost", "description": "Show token usage"},
                         {"command": "jobs", "description": "List background jobs"},
-                        {"command": "approvals", "description": "Show approval state"},
+                        {"command": "approvals", "description": "Inspect approval state"},
                         {"command": "skills", "description": "List available skills"},
                         {"command": "mcp", "description": "Inspect MCP servers"},
                         {"command": "reset", "description": "Reset chat session"},
@@ -1817,9 +1817,28 @@ def test_help_groups_commands_by_operator_workflow():
     )
 
     assert sent
-    assert "Inspect: /status, /context" in sent[0][1]
-    assert "Recover: /compact, /new" in sent[0][1]
-    assert "Approvals: /approvals, /approve, /approve_next, /deny" in sent[0][1]
+    assert "Inspect state: /status, /context" in sent[0][1]
+    assert "Reduce pressure: /compact, /new" in sent[0][1]
+    assert "Handle blocked actions: /approvals, /approve, /approve_next, /deny" in sent[0][1]
+
+
+def test_start_uses_same_workflow_help_headings():
+    adapter = _adapter()
+    sent = []
+    adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+    adapter._handle_message(
+        {
+            "text": "/start",
+            "chat": {"id": 99},
+            "from": {"id": 42},
+        }
+    )
+
+    assert sent
+    assert "Inspect state: /status, /context" in sent[0][1]
+    assert "Reduce pressure: /compact, /new" in sent[0][1]
+    assert "Handle blocked actions: /approvals, /approve, /approve_next, /deny" in sent[0][1]
 
 
 def test_approve_blocked_dangerous_action_prompt_mentions_pending_request_and_replay_commands(monkeypatch):

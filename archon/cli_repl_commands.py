@@ -35,7 +35,7 @@ from archon.ux.operator_messages import (
     build_approvals_overview_message,
     build_compact_result_text,
     build_fresh_start_text,
-    build_operator_help_workflows,
+    build_operator_help_text,
     build_pressure_recommendation,
 )
 from archon.usage import summarize_usage_for_session
@@ -67,13 +67,12 @@ _EXPLICIT_SKILL_PATTERNS = (
     re.compile(rf"^\s*{_SKILL_REQUEST_PREFIX}enter (?P<skill>{_SKILL_REQUEST_PATTERN}) mode\b", re.IGNORECASE),
 )
 _TERMINAL_HELP_TEXT = (
-    build_operator_help_workflows()
-    + "\n"
-    "Core: /status, /approvals, /jobs, /skills, /mcp, /reset\n"
-    "Context: /new, /clear, /compact, /context, /cost\n"
-    "Advanced: /doctor, /permissions, /plugins, /model, "
-    "/calls, /profile, /jobs show <job-id>, /paste\n"
-    "Use / to browse commands."
+    build_operator_help_text(
+        core="/status, /approvals, /jobs, /skills, /mcp, /reset",
+        context="/new, /clear, /compact, /context, /cost",
+        advanced="/doctor, /permissions, /plugins, /model, /calls, /profile, /jobs show <job-id>, /paste",
+        footer="Use / to browse commands.",
+    )
 )
 
 

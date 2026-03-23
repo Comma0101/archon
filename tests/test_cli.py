@@ -283,7 +283,7 @@ class TestCliCommands:
 
     def test_slash_command_descriptions_group_shell_controls(self):
         descriptions = dict(_SLASH_COMMANDS)
-        assert descriptions["/status"] == "Shell: current status"
+        assert descriptions["/status"] == "Shell: inspect session state"
         assert descriptions["/new"] == "Shell: fresh chat context"
         assert descriptions["/skills"] == "Shell: skills"
         assert descriptions["/plugins"] == "Shell: plugins"
@@ -292,10 +292,10 @@ class TestCliCommands:
 
     def test_slash_command_descriptions_include_terminal_approval_controls(self):
         descriptions = dict(_SLASH_COMMANDS)
-        assert descriptions["/approvals"] == "Shell: approvals status/on/off"
-        assert descriptions["/approve"] == "Shell: approve pending request"
+        assert descriptions["/approvals"] == "Shell: inspect approval state"
+        assert descriptions["/approve"] == "Shell: replay pending request"
         assert descriptions["/deny"] == "Shell: deny pending request"
-        assert descriptions["/approve_next"] == "Shell: approve next dangerous action"
+        assert descriptions["/approve_next"] == "Shell: arm one dangerous action"
 
     def test_handle_model_command_shows_current(self):
         agent = SimpleNamespace(
@@ -487,9 +487,9 @@ class TestCliCommands:
         action, msg = _handle_repl_command(SimpleNamespace(), "/help")
 
         assert action == "help"
-        assert "Inspect: /status, /context" in msg
-        assert "Recover: /compact, /new" in msg
-        assert "Approvals: /approvals, /approve, /approve_next, /deny" in msg
+        assert "Inspect state: /status, /context" in msg
+        assert "Reduce pressure: /compact, /new" in msg
+        assert "Handle blocked actions: /approvals, /approve, /approve_next, /deny" in msg
 
     def test_handle_repl_command_approvals_toggle_reports_requested_mode_without_state(self):
         action, msg = _handle_repl_command(SimpleNamespace(), "/approvals on")
@@ -556,7 +556,7 @@ class TestCliCommands:
         action, msg = _handle_repl_command(agent, "/")
         assert action == "help"
         assert "Available commands:" in msg
-        assert "Shell: current status" in msg
+        assert "Shell: inspect session state" in msg
         assert "Shell: skills" in msg
         assert "Shell: plugins" in msg
         assert "Model: current or set provider/model" in msg
@@ -3061,6 +3061,36 @@ class _ReplayLeakAgent:
         return None
 
 
+class _DangerousCompactAgent(_DangerousActionAgent):
+    def __init__(self, command_by_message):
+        super().__init__(command_by_message)
+        self.config.profiles = {"default": ProfileConfig()}
+        self.policy_profile = "default"
+        self.history = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]
+        self._pending_compactions = []
+        self.last_input_tokens = 0
+        self.last_output_tokens = 0
+
+    def compact_context(self):
+        compacted_messages = len(self.history)
+        self.history = []
+        self._pending_compactions = [
+            {
+                "path": "compactions/sessions/history-manual.md",
+                "layer": "session",
+                "summary": "user: hello",
+            }
+        ]
+        return {
+            "compacted_messages": compacted_messages,
+            "path": "compactions/sessions/history-manual.md",
+            "summary": "user: hello",
+        }
+
+
 def _run_chat_session(agent, inputs):
     outputs = []
     input_iter = iter(inputs)
@@ -3663,7 +3693,43 @@ class TestCliPendingApprovalInteractiveChat:
             "Approvals: dangerous_mode=off | pending_request=rm second.txt | allow_once_remaining=0 | "
             "replay=/approve | allow_once=/approve_next | deny=/deny"
         ) in outputs
-        assert agent.run_calls == ["first", "second"]
+
+    def test_chat_operator_journey_keeps_state_transitions_coherent(self):
+        agent = _DangerousCompactAgent({"danger": "rm important.txt"})
+
+        outputs = self._plain_outputs(
+            _run_local_command_session(
+                agent,
+                ["danger", "/approvals", "/approve", "/status", "/compact", "/context", "quit"],
+            )
+        )
+
+        blocked = next(text for text in outputs if "approval required" in text.lower())
+        assert "pending_request=rm important.txt" in blocked
+        assert "replay=/approve" in blocked
+
+        approvals = next(
+            text
+            for text in outputs
+            if text.startswith("Approvals: dangerous_mode=off | pending_request=rm important.txt")
+        )
+        assert "allow_once_remaining=0" in approvals
+
+        replay = next(text for text in outputs if text.startswith("Approval: result=approved_replaying"))
+        assert "replayed_request=rm important.txt" in replay
+        assert "pending_request=none" in replay
+
+        status = next(text for text in outputs if text.startswith("Status: "))
+        assert "approval_pending=" not in status
+
+        compact = next(text for text in outputs if text.startswith("Compact: "))
+        assert "pending_compactions=1" in compact
+        assert "next_turn=uses_compacted_context" in compact
+
+        context = next(text for text in outputs if text.startswith("Context: "))
+        assert "history_messages=0" in context
+        assert "pending_compactions=1" in context
+        assert agent.run_calls == ["danger", "danger"]
 
     def test_local_control_commands_do_not_mutate_agent_history(self):
         agent = _LocalCommandAgent()

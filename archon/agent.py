@@ -935,9 +935,9 @@ def _print_tool_call(name: str, args: dict, prefix: str = "", activity_feed=None
         _emit_tool_trace_line(f"{pfx}> {name}", activity_feed=activity_feed, ansi=ANSI_TOOL_CALL)
 
 
-def _print_tool_result(result: str, prefix: str = "", activity_feed=None):
+def _print_tool_result(tool_name: str, result: str, prefix: str = "", activity_feed=None):
     """Print compact tool result to stderr or the terminal activity feed."""
-    lines = result.splitlines()
+    lines = _format_tool_result_lines_for_display(tool_name, result)
     pfx = f"{prefix} " if prefix else ""
     if not lines:
         return
@@ -949,6 +949,33 @@ def _print_tool_result(result: str, prefix: str = "", activity_feed=None):
             activity_feed=activity_feed,
             ansi=ANSI_TOOL_RESULT_META,
         )
+
+
+def _format_tool_result_lines_for_display(tool_name: str, result_text: str) -> list[str]:
+    name = str(tool_name or "").strip().lower()
+    if name == "shell":
+        return _format_shell_result_lines_for_display(result_text)
+    return (result_text or "").splitlines()
+
+
+def _format_shell_result_lines_for_display(result_text: str) -> list[str]:
+    body, exit_code = _split_shell_exit_code(result_text)
+    body_lines = body.splitlines()
+    first_output = body_lines[0] if body_lines else "(no output)"
+    lowered = str(result_text or "").lower()
+    if "rejected by safety gate" in lowered or lowered.startswith("forbidden:"):
+        state = "blocked"
+    elif str(body or "").startswith("Error:") or (exit_code is not None and exit_code != 0):
+        state = "error"
+    else:
+        state = "ok"
+    summary = f"result={state}"
+    if exit_code is not None:
+        summary += f" | exit_code={exit_code}"
+    summary += f" | output={first_output}"
+    if len(body_lines) <= 1:
+        return [summary]
+    return [summary, f"... ({len(body_lines) - 1} more lines)"]
 
 
 def _is_assistant_tool_use_message(message: object) -> bool:
