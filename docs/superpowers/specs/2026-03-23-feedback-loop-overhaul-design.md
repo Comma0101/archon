@@ -45,13 +45,14 @@ Tool handlers today are isolated closures that return a string. They have no out
 @dataclass
 class ToolContext:
     tool_name: str
+    session_id: str                    # ties events to the originating agent session
     emit: Callable[[UXEvent], None]    # emit mid-execution events
-    meta: dict[str, Any]               # structured metadata (handler writes, caller reads)
+    meta: dict[str, Any]              # structured metadata (handler writes, caller reads)
 ```
 
 **How it flows:**
 
-1. `ToolRegistry.execute()` creates `ToolContext(tool_name=name, emit=self._emit_ux_event, meta={})`
+1. `ToolRegistry.execute()` creates `ToolContext(tool_name=name, session_id=self._session_id, emit=self._emit_ux_event, meta={})`
 2. If the handler's signature accepts `_ctx`, pass it. Otherwise, don't.
 3. Handler optionally calls `_ctx.emit(tool_running(...))` during execution.
 4. Handler optionally writes to `_ctx.meta` (e.g., `_ctx.meta["exit_code"] = rc`).
@@ -71,6 +72,16 @@ class ToolContext:
 | All others | No (initially) | No | No — fallback to return-string parsing |
 
 **Why `_ctx` and not a global or closure capture**: The handler closures already close over `registry`, so they _could_ access an emitter via `registry`. But that creates invisible coupling. An explicit `_ctx` parameter is inspectable, testable, and grep-able. It also makes clear which handlers have opted in.
+
+### Event routing to the correct surface session
+
+Every `UXEvent` carries a `session_id` field that identifies the originating agent session. This is the same session ID the Agent already tracks internally.
+
+**CLI**: Only one agent session runs at a time. The CLI renderer ignores `session_id` — all events go to the single terminal. No change needed.
+
+**Telegram**: The adapter maintains one Agent instance per `chat_id` (existing design). Each Agent's `session_id` is unique. When a UXEvent arrives via the hook bus, the Telegram adapter matches `event.session_id` to the Agent instance for the correct `chat_id` and renders to that chat only. Events with an unknown `session_id` are dropped.
+
+**Implementation**: The current Telegram adapter broadcasts UXEvents to all chats via a generic path (`telegram.py:1229`). This must change to a lookup: `agent_by_session_id[event.session_id].chat_id`. The mapping is built when the adapter creates an Agent for a chat — it registers `(session_id -> chat_id)` at that point. This is a Slice 1 requirement since all new events flow through this path.
 
 ### Detecting blocked actions
 
@@ -110,6 +121,8 @@ Every tool execution moves through exactly one of these states:
 ## UXEvent Additions
 
 ### New event kinds
+
+All new event kinds carry `session_id` for routing (see "Event routing" above). Omitted from examples below for brevity.
 
 **`tool_running`** — incremental progress or heartbeat
 ```python
@@ -213,6 +226,20 @@ Both renderers call shared functions for:
 
 Renderers are format-and-emit only — ~50 lines each.
 
+### CLI stderr concurrency
+
+The current spinner writes to stderr from a background thread (`cli_ui.py:36`), while the terminal feed also writes redraw control sequences to stderr (`terminal_feed.py:38`). Adding streaming shell output lines introduces a third writer. Without coordination, output will garble.
+
+**Solution**: Introduce a single `stderr_lock` (threading.Lock) shared by the spinner, terminal feed, and the new CLI renderer. All stderr writes acquire the lock before writing. The lock is coarse-grained (one lock for all stderr) — fine-grained locking would add complexity for no benefit given that writes are fast and infrequent.
+
+**Specifically**:
+- Spinner `_run()` loop: acquire lock before writing frame, release after
+- Terminal feed `emit()`: acquire lock before writing, release after
+- CLI renderer event output: acquire lock before writing, release after
+- The lock is created once and passed to all three components at setup time
+
+This is a Slice 1 requirement — even the `tool_end` summary lines need safe stderr access.
+
 ## Operator Journeys
 
 ### Shell — fast (`ls -la`)
@@ -306,7 +333,7 @@ Archon: System updated. 3 packages upgraded.
 22. Approval flow unchanged — `tool_blocked` is visibility, not mechanism
 23. Permission modes (`confirm_all`, `accept_reads`, `auto`) unchanged
 24. Safety classification logic untouched
-25. Existing tests pass without modification
+25. Existing behavior stays correct outside intentionally changed surfaces. Tests that assert exact UX trace strings (e.g., `test_agent.py` tool-trace assertions) may need updates to match the new event format — this is expected and acceptable. The non-regression target is behavioral correctness, not string-level test stability.
 
 ### Testability
 26. New event kinds covered by unit tests
@@ -316,17 +343,23 @@ Archon: System updated. 3 packages upgraded.
 
 ## Rollout Order
 
-### Slice 1: Structured events + enriched `tool_end`
+### Slice 1: Structured events + enriched `tool_end` + ToolContext plumbing
 
-Add new `UXEvent` kinds. Add structured fields to `tool_start`/`tool_end`. Add summary generation per tool type. Wire enrichment into `ToolRegistry.execute()`. Both renderers emit summaries.
+**Infrastructure**: Add `ToolContext` dataclass. Add `_ctx` injection to `ToolRegistry.execute()` (signature inspection, create context, pass if accepted). Add new `UXEvent` kinds (`tool_running`, `tool_blocked`, `tool_diff`). Add `session_id` to all events. Add `build_tool_summary()`. Wire enriched `tool_end` emission. Add both surface renderers (CLI + Telegram). Add session-scoped event routing in Telegram adapter.
 
-Tools stay untouched. Shell still buffered. No diffs. No streaming.
+**Handler changes (minimal, metadata-only)**: `read_file`, `write_file`, `grep`, `glob` accept `_ctx` and write metadata (`path`, `line_count`, etc.) — no behavioral change, just structured reporting. `shell` and `edit_file` accept `_ctx` and write `_ctx.meta["blocked"]` when the confirmer rejects — enabling `tool_blocked` events. Shell execution stays buffered (`subprocess.run`). No diffs yet. No streaming.
+
+**What does NOT change**: Shell is still `subprocess.run(capture_output=True)`. `edit_file` does not compute diffs. No mid-execution `_ctx.emit()` calls. Model-facing return strings unchanged. Approval mechanism unchanged.
 
 **Operator sees**: `✓ shell: exit 0 (14 lines)` instead of spinner-then-silence. `⚠ blocked: ...` instead of model saying "rejected by safety gate."
 
 ### Slice 2: Shell streaming
 
 Replace `subprocess.run(capture_output=True)` with `Popen` + line-by-line reads. Emit `tool_running(output_line)` per line. Add output collapse. Shell streams from start; other tools get heartbeat after 2s.
+
+**Stdout/stderr handling**: Use `Popen(stdout=PIPE, stderr=STDOUT)` to merge stderr into stdout. This means the operator sees lines in the order the process writes them (natural order). The model receives the same merged output — identical to the current behavior where `subprocess.run` captures both and concatenates them (`result.stdout + result.stderr`). The only difference is that the current implementation appends stderr _after_ stdout, while the merged-stream approach interleaves them in real time. This is a strict improvement — interleaved order is what the process actually produced.
+
+**Exit code**: Still appended to the end of the model-facing string as `[exit_code=N]`, same as today.
 
 **Depends on**: Slice 1 (event infrastructure + renderers).
 
@@ -353,7 +386,7 @@ Slice 4 depends on both Slice 2 and Slice 3 — it polishes Telegram rendering f
 
 ## Risks and What to Avoid
 
-**Shell Popen complexity**: Use `selectors` or threading to read stdout/stderr concurrently. Don't use `communicate()`. Test with: no output, mixed stdout/stderr, timeout, rapid output.
+**Shell Popen complexity**: Use `Popen(stderr=STDOUT)` to merge streams — avoids the need for `selectors` or threading to read two pipes. Don't use `communicate()` (buffers everything). Test with: no output, mixed stdout/stderr, timeout, rapid output, partial lines (no trailing newline).
 
 **Telegram rate limits**: Never send per-line. 3s batching window. 500 lines in 1 second = one message, not 500.
 
