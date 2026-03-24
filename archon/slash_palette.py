@@ -164,7 +164,9 @@ def read_interactive_input(
                 return None
 
         hook_set(_startup_hook)
-        return fallback_read_fn(""), False
+        output_stream.write("\r\033[2K")
+        output_stream.flush()
+        return fallback_read_fn(prompt), False
 
     try:
         return first_text + fallback_read_fn(""), False

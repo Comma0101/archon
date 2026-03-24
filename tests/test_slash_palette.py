@@ -228,6 +228,37 @@ def test_read_interactive_input_does_not_force_redisplay_for_first_character(mon
     assert readline.redisplay_calls == 0
 
 
+def test_read_interactive_input_restores_prompt_ownership_to_readline(monkeypatch):
+    readline = _FakeReadline()
+    output = io.StringIO()
+    fallback_prompts = []
+
+    monkeypatch.setattr("archon.slash_palette.termios.tcgetattr", lambda _fd: [0])
+    monkeypatch.setattr("archon.slash_palette.termios.tcsetattr", lambda *_args: None)
+    monkeypatch.setattr("archon.slash_palette.tty.setraw", lambda _fd: None)
+    monkeypatch.setattr("archon.slash_palette.os.read", lambda _fd, _n: b"h")
+
+    def _fallback_read(prompt):
+        fallback_prompts.append(prompt)
+        assert callable(readline._startup_hook)
+        readline._startup_hook()
+        return "hello"
+
+    result, used_palette = read_interactive_input(
+        prompt="\x01\033[93;1m\x02you>\x01\033[0m\x02 ",
+        fallback_read_fn=_fallback_read,
+        readline_module=readline,
+        slash_commands=build_slash_commands(),
+        slash_subvalues=build_slash_subvalues(MODEL_CATALOG, _config()),
+        input_stream=_FakeInputStream(),
+        output_stream=output,
+    )
+
+    assert (result, used_palette) == ("hello", False)
+    assert fallback_prompts == ["\x01\033[93;1m\x02you>\x01\033[0m\x02 "]
+    assert readline.inserted == ["h"]
+
+
 def test_run_live_slash_palette_clears_visible_query_when_backspacing_from_root(monkeypatch):
     items = build_palette_items(
         build_slash_commands(),
