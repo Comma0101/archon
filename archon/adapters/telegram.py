@@ -66,7 +66,7 @@ from archon.ux.operator_messages import (
 )
 from archon.safety import Level
 from archon.ux.events import ActivityEvent, UXEvent
-from archon.ux.telegram_renderer import OutputBatchCollector, TelegramRenderer
+from archon.ux.telegram_renderer import LiveReplyEditor, OutputBatchCollector, TelegramRenderer
 
 if TYPE_CHECKING:
     from archon.agent import Agent
@@ -756,6 +756,7 @@ class TelegramAdapter:
         history_user_text: str,
     ) -> None:
         agent = None
+        response_sent = False
         try:
             agent = self._get_or_create_chat_agent(chat_id)
 
@@ -777,9 +778,14 @@ class TelegramAdapter:
                     "blocked_approval_id": None,
                     "route_progress_turn_id": None,
                 }
-            response = agent.run(body)
+            streamed_response, response_sent = self._stream_final_reply(chat_id, body, agent)
+            if streamed_response is None:
+                response = agent.run(body)
+            else:
+                response = streamed_response
         except Exception as e:
             response = f"Error: {type(e).__name__}: {e}"
+            response_sent = False
             turn_id = getattr(agent, "last_turn_id", "") if agent is not None else ""
             turn_info = f" turn={turn_id}" if turn_id else ""
             print(f"[telegram] Agent error for chat {chat_id}{turn_info}: {response}", file=sys.stderr)
@@ -792,8 +798,57 @@ class TelegramAdapter:
             return None
 
         final_text = response or "(empty response)"
-        self._send_text_and_record(chat_id, history_user_text, final_text)
+        if response_sent:
+            self._record_exchange(chat_id, history_user_text, final_text)
+            self._emit_activity(f"replied to {chat_id}: {self._preview_text(final_text)}")
+        else:
+            self._send_text_and_record(chat_id, history_user_text, final_text)
         return final_text
+
+    def _stream_final_reply(self, chat_id: int, body: str, agent) -> tuple[str | None, bool]:
+        run_stream = getattr(agent, "run_stream", None)
+        if not callable(run_stream):
+            return None, False
+
+        editor = LiveReplyEditor(
+            send_fn=lambda text: self._bot.send_message(
+                chat_id,
+                text,
+                timeout=15,
+                disable_web_page_preview=True,
+            ),
+            edit_fn=lambda message_id, text: self._bot.edit_message_text(
+                chat_id,
+                message_id,
+                text,
+                timeout=10,
+                disable_web_page_preview=True,
+            ),
+            fallback_send_fn=lambda text: self._send_text(chat_id, text),
+            message_limit=MAX_TELEGRAM_MESSAGE_LEN,
+        )
+        response_parts: list[str] = []
+        saw_chunk = False
+
+        for chunk in run_stream(body):
+            text_chunk = str(chunk or "")
+            if not text_chunk:
+                continue
+            saw_chunk = True
+            response_parts.append(text_chunk)
+            with self._state_lock:
+                current_ctx = self._current_request_ctx.get(chat_id) or {}
+                blocked_approval_id = str(current_ctx.get("blocked_approval_id") or "")
+            if blocked_approval_id:
+                continue
+            editor.observe("".join(response_parts))
+
+        if not saw_chunk:
+            return None, False
+
+        final_text = "".join(response_parts) or "(empty response)"
+        delivered_live = editor.finalize(final_text)
+        return final_text, delivered_live
 
     def _send_voice_reply_audio(self, chat_id: int, reply_text: str) -> None:
         text = str(reply_text or "").strip()
@@ -1371,13 +1426,16 @@ class TelegramAdapter:
     def _send_text(self, chat_id: int, text: str) -> None:
         self._bot.send_text(chat_id, text, timeout=15, limit=MAX_TELEGRAM_MESSAGE_LEN)
 
-    def _send_text_and_record(self, chat_id: int, user_text: str, response_text: str) -> None:
-        self._send_text(chat_id, response_text)
-        self._emit_activity(f"replied to {chat_id}: {self._preview_text(response_text)}")
+    def _record_exchange(self, chat_id: int, user_text: str, response_text: str) -> None:
         try:
             save_exchange(self._history_session_id(chat_id), user_text, response_text)
         except Exception:
             pass
+
+    def _send_text_and_record(self, chat_id: int, user_text: str, response_text: str) -> None:
+        self._send_text(chat_id, response_text)
+        self._emit_activity(f"replied to {chat_id}: {self._preview_text(response_text)}")
+        self._record_exchange(chat_id, user_text, response_text)
 
     def _emit_activity(self, message: str) -> None:
         sink = self._activity_sink

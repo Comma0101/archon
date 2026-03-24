@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import time
+import queue
+import threading
 from typing import TYPE_CHECKING, Callable, Generator
 
 from archon.control.policy import evaluate_mcp_policy, evaluate_tool_policy
@@ -58,6 +60,39 @@ def _finalize_without_tools(
     text = response.text or fallback_text
     agent.history.append(agent._make_assistant_msg(response))
     return text
+
+
+def _forward_stream_step(
+    llm_stream_step: Callable[[str, Callable[[str], None]], LLMResponse | None],
+    iter_system_prompt: str,
+    collected_text: list[str],
+) -> Generator[str, None, LLMResponse | None]:
+    mailbox: queue.Queue[tuple[str, object]] = queue.Queue()
+
+    def _on_text_delta(text: str) -> None:
+        mailbox.put(("delta", str(text or "")))
+
+    def _runner() -> None:
+        try:
+            response = llm_stream_step(iter_system_prompt, _on_text_delta)
+            mailbox.put(("done", response))
+        except Exception as exc:
+            mailbox.put(("error", exc))
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+
+    while True:
+        kind, payload = mailbox.get()
+        if kind == "delta":
+            text = str(payload or "")
+            if text:
+                collected_text.append(text)
+                yield text
+            continue
+        if kind == "done":
+            return payload if isinstance(payload, LLMResponse) or payload is None else None
+        raise payload  # type: ignore[misc]
 
 
 def execute_turn(
@@ -356,7 +391,7 @@ def execute_turn_stream(
     active_profile: str,
     log_prefix: str,
     turn_system_prompt: str,
-    llm_stream_step: Callable[[str], tuple[list[str], LLMResponse | None]],
+    llm_stream_step: Callable[[str, Callable[[str], None]], LLMResponse | None],
     llm_step_no_tools: Callable[[str], LLMResponse] | None = None,
 ) -> Generator[str, None, None]:
     """Execute a single streaming assistant turn.
@@ -411,7 +446,12 @@ def execute_turn_stream(
         if agent.on_thinking:
             agent.on_thinking()
 
-        collected_text, response = llm_stream_step(iter_system_prompt)
+        collected_text: list[str] = []
+        response = yield from _forward_stream_step(
+            llm_stream_step,
+            iter_system_prompt,
+            collected_text,
+        )
         if response is None:
             yield "[Stream ended without response]"
             return
@@ -429,12 +469,8 @@ def execute_turn_stream(
 
         if not response.tool_calls:
             agent.history.append(agent._make_assistant_msg(response))
-            if collected_text:
-                yield from collected_text
-            elif response.text is not None:
-                yield response.text
-            else:
-                yield "(empty response)"
+            if not collected_text:
+                yield response.text or "(empty response)"
             return
 
         agent.history.append(agent._make_assistant_msg(response))

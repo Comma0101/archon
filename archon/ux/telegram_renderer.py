@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable
 
+from archon.adapters.telegram_client import DEFAULT_TELEGRAM_MESSAGE_LIMIT
 from archon.ux.events import UXEvent
 from archon.ux.renderers import collapse_output_lines, truncate_diff_lines
 
@@ -61,6 +63,96 @@ class OutputBatchCollector:
         collapsed = collapse_output_lines(lines)
         body = "\n".join(collapsed)
         self._flush_fn(f"```\n{body}\n```")
+
+
+class LiveReplyEditor:
+    """Manage one editable Telegram reply for streamed assistant text."""
+
+    def __init__(
+        self,
+        *,
+        send_fn: Callable[[str], dict],
+        edit_fn: Callable[[int, str], None],
+        fallback_send_fn: Callable[[str], None],
+        time_fn: Callable[[], float] = time.monotonic,
+        throttle_s: float = 0.75,
+        min_start_chars: int = 24,
+        start_timeout_s: float = 0.75,
+        message_limit: int = DEFAULT_TELEGRAM_MESSAGE_LIMIT,
+    ) -> None:
+        self._send_fn = send_fn
+        self._edit_fn = edit_fn
+        self._fallback_send_fn = fallback_send_fn
+        self._time_fn = time_fn
+        self._throttle_s = max(0.0, float(throttle_s))
+        self._min_start_chars = max(1, int(min_start_chars))
+        self._start_timeout_s = max(0.0, float(start_timeout_s))
+        self._message_limit = max(1, int(message_limit))
+        self._message_id: int | None = None
+        self._first_chunk_at: float | None = None
+        self._last_sent_text = ""
+        self._last_edit_at = 0.0
+        self._fallback_mode = False
+
+    def observe(self, text: str) -> None:
+        current = str(text or "")
+        if not current or self._fallback_mode or len(current) > self._message_limit:
+            return
+        now = self._time_fn()
+        if self._first_chunk_at is None:
+            self._first_chunk_at = now
+        if self._message_id is None:
+            if len(current) < self._min_start_chars and (now - self._first_chunk_at) < self._start_timeout_s:
+                return
+            try:
+                result = self._send_fn(current)
+            except Exception:
+                self._fallback_mode = True
+                return
+            message_id = result.get("message_id")
+            if not isinstance(message_id, int):
+                self._fallback_mode = True
+                return
+            self._message_id = message_id
+            self._last_sent_text = current
+            self._last_edit_at = now
+            return
+        if current == self._last_sent_text or (now - self._last_edit_at) < self._throttle_s:
+            return
+        self._edit_or_fallback(current, now)
+
+    def finalize(self, text: str) -> bool:
+        final_text = str(text or "")
+        if not final_text:
+            return False
+        if self._fallback_mode or len(final_text) > self._message_limit:
+            if final_text != self._last_sent_text:
+                self._fallback_send_fn(final_text)
+                self._last_sent_text = final_text
+            return True
+        if self._message_id is None:
+            return False
+        if final_text == self._last_sent_text:
+            return True
+        self._edit_or_fallback(final_text, self._time_fn())
+        return True
+
+    def _edit_or_fallback(self, text: str, now: float) -> None:
+        if self._message_id is None:
+            self._fallback_mode = True
+            if text != self._last_sent_text:
+                self._fallback_send_fn(text)
+                self._last_sent_text = text
+            return
+        try:
+            self._edit_fn(self._message_id, text)
+            self._last_sent_text = text
+            self._last_edit_at = now
+        except Exception:
+            self._fallback_mode = True
+            if text != self._last_sent_text:
+                self._fallback_send_fn(text)
+                self._last_sent_text = text
 
 
 class TelegramRenderer:

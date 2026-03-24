@@ -84,6 +84,35 @@ def _format_chat_response(text: str) -> str:
     return "\n".join(rendered)
 
 
+def _begin_streamed_chat_response() -> str:
+    """Open a streamed assistant reply with the normal terminal prefix."""
+    return f"\n{ANSI_PROMPT_ARCHON}archon>{ANSI_RESET} "
+
+
+def _format_streamed_chat_chunk(text: str, *, at_line_start: bool) -> tuple[str, bool]:
+    """Format one streamed text chunk, indenting continuation lines like the buffered path."""
+    chunk = str(text or "")
+    if not chunk:
+        return "", at_line_start
+    indent = " " * 8
+    rendered: list[str] = []
+    for ch in chunk:
+        if at_line_start and ch != "\n":
+            rendered.append(indent)
+            at_line_start = False
+        rendered.append(ch)
+        if ch == "\n":
+            at_line_start = True
+    return "".join(rendered), at_line_start
+
+
+def _end_streamed_chat_response(*, at_line_start: bool) -> str:
+    """Close a streamed assistant reply with one clean trailing newline."""
+    if at_line_start:
+        return ""
+    return "\n"
+
+
 def _format_terminal_approval_required(command_preview: str) -> str:
     """Format a compact shell-local approval prompt for blocked dangerous actions."""
     preview = (command_preview or "").strip() or "(unknown command)"

@@ -5,7 +5,12 @@ from __future__ import annotations
 import threading
 
 from archon.activity import scan_and_store as _activity_scan_and_store
-from archon.cli_ui import _format_terminal_approval_required
+from archon.cli_ui import (
+    _begin_streamed_chat_response,
+    _end_streamed_chat_response,
+    _format_streamed_chat_chunk,
+    _format_terminal_approval_required,
+)
 from archon.cli_repl_commands import _maybe_auto_activate_skill
 from archon.config import ACTIVITY_DIR
 from archon.control.contracts import HookEvent
@@ -61,10 +66,15 @@ def chat_cmd(
     format_turn_stats_fn,
     make_readline_prompt_fn,
     spinner_cls,
+    begin_streamed_chat_response_fn=None,
+    format_streamed_chat_chunk_fn=None,
+    end_streamed_chat_response_fn=None,
     ansi_prompt_user: str,
     ansi_error: str,
     ansi_reset: str,
     click_echo_fn,
+    stream_write_fn=None,
+    stream_flush_fn=None,
     input_fn,
     readline_module,
     time_time_fn,
@@ -73,6 +83,13 @@ def chat_cmd(
     read_interactive_input_fn=None,
 ) -> None:
     """Interactive chat REPL body."""
+    if begin_streamed_chat_response_fn is None:
+        begin_streamed_chat_response_fn = _begin_streamed_chat_response
+    if format_streamed_chat_chunk_fn is None:
+        format_streamed_chat_chunk_fn = _format_streamed_chat_chunk
+    if end_streamed_chat_response_fn is None:
+        end_streamed_chat_response_fn = _end_streamed_chat_response
+
     agent = make_agent_fn()
     if refresh_slash_subvalues_fn is not None:
         refresh_slash_subvalues_fn(getattr(agent, "config", None))
@@ -547,7 +564,40 @@ def chat_cmd(
                 pre_in = agent.total_input_tokens
                 pre_out = agent.total_output_tokens
                 t0 = time_time_fn()
-                response = agent.run(user_input)
+                response = ""
+                streamed_live = False
+                stream_line_start = False
+                response_parts: list[str] = []
+                use_streaming = (
+                    callable(stream_write_fn)
+                    and callable(stream_flush_fn)
+                    and callable(begin_streamed_chat_response_fn)
+                    and callable(format_streamed_chat_chunk_fn)
+                    and callable(end_streamed_chat_response_fn)
+                    and callable(getattr(agent, "run_stream", None))
+                )
+                if use_streaming:
+                    for chunk in agent.run_stream(user_input):
+                        text_chunk = str(chunk or "")
+                        response_parts.append(text_chunk)
+                        if approval_state.get("blocked_pending_id"):
+                            continue
+                        if not streamed_live:
+                            spinner.stop()
+                            stream_write_fn(begin_streamed_chat_response_fn())
+                            stream_flush_fn()
+                            streamed_live = True
+                            stream_line_start = False
+                        rendered_chunk, stream_line_start = format_streamed_chat_chunk_fn(
+                            text_chunk,
+                            at_line_start=stream_line_start,
+                        )
+                        if rendered_chunk:
+                            stream_write_fn(rendered_chunk)
+                            stream_flush_fn()
+                    response = "".join(response_parts)
+                else:
+                    response = agent.run(user_input)
                 elapsed = time_time_fn() - t0
                 spinner.stop()
                 blocked_pending_id = str(approval_state.get("blocked_pending_id") or "")
@@ -570,7 +620,13 @@ def chat_cmd(
                 if approval_output is not None:
                     click_echo_fn(approval_output)
                 else:
-                    click_echo_fn(format_chat_response_fn(response or ""))
+                    if streamed_live:
+                        suffix = end_streamed_chat_response_fn(at_line_start=stream_line_start)
+                        if suffix:
+                            stream_write_fn(suffix)
+                            stream_flush_fn()
+                    else:
+                        click_echo_fn(format_chat_response_fn(response or ""))
                 click_echo_fn(
                     format_turn_stats_fn(
                         elapsed,

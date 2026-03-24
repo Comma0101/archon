@@ -3,7 +3,7 @@
 import time
 
 from archon.ux import events
-from archon.ux.telegram_renderer import OutputBatchCollector, TelegramRenderer
+from archon.ux.telegram_renderer import LiveReplyEditor, OutputBatchCollector, TelegramRenderer
 
 
 def test_render_tool_end_completed():
@@ -90,3 +90,39 @@ def test_batch_collector_collapses_long_output():
         collector.add_line(f"line {i}")
     collector.flush()
     assert "... (" in sent[0]
+
+
+def test_live_reply_editor_edits_existing_message():
+    sent = []
+    edits = []
+    editor = LiveReplyEditor(
+        send_fn=lambda text: sent.append(text) or {"message_id": 77},
+        edit_fn=lambda message_id, text: edits.append((message_id, text)),
+        fallback_send_fn=lambda text: sent.append(f"fallback:{text}"),
+        throttle_s=0.0,
+        min_start_chars=1,
+    )
+
+    editor.observe("Hello")
+    editor.observe("Hello world")
+
+    assert sent == ["Hello"]
+    assert edits == [(77, "Hello world")]
+    assert editor.finalize("Hello world") is True
+
+
+def test_live_reply_editor_falls_back_after_edit_failure():
+    sent = []
+    editor = LiveReplyEditor(
+        send_fn=lambda text: sent.append(text) or {"message_id": 88},
+        edit_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("edit failed")),
+        fallback_send_fn=lambda text: sent.append(f"fallback:{text}"),
+        throttle_s=0.0,
+        min_start_chars=1,
+    )
+
+    editor.observe("Hello")
+    editor.observe("Hello world")
+
+    assert sent == ["Hello", "fallback:Hello world"]
+    assert editor.finalize("Hello world") is True

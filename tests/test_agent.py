@@ -14,13 +14,13 @@ import archon.prompt as prompt_module
 from archon.research import store as research_store
 from archon.agent import (
     Agent,
-    _chat_stream_collect_with_retry,
     _chat_with_retry,
     _estimate_history_chars,
     _print_tool_call,
     _print_tool_result,
 )
 from archon.llm import LLMResponse, ToolCall
+from archon.streaming import stream_chat_with_retry
 from archon.tools import ToolRegistry
 from archon.config import Config, MCPServerConfig, ProfileConfig
 from archon.execution.contracts import SuspensionRequest
@@ -569,14 +569,24 @@ def capture_stream_executor_trace(
             active_profile=active_profile,
             log_prefix=log_prefix,
             turn_system_prompt=turn_system_prompt,
-            llm_stream_step=lambda iter_system_prompt: _chat_stream_collect_with_retry(
-                agent.llm,
-                iter_system_prompt,
-                agent.history,
-                agent.tools.get_schemas(),
+            llm_stream_step=lambda iter_system_prompt, on_text_delta: stream_chat_with_retry(
+                llm=agent.llm,
+                system_prompt=iter_system_prompt,
+                history=agent.history,
+                tools=agent.tools.get_schemas(),
+                on_text_delta=on_text_delta,
+                on_fallback_chat=lambda: _chat_with_retry(
+                    agent.llm,
+                    iter_system_prompt,
+                    agent.history,
+                    agent.tools.get_schemas(),
+                    max_attempts=agent.llm_retry_attempts,
+                    request_timeout_sec=agent.llm_request_timeout_sec,
+                ),
+                is_transient_error=agent_module._is_transient_llm_error,
                 max_attempts=agent.llm_retry_attempts,
                 request_timeout_sec=agent.llm_request_timeout_sec,
-            ),
+            ).response,
         )
     )
     history = list(agent.history)
@@ -657,6 +667,19 @@ class TestAgentLoop:
         assert actual["chunks"] == expected["chunks"]
         assert actual["history_roles"] == expected["history_roles"]
         assert actual["tool_results"] == expected["tool_results"]
+
+    def test_run_stream_yields_final_text_when_provider_emits_no_deltas(self):
+        final_resp = LLMResponse(
+            text="buffered final text",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "buffered final text"}],
+            input_tokens=4,
+            output_tokens=3,
+        )
+        agent = make_agent([], stream_chunks=[[final_resp]])
+
+        assert list(agent.run_stream("hello")) == ["buffered final text"]
+        assert [msg["role"] for msg in agent.history] == ["user", "assistant"]
 
     def test_turn_executor_stream_matches_tool_round_trip_run_stream_path(self, monkeypatch):
         tool_resp = LLMResponse(
@@ -2940,6 +2963,82 @@ class TestAgentLoop:
         assert payload["input_tokens"] == 10
         assert payload["output_tokens"] == 5
 
+    def test_run_stream_emits_first_delta_before_final_response_ready(self):
+        first_chunk_seen = threading.Event()
+        first_yielded = threading.Event()
+        allow_finish = threading.Event()
+
+        final_resp = LLMResponse(
+            text="Hello world",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "Hello world"}],
+            input_tokens=10,
+            output_tokens=5,
+        )
+
+        agent = make_agent([], stream_chunks=None)
+
+        def _stream_side_effect(*_args, **_kwargs):
+            yield "Hello"
+            first_chunk_seen.set()
+            assert allow_finish.wait(timeout=1.0)
+            yield " world"
+            yield final_resp
+
+        agent.llm.chat_stream = MagicMock(side_effect=_stream_side_effect)
+        chunks: list[str] = []
+
+        def _consume() -> None:
+            try:
+                for chunk in agent.run_stream("hi"):
+                    chunks.append(chunk)
+                    if chunk == "Hello":
+                        first_yielded.set()
+            finally:
+                allow_finish.set()
+
+        worker = threading.Thread(target=_consume)
+        worker.start()
+        try:
+            assert first_chunk_seen.wait(timeout=1.0)
+            assert first_yielded.wait(timeout=0.2)
+            assert chunks == ["Hello"]
+        finally:
+            allow_finish.set()
+            worker.join(timeout=1.0)
+
+    def test_run_stream_falls_back_to_buffered_final_response_before_first_delta(self):
+        final_resp = LLMResponse(
+            text="buffered fallback",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "buffered fallback"}],
+            input_tokens=7,
+            output_tokens=3,
+        )
+        agent = make_agent([final_resp], stream_chunks=None)
+        agent.llm.chat_stream = MagicMock(side_effect=RuntimeError("stream broke"))
+
+        chunks = list(agent.run_stream("hi"))
+
+        assert chunks == ["buffered fallback"]
+        assert agent.llm.chat.call_count == 1
+        assert [msg["role"] for msg in agent.history] == ["user", "assistant"]
+
+    def test_run_stream_fallback_records_single_assistant_message(self):
+        final_resp = LLMResponse(
+            text="single fallback reply",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "single fallback reply"}],
+            input_tokens=5,
+            output_tokens=2,
+        )
+        agent = make_agent([final_resp], stream_chunks=None)
+        agent.llm.chat_stream = MagicMock(side_effect=RuntimeError("stream broke"))
+
+        assert list(agent.run_stream("hello")) == ["single fallback reply"]
+        assert [msg["role"] for msg in agent.history] == ["user", "assistant"]
+        assert agent.history[-1]["content"] == [{"type": "text", "text": "single fallback reply"}]
+
     def test_run_stream_with_tool_calls(self):
         tool_resp = LLMResponse(
             text=None,
@@ -3590,9 +3689,10 @@ class TestAgentLoop:
         assert llm.chat_stream.call_count == 2
         assert slept
 
-    def test_run_stream_raises_after_primary_retries_exhausted(self, monkeypatch):
+    def test_run_stream_raises_when_stream_and_pre_delta_fallback_both_fail(self, monkeypatch):
         llm = MagicMock()
         llm.chat_stream = MagicMock(side_effect=RuntimeError("503 UNAVAILABLE"))
+        llm.chat = MagicMock(side_effect=RuntimeError("fallback failed"))
         tools = ToolRegistry(archon_source_dir=None)
         config = Config()
         agent = Agent(llm, tools, config)
@@ -3601,9 +3701,10 @@ class TestAgentLoop:
         monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
         monkeypatch.setattr("archon.agent.time.sleep", lambda _secs: None)
 
-        with pytest.raises(RuntimeError, match="503"):
+        with pytest.raises(RuntimeError, match="fallback failed"):
             list(agent.run_stream("hello"))
         assert llm.chat_stream.call_count == 3
+        assert llm.chat.call_count == 1
 
     def test_run_honors_configured_llm_retry_attempts(self, monkeypatch):
         llm = MagicMock()

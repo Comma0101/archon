@@ -43,6 +43,7 @@ from archon.config import Config
 from archon.context_metrics import estimate_tokens_from_chars
 from archon.security.redaction import redact_secret_like_text
 from archon.research import store as research_store
+from archon.streaming import stream_chat_with_retry
 
 
 logger = logging.getLogger(__name__)
@@ -297,14 +298,24 @@ class Agent:
                 active_profile=active_profile,
                 log_prefix=log_prefix,
                 turn_system_prompt=turn_system_prompt,
-                llm_stream_step=lambda iter_system_prompt: _chat_stream_collect_with_retry(
-                    self.llm,
-                    iter_system_prompt,
-                    self.history,
-                    visible_tool_schemas,
+                llm_stream_step=lambda iter_system_prompt, on_text_delta: stream_chat_with_retry(
+                    llm=self.llm,
+                    system_prompt=iter_system_prompt,
+                    history=self.history,
+                    tools=visible_tool_schemas,
+                    on_text_delta=on_text_delta,
+                    on_fallback_chat=lambda: _chat_with_retry(
+                        self.llm,
+                        iter_system_prompt,
+                        self.history,
+                        visible_tool_schemas,
+                        max_attempts=self.llm_retry_attempts,
+                        request_timeout_sec=self.llm_request_timeout_sec,
+                    ),
+                    is_transient_error=_is_transient_llm_error,
                     max_attempts=self.llm_retry_attempts,
                     request_timeout_sec=self.llm_request_timeout_sec,
-                ),
+                ).response,
                 llm_step_no_tools=lambda iter_system_prompt: _chat_with_retry(
                     self.llm,
                     iter_system_prompt,
@@ -1195,27 +1206,27 @@ def _chat_stream_collect_with_retry(
     max_attempts: int = 3,
     request_timeout_sec: float | None = None,
 ) -> tuple[list[str], LLMResponse | None]:
-    """Collect a streaming response with best-effort transient retry.
-
-    This retries only around internal stream collection before any chunks are yielded
-    to the caller, so retries do not duplicate user-visible output.
-    """
-    delays = (0.35, 1.0)
-    def _attempt_stream(active_llm) -> tuple[list[str], LLMResponse | None]:
-        attempt = 0
-        while True:
-            attempt += 1
-            try:
-                return _call_with_timeout(
-                    lambda: _collect_stream_response(active_llm, system_prompt, history, tools),
-                    request_timeout_sec,
-                )
-            except Exception as e:
-                if attempt >= max_attempts or not _is_transient_llm_error(e):
-                    raise
-                time.sleep(delays[min(attempt - 1, len(delays) - 1)])
-
-    return _attempt_stream(llm)
+    """Collect a streaming response into the legacy buffered tuple contract."""
+    collected_text: list[str] = []
+    result = stream_chat_with_retry(
+        llm=llm,
+        system_prompt=system_prompt,
+        history=history,
+        tools=tools,
+        on_text_delta=collected_text.append,
+        on_fallback_chat=lambda: _chat_with_retry(
+            llm,
+            system_prompt,
+            history,
+            tools,
+            max_attempts=max_attempts,
+            request_timeout_sec=request_timeout_sec,
+        ),
+        is_transient_error=_is_transient_llm_error,
+        max_attempts=max_attempts,
+        request_timeout_sec=request_timeout_sec,
+    )
+    return collected_text, result.response
 
 
 def _collect_stream_response(

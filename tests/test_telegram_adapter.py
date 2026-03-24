@@ -49,6 +49,20 @@ class _DangerousAgent:
         self.messages.clear()
 
 
+class _StreamingDangerousAgent(_DangerousAgent):
+    def run(self, text: str) -> str:
+        raise AssertionError(f"telegram chat should use run_stream for dangerous reply: {text}")
+
+    def run_stream(self, text: str):
+        self.messages.append(text)
+        self._turn_no += 1
+        self.last_turn_id = f"t{self._turn_no:03d}"
+        if not self.tools.confirmer("pacman -Q | head", Level.DANGEROUS):
+            yield "Command rejected by safety gate."
+            return
+        yield "dangerous command output"
+
+
 class _JobRouteAgent:
     def __init__(self):
         self.messages = []
@@ -136,6 +150,23 @@ class _SkillAwareAgent:
 
     def reset(self):
         return None
+
+
+class _StreamingTelegramAgent(_TelegramLocalCommandAgent):
+    def __init__(self, chunks: list[str]):
+        super().__init__()
+        self._chunks = list(chunks)
+        self.run_stream_calls = []
+
+    def run(self, text: str) -> str:
+        raise AssertionError(f"telegram chat should use run_stream for final text: {text}")
+
+    def run_stream(self, text: str):
+        self.run_stream_calls.append(text)
+        self.total_input_tokens += 12
+        self.total_output_tokens += 4
+        for chunk in self._chunks:
+            yield chunk
 
 
 def _adapter():
@@ -2176,3 +2207,123 @@ def test_blocked_dangerous_action_without_user_text_uses_state_first_fallback():
     assert "allow_once_effect=arms_one_future_dangerous_action" in sent[0][1]
     assert "state=original_request_missing" in sent[0][1]
     assert adapter._pending_approvals.get(99) is None  # type: ignore[attr-defined]
+
+
+def test_chat_body_streams_final_reply_by_editing_one_message(monkeypatch):
+    agent = _StreamingTelegramAgent(["Hello from telegram stream", " done"])
+    adapter = TelegramAdapter(
+        token="123:abc",
+        allowed_user_ids=[42],
+        agent_factory=lambda: agent,
+        poll_timeout_sec=1,
+    )
+    sent_messages = []
+    edited_messages = []
+    fallback_sends = []
+    saved = []
+
+    monkeypatch.setattr(adapter, "_send_typing", lambda chat_id: None)
+    monkeypatch.setattr(
+        "archon.adapters.telegram.new_session_id",
+        lambda: "20260323-140000",
+    )
+    monkeypatch.setattr(
+        "archon.adapters.telegram.save_exchange",
+        lambda session_id, user_msg, assistant_msg: saved.append((session_id, user_msg, assistant_msg)),
+    )
+    adapter._send_text = lambda chat_id, text: fallback_sends.append((chat_id, text))  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        adapter._bot,
+        "send_message",
+        lambda chat_id, text, **kwargs: sent_messages.append((chat_id, text)) or {"message_id": 701},
+    )
+    monkeypatch.setattr(
+        adapter._bot,
+        "edit_message_text",
+        lambda chat_id, message_id, text, **kwargs: edited_messages.append((chat_id, message_id, text)),
+    )
+
+    adapter._handle_message({"text": "hello", "chat": {"id": 99}, "from": {"id": 42}})
+
+    assert agent.run_stream_calls == ["hello"]
+    assert sent_messages == [(99, "Hello from telegram stream")]
+    assert edited_messages == [(99, 701, "Hello from telegram stream done")]
+    assert fallback_sends == []
+    assert saved == [("tg-99-20260323-140000", "hello", "Hello from telegram stream done")]
+
+
+def test_chat_body_streaming_edit_failure_falls_back_to_plain_send(monkeypatch):
+    agent = _StreamingTelegramAgent(["Hello from telegram stream", " done"])
+    adapter = TelegramAdapter(
+        token="123:abc",
+        allowed_user_ids=[42],
+        agent_factory=lambda: agent,
+        poll_timeout_sec=1,
+    )
+    sent_messages = []
+    fallback_sends = []
+    saved = []
+
+    monkeypatch.setattr(adapter, "_send_typing", lambda chat_id: None)
+    monkeypatch.setattr(
+        "archon.adapters.telegram.new_session_id",
+        lambda: "20260323-140100",
+    )
+    monkeypatch.setattr(
+        "archon.adapters.telegram.save_exchange",
+        lambda session_id, user_msg, assistant_msg: saved.append((session_id, user_msg, assistant_msg)),
+    )
+    adapter._send_text = lambda chat_id, text: fallback_sends.append((chat_id, text))  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        adapter._bot,
+        "send_message",
+        lambda chat_id, text, **kwargs: sent_messages.append((chat_id, text)) or {"message_id": 702},
+    )
+    monkeypatch.setattr(
+        adapter._bot,
+        "edit_message_text",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("edit failed")),
+    )
+
+    adapter._handle_message({"text": "hello", "chat": {"id": 99}, "from": {"id": 42}})
+
+    assert agent.run_stream_calls == ["hello"]
+    assert sent_messages == [(99, "Hello from telegram stream")]
+    assert fallback_sends == [(99, "Hello from telegram stream done")]
+    assert saved == [("tg-99-20260323-140100", "hello", "Hello from telegram stream done")]
+
+
+def test_streaming_blocked_dangerous_action_suppresses_streamed_rejection(monkeypatch):
+    adapter = TelegramAdapter(
+        token="123:abc",
+        allowed_user_ids=[42],
+        agent_factory=lambda: _StreamingDangerousAgent(),
+        poll_timeout_sec=1,
+    )
+    sent = []
+    edits = []
+    fallback_sends = []
+
+    monkeypatch.setattr(adapter, "_send_typing", lambda chat_id: None)
+    monkeypatch.setattr(
+        "archon.adapters.telegram.save_exchange",
+        lambda session_id, user_msg, assistant_msg: None,
+    )
+    adapter._send_text = lambda chat_id, text: fallback_sends.append((chat_id, text))  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        adapter._bot,
+        "send_message",
+        lambda chat_id, text, **kwargs: sent.append((chat_id, text)) or {"message_id": 703},
+    )
+    monkeypatch.setattr(
+        adapter._bot,
+        "edit_message_text",
+        lambda chat_id, message_id, text, **kwargs: edits.append((chat_id, message_id, text)),
+    )
+
+    adapter._handle_message({"text": "check system packages", "chat": {"id": 99}, "from": {"id": 42}})
+
+    assert len(sent) == 1
+    assert "pending_request=pacman -Q | head" in sent[0][1]
+    assert fallback_sends == []
+    assert edits == []
