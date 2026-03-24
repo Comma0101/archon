@@ -20,6 +20,26 @@ class StreamPumpResult:
     emitted_any_text: bool
 
 
+def chat_once_with_timeout(
+    *,
+    llm,
+    system_prompt: str,
+    history: list[dict],
+    tools: list[dict],
+    request_timeout_sec: float | None = None,
+) -> LLMResponse:
+    """Run one buffered chat request with the shared timeout wrapper.
+
+    This is intentionally one-shot. Streaming retries remain in the stream
+    pump; the pre-delta buffered fallback should not introduce a second retry
+    loop of its own.
+    """
+    return _call_with_timeout(
+        lambda: llm.chat(system_prompt, history, tools=tools),
+        request_timeout_sec,
+    )
+
+
 def stream_chat_with_retry(
     *,
     llm,

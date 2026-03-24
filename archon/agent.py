@@ -43,7 +43,7 @@ from archon.config import Config
 from archon.context_metrics import estimate_tokens_from_chars
 from archon.security.redaction import redact_secret_like_text
 from archon.research import store as research_store
-from archon.streaming import stream_chat_with_retry
+from archon.streaming import chat_once_with_timeout, stream_chat_with_retry
 
 
 logger = logging.getLogger(__name__)
@@ -304,12 +304,11 @@ class Agent:
                     history=self.history,
                     tools=visible_tool_schemas,
                     on_text_delta=on_text_delta,
-                    on_fallback_chat=lambda: _chat_with_retry(
-                        self.llm,
-                        iter_system_prompt,
-                        self.history,
-                        visible_tool_schemas,
-                        max_attempts=self.llm_retry_attempts,
+                    on_fallback_chat=lambda: chat_once_with_timeout(
+                        llm=self.llm,
+                        system_prompt=iter_system_prompt,
+                        history=self.history,
+                        tools=visible_tool_schemas,
                         request_timeout_sec=self.llm_request_timeout_sec,
                     ),
                     is_transient_error=_is_transient_llm_error,
@@ -1214,12 +1213,11 @@ def _chat_stream_collect_with_retry(
         history=history,
         tools=tools,
         on_text_delta=collected_text.append,
-        on_fallback_chat=lambda: _chat_with_retry(
-            llm,
-            system_prompt,
-            history,
-            tools,
-            max_attempts=max_attempts,
+        on_fallback_chat=lambda: chat_once_with_timeout(
+            llm=llm,
+            system_prompt=system_prompt,
+            history=history,
+            tools=tools,
             request_timeout_sec=request_timeout_sec,
         ),
         is_transient_error=_is_transient_llm_error,

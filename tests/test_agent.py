@@ -20,7 +20,7 @@ from archon.agent import (
     _print_tool_result,
 )
 from archon.llm import LLMResponse, ToolCall
-from archon.streaming import stream_chat_with_retry
+from archon.streaming import chat_once_with_timeout, stream_chat_with_retry
 from archon.tools import ToolRegistry
 from archon.config import Config, MCPServerConfig, ProfileConfig
 from archon.execution.contracts import SuspensionRequest
@@ -575,12 +575,11 @@ def capture_stream_executor_trace(
                 history=agent.history,
                 tools=agent.tools.get_schemas(),
                 on_text_delta=on_text_delta,
-                on_fallback_chat=lambda: _chat_with_retry(
-                    agent.llm,
-                    iter_system_prompt,
-                    agent.history,
-                    agent.tools.get_schemas(),
-                    max_attempts=agent.llm_retry_attempts,
+                on_fallback_chat=lambda: chat_once_with_timeout(
+                    llm=agent.llm,
+                    system_prompt=iter_system_prompt,
+                    history=agent.history,
+                    tools=agent.tools.get_schemas(),
                     request_timeout_sec=agent.llm_request_timeout_sec,
                 ),
                 is_transient_error=agent_module._is_transient_llm_error,
@@ -3040,20 +3039,12 @@ class TestAgentLoop:
         assert agent.history[-1]["content"] == [{"type": "text", "text": "single fallback reply"}]
 
     def test_run_stream_pre_delta_fallback_calls_chat_once_exactly_once(self):
-        final_resp = LLMResponse(
-            text="fallback reply",
-            tool_calls=[],
-            raw_content=[{"type": "text", "text": "fallback reply"}],
-            input_tokens=7,
-            output_tokens=3,
-        )
         agent = make_agent([], stream_chunks=None)
         agent.llm.chat_stream = MagicMock(side_effect=RuntimeError("stream broke"))
-        agent.llm.chat = MagicMock(side_effect=[RuntimeError("503 UNAVAILABLE"), final_resp])
+        agent.llm.chat = MagicMock(side_effect=RuntimeError("503 UNAVAILABLE"))
 
-        chunks = list(agent.run_stream("hello"))
-
-        assert chunks == ["fallback reply"]
+        with pytest.raises(RuntimeError, match="503 UNAVAILABLE"):
+            list(agent.run_stream("hello"))
         assert agent.llm.chat.call_count == 1
 
     def test_run_stream_with_tool_calls(self):
