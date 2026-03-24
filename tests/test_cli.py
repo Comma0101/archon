@@ -38,6 +38,7 @@ from archon.cli_repl_commands import _maybe_auto_activate_skill
 from archon.control.hooks import HookBus
 from archon.prompt import build_skill_guidance as _build_skill_guidance
 from archon.safety import Level
+from archon.ux import events as ux_events
 from archon.ux.events import ActivityEvent
 
 
@@ -2763,6 +2764,74 @@ class TestCliCommands:
             )
 
         assert "\r\033[K[telegram] received from 99: hello\r\nyou> draft" in stderr.getvalue()
+
+    def test_chat_cmd_renders_tool_ux_event_to_stderr(self):
+        class _Agent:
+            def __init__(self):
+                self.hooks = HookBus()
+                self.config = Config()
+                self.config.llm.model = "test-model"
+                self.total_input_tokens = 0
+                self.total_output_tokens = 0
+                self.log_label = ""
+                self.policy_profile = "default"
+                self.on_thinking = None
+                self.on_tool_call = None
+
+            def run(self, _text):
+                event = ux_events.tool_end(
+                    "read_file",
+                    "read: /etc/hostname (1 lines)",
+                    session_id="sess-1",
+                )
+                self.hooks.emit_kind(
+                    "ux.tool_event",
+                    task_id="t001",
+                    payload={"event": event, "status": "completed"},
+                )
+                self.total_input_tokens += 10
+                self.total_output_tokens += 2
+                return "done"
+
+            def reset(self):
+                return None
+
+        agent = _Agent()
+        inputs = iter(["check hostname", "quit"])
+        session_ids = iter(["sess-1"])
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr):
+            _chat_cmd(
+                make_agent_fn=lambda: agent,
+                make_telegram_adapter_fn=lambda _cfg: None,
+                new_session_id_fn=lambda: next(session_ids),
+                save_exchange_fn=lambda *_args: None,
+                slash_completer_fn=lambda *_args: None,
+                pick_slash_command_fn=lambda: None,
+                is_bracketed_paste_start_fn=lambda _text: False,
+                collect_bracketed_paste_fn=lambda *_args, **_kwargs: "",
+                is_paste_command_fn=lambda _text: False,
+                collect_paste_message_fn=lambda *_args, **_kwargs: "",
+                handle_repl_command_fn=_handle_repl_command,
+                is_model_runtime_error_fn=lambda _err: False,
+                format_session_summary_fn=_format_session_summary,
+                format_chat_response_fn=lambda text: text,
+                format_turn_stats_fn=_format_turn_stats,
+                make_readline_prompt_fn=lambda label, _ansi: f"{label} ",
+                spinner_cls=_FakeSpinner,
+                ansi_prompt_user="",
+                ansi_error="",
+                ansi_reset="",
+                click_echo_fn=lambda *_args, **_kwargs: None,
+                input_fn=lambda _prompt: next(inputs),
+                readline_module=_FakeReadline("draft"),
+                time_time_fn=lambda: 0.0,
+                version="test",
+            )
+
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", stderr.getvalue())
+        assert "✓ read: /etc/hostname (1 lines)" in plain
 
     def test_chat_cmd_auto_activates_skill_from_explicit_request(self):
         class _Agent:

@@ -38,10 +38,11 @@ class _Spinner:
 
     FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
-    def __init__(self):
+    def __init__(self, lock: threading.Lock | None = None):
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._label = "thinking"
+        self._lock = lock or threading.Lock()
 
     def start(self, label: str = "thinking"):
         self.stop()
@@ -55,15 +56,17 @@ class _Spinner:
             self._stop.set()
             self._thread.join(timeout=1)
         # Clear the spinner line
-        sys.stderr.write("\r\033[K")
-        sys.stderr.flush()
+        with self._lock:
+            sys.stderr.write("\r\033[K")
+            sys.stderr.flush()
 
     def _spin(self):
         i = 0
         while not self._stop.is_set():
             frame = self.FRAMES[i % len(self.FRAMES)]
-            sys.stderr.write(f"\r{ANSI_SPINNER}{frame} {self._label}...{ANSI_RESET}")
-            sys.stderr.flush()
+            with self._lock:
+                sys.stderr.write(f"\r{ANSI_SPINNER}{frame} {self._label}...{ANSI_RESET}")
+                sys.stderr.flush()
             i += 1
             self._stop.wait(0.08)
 

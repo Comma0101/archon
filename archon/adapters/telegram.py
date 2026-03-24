@@ -64,6 +64,7 @@ from archon.ux.operator_messages import (
 )
 from archon.safety import Level
 from archon.ux.events import ActivityEvent, UXEvent
+from archon.ux.telegram_renderer import OutputBatchCollector, TelegramRenderer
 
 if TYPE_CHECKING:
     from archon.agent import Agent
@@ -134,6 +135,8 @@ class TelegramAdapter:
         self._offset: int | None = None
         self._agents: dict[int, Agent] = {}
         self._history_session_ids: dict[int, str] = {}
+        self._session_to_chat: dict[str, int] = {}
+        self._batch_collectors: dict[int, OutputBatchCollector] = {}
         self._approval_always_on_chats: set[int] = set()
         self._approval_elevated_until: dict[int, float] = {}
         self._approve_next_tokens: dict[int, int] = {}
@@ -147,6 +150,8 @@ class TelegramAdapter:
         self._commands_synced = False
         self._last_error_signature: tuple[str, str] | None = None
         self._last_error_at: float = 0.0
+        self._telegram_renderer = TelegramRenderer()
+        self._polling_disabled_due_to_conflict = False
 
     def set_activity_sink(self, sink: Callable[[ActivityEvent], None] | None) -> None:
         """Register an optional cross-surface activity sink."""
@@ -190,6 +195,13 @@ class TelegramAdapter:
             except KeyboardInterrupt:
                 raise
             except Exception as e:
+                if _is_conflicting_get_updates_error(e):
+                    self._polling_disabled_due_to_conflict = True
+                    print(
+                        f"[telegram] Polling disabled ({type(e).__name__}: {e})",
+                        file=sys.stderr,
+                    )
+                    break
                 self._log_poll_error(e, source="poll")
                 if self._stop_event.wait(2.0):
                     break
@@ -361,8 +373,16 @@ class TelegramAdapter:
         if cmd == "/reset":
             agent = self._agents.pop(chat_id, None)
             if agent is not None:
+                session_id = str(getattr(agent, "session_id", "") or "").strip()
+                if session_id:
+                    self._session_to_chat.pop(session_id, None)
                 agent.reset()
-            self._history_session_ids.pop(chat_id, None)
+            history_session_id = self._history_session_ids.pop(chat_id, None)
+            if history_session_id:
+                self._session_to_chat.pop(str(history_session_id), None)
+            collector = self._batch_collectors.pop(chat_id, None)
+            if collector is not None:
+                collector.cancel()
             self._pending_approvals.pop(chat_id, None)
             self._send_text_and_record(chat_id, body, "History cleared for this Telegram chat.")
             return
@@ -592,6 +612,7 @@ class TelegramAdapter:
             agent = self.agent_factory()
             agent.log_label = f"telegram chat={chat_id}"
             agent.session_id = history_session_id
+            self._session_to_chat[history_session_id] = chat_id
             if callable(self._activity_sink):
                 agent.terminal_activity_feed = _ActivitySinkTextProxy(self._activity_sink)
             self._wire_chat_confirmer(agent, chat_id)
@@ -600,6 +621,7 @@ class TelegramAdapter:
         else:
             agent.log_label = f"telegram chat={chat_id}"
             agent.session_id = history_session_id
+            self._session_to_chat[history_session_id] = chat_id
             if callable(self._activity_sink):
                 agent.terminal_activity_feed = _ActivitySinkTextProxy(self._activity_sink)
         return agent
@@ -1243,6 +1265,7 @@ class TelegramAdapter:
             return
         hook_bus.register("ux.job_progress", self._on_hook_job_event)
         hook_bus.register("ux.job_completed", self._on_hook_job_completed)
+        hook_bus.register("ux.tool_event", self._on_hook_tool_event)
 
     def _on_hook_job_event(self, hook_event) -> None:
         payload = getattr(hook_event, "payload", None) or {}
@@ -1252,6 +1275,39 @@ class TelegramAdapter:
 
     def _on_hook_job_completed(self, hook_event) -> None:
         self._on_hook_job_event(hook_event)
+
+    def _on_hook_tool_event(self, hook_event) -> None:
+        payload = getattr(hook_event, "payload", None) or {}
+        event = payload.get("event")
+        if not isinstance(event, UXEvent):
+            return
+        session_id = str(getattr(event, "session_id", "") or event.data.get("session_id", "")).strip()
+        if not session_id:
+            return
+        chat_id = self._session_to_chat.get(session_id)
+        if chat_id is None:
+            return
+        if event.kind == "tool_running" and event.data.get("detail_type") == "output_line":
+            self._get_or_create_batch_collector(chat_id).add_line(str(event.data.get("line", "") or ""))
+            return
+        if event.kind == "tool_end":
+            collector = self._batch_collectors.pop(chat_id, None)
+            if collector is not None:
+                collector.flush()
+        text = self._telegram_renderer.format_event(event, status=str(payload.get("status", "") or ""))
+        if not text:
+            return
+        try:
+            self._send_text(chat_id, text)
+        except Exception:
+            pass
+
+    def _get_or_create_batch_collector(self, chat_id: int) -> OutputBatchCollector:
+        collector = self._batch_collectors.get(chat_id)
+        if collector is None:
+            collector = OutputBatchCollector(flush_fn=lambda text, _chat_id=chat_id: self._send_text(_chat_id, text))
+            self._batch_collectors[chat_id] = collector
+        return collector
 
     def _preview_text(self, text: str, limit: int = 80) -> str:
         compact = sanitize_terminal_notice_text(text)
@@ -1284,3 +1340,10 @@ def _is_transient_get_updates_error(error: Exception) -> bool:
         "connection aborted",
     )
     return any(marker in text for marker in transient_markers)
+
+
+def _is_conflicting_get_updates_error(error: Exception) -> bool:
+    text = str(error or "").strip().lower()
+    if "telegram api getupdates" not in text:
+        return False
+    return "http 409" in text and "conflict" in text

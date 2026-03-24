@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import threading
+
 from archon.cli_ui import _format_terminal_approval_required
 from archon.cli_repl_commands import _maybe_auto_activate_skill
 from archon.control.contracts import HookEvent
 from archon.safety import Level
+from archon.ux.cli_renderer import CLIRenderer
 from archon.ux.operator_messages import (
     build_approval_result_message,
     build_approvals_overview_message,
@@ -94,10 +97,12 @@ def chat_cmd(
     def set_visible_input(value: str | None) -> None:
         visible_input_state["value"] = None if value is None else str(value)
 
-    terminal_activity_feed = (
-        make_terminal_activity_feed_fn(current_prompt, current_input)
-        if callable(make_terminal_activity_feed_fn)
-        else TerminalActivityFeed(prompt_fn=current_prompt, input_fn=current_input)
+    stderr_lock = threading.Lock()
+    terminal_activity_feed = _make_terminal_activity_feed(
+        make_terminal_activity_feed_fn,
+        current_prompt,
+        current_input,
+        stderr_lock,
     )
     agent.terminal_activity_feed = terminal_activity_feed
 
@@ -125,7 +130,8 @@ def chat_cmd(
         except Exception as e:
             click_echo_fn(f"[telegram] disabled: {e}", err=True)
 
-    spinner = spinner_cls()
+    cli_renderer = CLIRenderer(lock=stderr_lock)
+    spinner = _make_spinner(spinner_cls, stderr_lock)
     route_state = {"lane": "", "reason": ""}
     phase_state = {"label": ""}
     route_counts: dict[str, int] = {}
@@ -370,9 +376,16 @@ def chat_cmd(
         if lane and lane != "fast":
             spinner.start(f"route {lane}")
 
+    def on_tool_ux_event(event: HookEvent):
+        payload = event.payload or {}
+        ux_event = payload.get("event")
+        if isinstance(ux_event, UXEvent):
+            cli_renderer.render_event(ux_event, status=str(payload.get("status", "") or ""))
+
     agent.on_thinking = on_thinking
     agent.on_tool_call = on_tool_call
     agent.hooks.register("orchestrator.route", on_route)
+    agent.hooks.register("ux.tool_event", on_tool_ux_event)
 
     readline_module.set_completer(slash_completer_fn)
     readline_module.set_completer_delims(" \t")
@@ -625,6 +638,22 @@ def _tool_spinner_label(name: str, args: dict | None) -> str:
     if label:
         return label
     return f"tool {tool}" if tool else "tool"
+
+
+def _make_spinner(spinner_cls, lock: threading.Lock):
+    try:
+        return spinner_cls(lock=lock)
+    except TypeError:
+        return spinner_cls()
+
+
+def _make_terminal_activity_feed(make_terminal_activity_feed_fn, prompt_fn, input_fn, lock: threading.Lock):
+    if callable(make_terminal_activity_feed_fn):
+        try:
+            return make_terminal_activity_feed_fn(prompt_fn, input_fn, lock)
+        except TypeError:
+            return make_terminal_activity_feed_fn(prompt_fn, input_fn)
+    return TerminalActivityFeed(prompt_fn=prompt_fn, input_fn=input_fn, lock=lock)
 
 
 def run_cmd(

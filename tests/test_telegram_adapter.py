@@ -7,6 +7,7 @@ from archon.config import Config, MCPServerConfig, ProfileConfig
 from archon.control.hooks import HookBus
 from archon.news.models import NewsDigest, NewsRunResult
 from archon.safety import Level
+from archon.ux import events as ux_events
 
 
 class _DummyAgent:
@@ -218,6 +219,95 @@ class TestTelegramAdapterCommands:
 
         assert any(message == "approval blocked for 99: pacman -Q | head" for _source, message in events)
         assert not any(message == "replied to 99: Command rejected by safety gate." for _source, message in events)
+
+    def test_tool_ux_event_routes_only_to_matching_chat(self):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: _TelegramLocalCommandAgent(),
+            poll_timeout_sec=1,
+        )
+        sent = []
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+        hook_bus = HookBus()
+        adapter.wire_hook_bus(hook_bus)
+
+        agent_99 = adapter._get_or_create_chat_agent(99)
+        adapter._get_or_create_chat_agent(100)
+        event = ux_events.tool_end(
+            "shell",
+            "shell: exit 0 (1 lines)",
+            session_id=agent_99.session_id,
+        )
+
+        hook_bus.emit_kind(
+            "ux.tool_event",
+            task_id="t001",
+            payload={"event": event, "status": "completed"},
+        )
+
+        assert sent == [(99, "✓ shell: exit 0 (1 lines)")]
+
+    def test_tool_output_lines_batch_until_tool_end(self):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: _TelegramLocalCommandAgent(),
+            poll_timeout_sec=1,
+        )
+        sent = []
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+        hook_bus = HookBus()
+        adapter.wire_hook_bus(hook_bus)
+
+        agent_99 = adapter._get_or_create_chat_agent(99)
+
+        hook_bus.emit_kind(
+            "ux.tool_event",
+            task_id="t001",
+            payload={
+                "event": ux_events.tool_running(
+                    tool="shell",
+                    session_id=agent_99.session_id,
+                    detail_type="output_line",
+                    line="line1",
+                )
+            },
+        )
+        hook_bus.emit_kind(
+            "ux.tool_event",
+            task_id="t001",
+            payload={
+                "event": ux_events.tool_running(
+                    tool="shell",
+                    session_id=agent_99.session_id,
+                    detail_type="output_line",
+                    line="line2",
+                )
+            },
+        )
+
+        assert sent == []
+
+        hook_bus.emit_kind(
+            "ux.tool_event",
+            task_id="t001",
+            payload={
+                "event": ux_events.tool_end(
+                    "shell",
+                    "shell: exit 0 (2 lines)",
+                    session_id=agent_99.session_id,
+                ),
+                "status": "completed",
+            },
+        )
+
+        assert len(sent) == 2
+        assert sent[0][0] == 99
+        assert sent[0][1].startswith("```")
+        assert "line1" in sent[0][1]
+        assert "line2" in sent[0][1]
+        assert sent[1] == (99, "✓ shell: exit 0 (2 lines)")
 
     def test_explicit_skill_request_auto_activates_before_telegram_run(self, monkeypatch):
         adapter = TelegramAdapter(
@@ -591,6 +681,30 @@ def test_get_updates_retries_transient_connection_reset_once(monkeypatch):
 
     assert updates == []
     assert len(calls) == 2
+
+
+def test_run_loop_disables_polling_after_get_updates_conflict(monkeypatch, capsys):
+    adapter = _adapter()
+    calls = []
+
+    monkeypatch.setattr(adapter, "_sync_bot_commands", lambda: None)
+    monkeypatch.setattr(adapter, "_sync_startup_offset", lambda: None)
+
+    def fake_get_updates():
+        calls.append("get_updates")
+        raise RuntimeError(
+            'Telegram API getUpdates HTTP 409: {"ok":false,"error_code":409,"description":"Conflict: terminated by other getUpdates request; make sure that only one bot instance is running"}'
+        )
+
+    monkeypatch.setattr(adapter, "_get_updates", fake_get_updates)
+
+    adapter._run_loop()
+
+    assert calls == ["get_updates"]
+    assert adapter._polling_disabled_due_to_conflict is True
+    err = capsys.readouterr().err
+    assert "Polling disabled" in err
+    assert "HTTP 409" in err
 
 
 def test_voice_message_voice_upload_falls_back_to_wav_document(monkeypatch):

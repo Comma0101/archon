@@ -151,6 +151,7 @@ class Agent:
         self.last_suspension_request: SuspensionRequest | None = None
         self._pending_compactions: list[dict] = []
         self.session_id = f"session-{time.time_ns()}"
+        self.tools.set_session_id(self.session_id)
         self.tools.hook_bus = self.hooks
         self.tools.set_execute_event_handler(self._on_tool_execute_event)
         try:
@@ -424,6 +425,49 @@ class Agent:
         hook_payload = dict(payload or {})
         hook_payload.setdefault("turn_id", self.last_turn_id)
         self._emit_hook(f"tool_registry.{kind}", hook_payload)
+        if kind == "ux_event":
+            event = hook_payload.get("event")
+            if event is not None:
+                self._emit_hook(
+                    "ux.tool_event",
+                    {
+                        "event": event,
+                        "status": str(hook_payload.get("status", "") or ""),
+                        "turn_id": self.last_turn_id,
+                    },
+                )
+            return
+        if kind != "post_execute":
+            return
+        from archon.ux import events as ux_events
+        from archon.ux.renderers import build_tool_summary
+
+        name = str(hook_payload.get("name", "") or "").strip()
+        status = str(hook_payload.get("status", "") or "").strip().lower()
+        meta = hook_payload.get("meta")
+        if not isinstance(meta, dict):
+            meta = {}
+        result_preview = str(hook_payload.get("result_preview", "") or "")
+        if status == "blocked":
+            event = ux_events.tool_blocked(
+                tool=name,
+                session_id=self.session_id,
+                command_preview=str(meta.get("command_preview", "") or ""),
+                safety_level=str(meta.get("safety_level", "DANGEROUS") or "DANGEROUS"),
+            )
+            self._emit_hook("ux.tool_event", {"event": event, "turn_id": self.last_turn_id})
+            return
+        if status in {"ok", "error"}:
+            summary = build_tool_summary(name, meta, result_preview)
+            event = ux_events.tool_end(name, summary, session_id=self.session_id)
+            self._emit_hook(
+                "ux.tool_event",
+                {
+                    "event": event,
+                    "status": "failed" if status == "error" else "completed",
+                    "turn_id": self.last_turn_id,
+                },
+            )
 
     def _orchestrator_mode(self) -> str:
         orchestrator_cfg = getattr(self.config, "orchestrator", None)

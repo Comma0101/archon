@@ -1,5 +1,8 @@
 """Tool registry and built-in tools."""
 
+import inspect
+import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -7,6 +10,7 @@ from archon.config import Config
 from archon.control.policy import resolve_profile
 from archon.execution.contracts import SuspensionRequest
 from archon.safety import Level, confirm
+from archon.ux.tool_context import ToolContext
 from archon.tooling import (
     register_call_mission_tools,
     register_call_service_tools,
@@ -34,6 +38,7 @@ class ToolRegistry:
         self.mcp_client_cls = None
         self._execute_event_handler: Callable[[str, dict], None] | None = None
         self._worker_session_affinity: dict[tuple[str, str], str] = {}
+        self._session_id: str = ""
         self._register_builtins()
 
     def register(self, name: str, description: str,
@@ -92,6 +97,12 @@ class ToolRegistry:
             # Event handler must never affect tool execution semantics.
             return
 
+    def set_session_id(self, session_id: str) -> None:
+        self._session_id = session_id or ""
+
+    def _emit_ux_event(self, event: object) -> None:
+        self._emit_execute_event("ux_event", {"event": event})
+
     def execute(self, name: str, arguments: dict) -> str | SuspensionRequest:
         self._emit_execute_event(
             "pre_execute",
@@ -110,8 +121,42 @@ class ToolRegistry:
                 },
             )
             return result
+        ctx = ToolContext(
+            tool_name=name,
+            session_id=self._session_id,
+            emit=self._emit_ux_event,
+            meta={},
+        )
+        handler_kwargs = dict(arguments)
+        heartbeat_stop = threading.Event()
+        heartbeat_thread: threading.Thread | None = None
         try:
-            result = handler(**arguments)
+            try:
+                signature = inspect.signature(handler)
+            except (TypeError, ValueError):
+                signature = None
+            if signature is not None and "_ctx" in signature.parameters:
+                handler_kwargs["_ctx"] = ctx
+            if name != "shell":
+                started_at = time.monotonic()
+
+                def _heartbeat_loop() -> None:
+                    from archon.ux.events import tool_running
+
+                    while not heartbeat_stop.wait(2.0):
+                        elapsed = round(time.monotonic() - started_at, 1)
+                        ctx.emit(
+                            tool_running(
+                                tool=name,
+                                session_id=ctx.session_id,
+                                detail_type="heartbeat",
+                                elapsed_s=elapsed,
+                            )
+                        )
+
+                heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+                heartbeat_thread.start()
+            result = handler(**handler_kwargs)
             if isinstance(result, SuspensionRequest):
                 self._emit_execute_event(
                     "post_execute",
@@ -122,17 +167,22 @@ class ToolRegistry:
                         "result_is_error": False,
                         "result_kind": "suspension",
                         "job_id": result.job_id,
+                        "meta": dict(ctx.meta),
                     },
                 )
                 return result
+            result_str = str(result)
+            blocked = bool(ctx.meta.get("blocked"))
             self._emit_execute_event(
                 "post_execute",
                 {
                     "name": name,
                     "arguments": arguments,
-                    "status": "ok",
+                    "status": "blocked" if blocked else "ok",
                     "result_is_error": False,
-                    "result_length": len(str(result)),
+                    "result_length": len(result_str),
+                    "result_preview": result_str[:500],
+                    "meta": dict(ctx.meta),
                 },
             )
             return result
@@ -148,9 +198,14 @@ class ToolRegistry:
                     "result_length": len(result),
                     "error_type": type(e).__name__,
                     "error": str(e),
+                    "meta": dict(ctx.meta),
                 },
             )
             return result
+        finally:
+            heartbeat_stop.set()
+            if heartbeat_thread is not None:
+                heartbeat_thread.join(timeout=0.05)
 
     def _worker_affinity_key(self, worker: str, repo_path: str) -> tuple[str, str]:
         worker_key = (worker or "").strip().lower()

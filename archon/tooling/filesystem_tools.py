@@ -1,8 +1,12 @@
 """Filesystem/basic local tool registrations."""
 
+import difflib
 import fnmatch
+import queue
 import re
 import subprocess
+import threading
+from time import monotonic as _monotonic
 from pathlib import Path
 
 from archon.safety import Level, classify
@@ -48,23 +52,96 @@ def _confirm_read_operation(registry, label: str) -> str | None:
 
 def register_filesystem_tools(registry) -> None:
     # 1. shell
-    def shell(command: str, timeout: int = 30) -> str:
+    def shell(command: str, timeout: int = 30, _ctx=None) -> str:
         level = classify(command, registry.archon_source_dir)
         if not registry.confirmer(command, level):
+            if _ctx is not None:
+                _ctx.meta["blocked"] = True
+                _ctx.meta["command_preview"] = command[:240]
             return "Command rejected by safety gate."
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 ["bash", "-c", command],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
-                timeout=timeout,
+                bufsize=1,
             )
-            output = result.stdout + result.stderr
+            if proc.stdout is None:
+                raise RuntimeError("shell stdout pipe unavailable")
+
+            output_queue: queue.Queue[str | None] = queue.Queue()
+
+            def _reader() -> None:
+                try:
+                    for raw_line in proc.stdout:
+                        output_queue.put(raw_line.rstrip("\n"))
+                finally:
+                    try:
+                        proc.stdout.close()
+                    except Exception:
+                        pass
+                    output_queue.put(None)
+
+            reader_thread = threading.Thread(target=_reader, daemon=True)
+            reader_thread.start()
+
+            lines: list[str] = []
+            deadline = _monotonic() + timeout
+            timed_out = False
+            while True:
+                remaining = deadline - _monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                try:
+                    item = output_queue.get(timeout=min(0.1, remaining))
+                except queue.Empty:
+                    if proc.poll() is not None and output_queue.empty():
+                        continue
+                    continue
+                if item is None:
+                    break
+                lines.append(item)
+                if _ctx is not None:
+                    from archon.ux.events import tool_running
+
+                    _ctx.emit(
+                        tool_running(
+                            tool="shell",
+                            session_id=_ctx.session_id,
+                            detail_type="output_line",
+                            line=item,
+                        )
+                    )
+
+            if timed_out:
+                proc.kill()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+                reader_thread.join(timeout=1)
+                if _ctx is not None:
+                    _ctx.meta["exit_code"] = -1
+                    _ctx.meta["line_count"] = len(lines)
+                body = truncate_text("\n".join(lines), 9800) if lines else ""
+                if body:
+                    return f"{body}\nError: Command timed out after {timeout}s"
+                return f"Error: Command timed out after {timeout}s"
+
+            proc.wait(timeout=5)
+            reader_thread.join(timeout=1)
+            output = "\n".join(lines)
             body = truncate_text(output, 9800) or "(no output)"
-            if body.endswith("\n"):
-                return f"{body}[exit_code={result.returncode}]"
-            return f"{body}\n[exit_code={result.returncode}]"
+            if _ctx is not None:
+                _ctx.meta["exit_code"] = proc.returncode
+                _ctx.meta["line_count"] = len(lines)
+            return f"{body}\n[exit_code={proc.returncode}]"
         except subprocess.TimeoutExpired:
+            if _ctx is not None:
+                _ctx.meta["exit_code"] = -1
+                _ctx.meta["line_count"] = 0
             return f"Error: Command timed out after {timeout}s"
 
     registry.register("shell", "Execute a shell command on the system", {
@@ -76,7 +153,7 @@ def register_filesystem_tools(registry) -> None:
     }, shell)
 
     # 2. read_file
-    def read_file(path: str, offset: int = 0, limit: int = 2000) -> str:
+    def read_file(path: str, offset: int = 0, limit: int = 2000, _ctx=None) -> str:
         p = Path(path).expanduser().resolve()
         if not p.exists():
             return f"Error: File not found: {p}"
@@ -84,12 +161,18 @@ def register_filesystem_tools(registry) -> None:
             return f"Error: Not a file: {p}"
         rejected = _confirm_read_operation(registry, f"Read file: {p}")
         if rejected is not None:
+            if _ctx is not None:
+                _ctx.meta["blocked"] = True
+                _ctx.meta["command_preview"] = f"read_file: {p}"
             return rejected
         try:
             lines = p.read_text().splitlines()
             selected = lines[offset:offset + limit]
             numbered = [f"{i + offset + 1:>6}\t{line}" for i, line in enumerate(selected)]
             result = "\n".join(numbered)
+            if _ctx is not None:
+                _ctx.meta["path"] = str(p)
+                _ctx.meta["line_count"] = len(selected)
             if len(lines) > offset + limit:
                 result += f"\n... ({len(lines) - offset - limit} more lines)"
             return result or "(empty file)"
@@ -106,23 +189,37 @@ def register_filesystem_tools(registry) -> None:
     }, read_file)
 
     # 3. write_file
-    def write_file(path: str, content: str) -> str:
+    def write_file(path: str, content: str, _ctx=None) -> str:
         p = Path(path).expanduser().resolve()
+        is_new = not p.exists()
         home = Path.home().resolve()
         source_root = Path(registry.archon_source_dir).resolve() if registry.archon_source_dir else None
         if _should_confirm_write(registry):
             if not _is_relative_to(p, home):
                 if not registry.confirmer(f"Write to {p} (outside $HOME)", Level.DANGEROUS):
+                    if _ctx is not None:
+                        _ctx.meta["blocked"] = True
+                        _ctx.meta["command_preview"] = f"write_file: {p}"
                     return "Write rejected by safety gate."
             else:
                 if not registry.confirmer(f"Write file: {p}", Level.DANGEROUS):
+                    if _ctx is not None:
+                        _ctx.meta["blocked"] = True
+                        _ctx.meta["command_preview"] = f"write_file: {p}"
                     return "Write rejected by safety gate."
         if source_root and _is_relative_to(p, source_root):
             if not registry.confirmer(f"Write to own source: {p}", Level.DANGEROUS):
+                if _ctx is not None:
+                    _ctx.meta["blocked"] = True
+                    _ctx.meta["command_preview"] = f"write_file: {p}"
                 return "Self-modification rejected."
             auto_commit(registry.archon_source_dir)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content)
+        if _ctx is not None:
+            _ctx.meta["path"] = str(p)
+            _ctx.meta["line_count"] = len(content.splitlines())
+            _ctx.meta["is_new"] = is_new
         return f"Wrote {len(content)} bytes to {p}"
 
     registry.register("write_file", "Write content to a file (creates parent dirs)", {
@@ -134,7 +231,7 @@ def register_filesystem_tools(registry) -> None:
     }, write_file)
 
     # 4. edit_file
-    def edit_file(path: str, old: str, new: str) -> str:
+    def edit_file(path: str, old: str, new: str, _ctx=None) -> str:
         p = Path(path).expanduser().resolve()
         if not p.exists():
             return f"Error: File not found: {p}"
@@ -143,15 +240,24 @@ def register_filesystem_tools(registry) -> None:
         if _should_confirm_write(registry):
             if not _is_relative_to(p, home):
                 if not registry.confirmer(f"Edit {p} (outside $HOME)", Level.DANGEROUS):
+                    if _ctx is not None:
+                        _ctx.meta["blocked"] = True
+                        _ctx.meta["command_preview"] = f"edit_file: {p}"
                     return "Edit rejected by safety gate."
             else:
                 if not registry.confirmer(f"Edit file: {p}", Level.DANGEROUS):
+                    if _ctx is not None:
+                        _ctx.meta["blocked"] = True
+                        _ctx.meta["command_preview"] = f"edit_file: {p}"
                     return "Edit rejected by safety gate."
         if source_root and _is_relative_to(p, source_root):
             safety_path = source_root / "safety.py"
             if p == safety_path:
                 return "FORBIDDEN: Cannot modify safety.py through the agent."
             if not registry.confirmer(f"Edit own source: {p}", Level.DANGEROUS):
+                if _ctx is not None:
+                    _ctx.meta["blocked"] = True
+                    _ctx.meta["command_preview"] = f"edit_file: {p}"
                 return "Self-modification rejected."
             auto_commit(registry.archon_source_dir)
         text = p.read_text()
@@ -160,8 +266,38 @@ def register_filesystem_tools(registry) -> None:
         count = text.count(old)
         if count > 1:
             return f"Error: old string appears {count} times (must be unique)"
-        text = text.replace(old, new, 1)
-        p.write_text(text)
+        index = text.index(old)
+        line_number = text[:index].count("\n") + 1
+        new_text = text.replace(old, new, 1)
+        p.write_text(new_text)
+        lines_changed = max(old.count("\n"), new.count("\n")) + 1
+        if _ctx is not None:
+            _ctx.meta["path"] = str(p)
+            _ctx.meta["line_number"] = line_number
+            _ctx.meta["lines_changed"] = lines_changed
+            if len(text) <= 50_000:
+                diff_lines = [
+                    line
+                    for line in difflib.unified_diff(
+                        text.splitlines(),
+                        new_text.splitlines(),
+                        n=1,
+                        lineterm="",
+                    )
+                    if not line.startswith(("---", "+++", "@@"))
+                ]
+                if diff_lines:
+                    from archon.ux.events import tool_diff
+
+                    _ctx.emit(
+                        tool_diff(
+                            tool="edit_file",
+                            session_id=_ctx.session_id,
+                            path=str(p),
+                            diff_lines=diff_lines,
+                            lines_changed=lines_changed,
+                        )
+                    )
         return f"Edited {p} (replaced 1 occurrence)"
 
     registry.register("edit_file", "Replace a unique string in a file", {
@@ -201,7 +337,7 @@ def register_filesystem_tools(registry) -> None:
     }, list_dir)
 
     # 6. glob
-    def glob_files(pattern: str, root: str = ".", limit: int = 200) -> str:
+    def glob_files(pattern: str, root: str = ".", limit: int = 200, _ctx=None) -> str:
         root_path = Path(root).expanduser().resolve()
         if not root_path.exists():
             return f"Error: Directory not found: {root_path}"
@@ -209,6 +345,9 @@ def register_filesystem_tools(registry) -> None:
             return f"Error: Not a directory: {root_path}"
         rejected = _confirm_read_operation(registry, f"Glob files: {root_path}")
         if rejected is not None:
+            if _ctx is not None:
+                _ctx.meta["blocked"] = True
+                _ctx.meta["command_preview"] = f"glob: {root_path}"
             return rejected
         max_results = max(1, min(int(limit or 200), 1000))
         matches: list[str] = []
@@ -221,6 +360,9 @@ def register_filesystem_tools(registry) -> None:
                 matches.append(str(resolved))
             if len(matches) >= max_results:
                 break
+        if _ctx is not None:
+            _ctx.meta["pattern"] = pattern
+            _ctx.meta["file_count"] = len(matches)
         return "\n".join(matches) if matches else "(no matches)"
 
     registry.register("glob", "Find files under a root using a glob pattern", {
@@ -233,7 +375,7 @@ def register_filesystem_tools(registry) -> None:
     }, glob_files)
 
     # 7. grep
-    def grep_files(pattern: str, root: str = ".", glob: str = "", limit: int = 200) -> str:
+    def grep_files(pattern: str, root: str = ".", glob: str = "", limit: int = 200, _ctx=None) -> str:
         root_path = Path(root).expanduser().resolve()
         if not root_path.exists():
             return f"Error: Directory not found: {root_path}"
@@ -241,6 +383,9 @@ def register_filesystem_tools(registry) -> None:
             return f"Error: Not a directory: {root_path}"
         rejected = _confirm_read_operation(registry, f"Grep files: {root_path}")
         if rejected is not None:
+            if _ctx is not None:
+                _ctx.meta["blocked"] = True
+                _ctx.meta["command_preview"] = f"grep: {root_path}"
             return rejected
         max_results = max(1, min(int(limit or 200), 1000))
         try:
@@ -250,6 +395,7 @@ def register_filesystem_tools(registry) -> None:
 
         file_glob = str(glob or "").strip()
         matches: list[str] = []
+        file_set: set[str] = set()
         for path in root_path.rglob("*"):
             if len(matches) >= max_results:
                 break
@@ -263,9 +409,15 @@ def register_filesystem_tools(registry) -> None:
                 continue
             for line_no, line in enumerate(lines, start=1):
                 if matcher.search(line):
-                    matches.append(f"{path.resolve()}:{line_no}:{line}")
+                    resolved_path = str(path.resolve())
+                    matches.append(f"{resolved_path}:{line_no}:{line}")
+                    file_set.add(resolved_path)
                     if len(matches) >= max_results:
                         break
+        if _ctx is not None:
+            _ctx.meta["pattern"] = pattern
+            _ctx.meta["match_count"] = len(matches)
+            _ctx.meta["file_count"] = len(file_set)
         return "\n".join(matches) if matches else "(no matches)"
 
     registry.register("grep", "Search file contents under a root for a regex pattern", {

@@ -25,6 +25,7 @@ from archon.config import Config, MCPServerConfig, ProfileConfig
 from archon.execution.contracts import SuspensionRequest
 from archon.execution.turn_executor import execute_turn, execute_turn_stream
 from archon.prompt import build_runtime_capability_summary
+from archon.ux.events import UXEvent
 
 
 def make_agent(responses: list[LLMResponse], stream_chunks: list | None = None) -> Agent:
@@ -1780,6 +1781,49 @@ class TestAgentLoop:
         assert events[2].payload["status"] == "error"
         assert events[2].payload["error_type"] == "ValueError"
         assert events[3].payload["result_is_error"] is True
+
+    def test_post_execute_blocked_emits_ux_tool_blocked_event(self):
+        agent = make_agent([])
+        events = []
+        agent.hooks.register("ux.tool_event", events.append)
+
+        agent._on_tool_execute_event(
+            "post_execute",
+            {
+                "name": "shell",
+                "status": "blocked",
+                "meta": {"command_preview": "echo hi"},
+            },
+        )
+
+        assert len(events) == 1
+        payload = events[0].payload
+        assert isinstance(payload["event"], UXEvent)
+        assert payload["event"].kind == "tool_blocked"
+        assert payload["event"].data["tool"] == "shell"
+        assert payload["event"].data["command_preview"] == "echo hi"
+        assert payload["event"].data["session_id"] == agent.session_id
+
+    def test_post_execute_ok_emits_ux_tool_end_event_with_summary(self):
+        agent = make_agent([])
+        events = []
+        agent.hooks.register("ux.tool_event", events.append)
+
+        agent._on_tool_execute_event(
+            "post_execute",
+            {
+                "name": "read_file",
+                "status": "ok",
+                "meta": {"path": "/tmp/demo.txt", "line_count": 3},
+                "result_preview": "     1\tone",
+            },
+        )
+
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["status"] == "completed"
+        assert payload["event"].kind == "tool_end"
+        assert payload["event"].data["result"] == "read: /tmp/demo.txt (3 lines)"
 
     def test_policy_shadow_deny_emits_event_but_allows_execution(self, monkeypatch):
         responses = [
