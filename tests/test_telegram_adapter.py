@@ -1,5 +1,7 @@
 """Tests for Telegram adapter command routing."""
 
+import threading
+import time
 from types import SimpleNamespace
 
 from archon.adapters.telegram import TelegramAdapter, _TELEGRAM_BOT_COMMANDS
@@ -761,6 +763,95 @@ def test_run_loop_disables_polling_after_get_updates_conflict(monkeypatch, capsy
     assert "HTTP 409" in err
 
 
+def test_transport_health_becomes_degraded_after_startup_sync_failure(monkeypatch):
+    adapter = _adapter()
+
+    monkeypatch.setattr(adapter, "_api_call", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("dns")))
+
+    adapter._sync_startup_offset()
+
+    health = adapter._transport_health_snapshot()
+    assert health["state"] == "degraded"
+    assert health["last_error_source"] == "startup_sync"
+
+
+def test_transport_health_recovers_to_healthy_after_successful_get_updates(monkeypatch):
+    adapter = _adapter()
+    monkeypatch.setattr(adapter, "_api_call", lambda *_args, **_kwargs: {"ok": True, "result": []})
+
+    adapter._sync_startup_offset()
+    adapter._get_updates()
+
+    health = adapter._transport_health_snapshot()
+    assert health["state"] == "healthy"
+
+
+def test_transport_health_marks_conflict_as_disabled(monkeypatch):
+    adapter = _adapter()
+    monkeypatch.setattr(adapter, "_sync_bot_commands", lambda: None)
+    monkeypatch.setattr(adapter, "_sync_startup_offset", lambda: None)
+    monkeypatch.setattr(
+        adapter,
+        "_get_updates",
+        lambda: (_ for _ in ()).throw(
+            RuntimeError(
+                'Telegram API getUpdates HTTP 409: {"ok":false,"error_code":409,"description":"Conflict: terminated by other getUpdates request; make sure that only one bot instance is running"}'
+            )
+        ),
+    )
+
+    adapter._run_loop()
+
+    health = adapter._transport_health_snapshot()
+    assert health["state"] == "disabled_conflict"
+
+
+def test_concurrent_get_or_create_chat_agent_returns_single_instance(monkeypatch):
+    factory_calls = []
+    adapter = TelegramAdapter(
+        token="123:abc",
+        allowed_user_ids=[42],
+        agent_factory=lambda: factory_calls.append(object()) or time.sleep(0.05) or _TelegramLocalCommandAgent(),
+        poll_timeout_sec=1,
+    )
+    agents = []
+    errors = []
+    start = threading.Barrier(4)
+
+    def worker():
+        try:
+            start.wait(timeout=1)
+            agents.append(adapter._get_or_create_chat_agent(99))
+        except Exception as exc:  # pragma: no cover - assertion captures details below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not errors
+    assert len({id(agent) for agent in agents}) == 1
+    assert len(factory_calls) == 1
+
+
+def test_stop_cancels_pending_batch_collectors():
+    adapter = _adapter()
+    cancelled = []
+
+    class _FakeCollector:
+        def cancel(self):
+            cancelled.append("cancel")
+
+    adapter._batch_collectors[99] = _FakeCollector()  # type: ignore[assignment]
+
+    adapter.stop()
+
+    assert cancelled == ["cancel"]
+    assert adapter._batch_collectors == {}
+
+
 def test_voice_message_voice_upload_falls_back_to_wav_document(monkeypatch):
     adapter = _adapter()
     sent = []
@@ -1439,6 +1530,35 @@ def test_chat_agent_wires_terminal_feed_proxy_from_activity_sink():
         assert sent
         assert sent[0][1].startswith("Degraded mode: live chat agent unavailable")
         assert "using local fallback snapshot" in sent[0][1]
+        assert "Status:" in sent[0][1]
+
+    def test_status_command_prefixes_transport_health_when_degraded(self, monkeypatch):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: _TelegramLocalCommandAgent(),
+            poll_timeout_sec=1,
+        )
+        sent = []
+
+        monkeypatch.setattr("archon.adapters.telegram.new_session_id", lambda: "20260307-010001")
+        monkeypatch.setattr(
+            "archon.adapters.telegram.save_exchange",
+            lambda session_id, user_msg, assistant_msg: None,
+        )
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+        adapter._set_transport_health("degraded", error=RuntimeError("dns"), source="poll")
+
+        adapter._handle_message(
+            {
+                "text": "/status",
+                "chat": {"id": 99},
+                "from": {"id": 42},
+            }
+        )
+
+        assert sent
+        assert sent[0][1].startswith("Telegram transport: degraded")
         assert "Status:" in sent[0][1]
 
     def test_profile_fallback_uses_configured_default_profile(self, monkeypatch):

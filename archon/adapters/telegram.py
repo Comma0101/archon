@@ -135,6 +135,7 @@ class TelegramAdapter:
             raise ValueError("Telegram allowed_user_ids must not be empty")
 
         self._bot = TelegramBotClient(self.token)
+        self._state_lock = threading.RLock()
         self._offset: int | None = None
         self._agents: dict[int, Agent] = {}
         self._history_session_ids: dict[int, str] = {}
@@ -155,28 +156,44 @@ class TelegramAdapter:
         self._last_error_at: float = 0.0
         self._telegram_renderer = TelegramRenderer()
         self._polling_disabled_due_to_conflict = False
+        self._transport_health_state = "healthy"
+        self._transport_last_error = ""
+        self._transport_last_error_source = ""
+        self._transport_last_error_at = 0.0
 
     def set_activity_sink(self, sink: Callable[[ActivityEvent], None] | None) -> None:
         """Register an optional cross-surface activity sink."""
-        self._activity_sink = sink
+        with self._state_lock:
+            self._activity_sink = sink
 
     def start(self) -> None:
         """Start polling in a daemon thread."""
-        if self._thread and self._thread.is_alive():
-            return
-        self._stop_event.clear()
-        self._thread = threading.Thread(
-            target=self._run_loop,
-            name="archon-telegram",
-            daemon=True,
-        )
-        self._thread.start()
+        with self._state_lock:
+            if self._thread and self._thread.is_alive():
+                return
+            self._stop_event.clear()
+            self._thread = threading.Thread(
+                target=self._run_loop,
+                name="archon-telegram",
+                daemon=True,
+            )
+            thread = self._thread
+        thread.start()
 
     def stop(self, timeout: float = 2.0) -> None:
         """Stop background polling thread."""
         self._stop_event.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=timeout)
+        with self._state_lock:
+            thread = self._thread
+        if thread and thread.is_alive():
+            thread.join(timeout=timeout)
+        with self._state_lock:
+            self._thread = None
+        for collector in self._drain_batch_collectors():
+            try:
+                collector.cancel()
+            except Exception:
+                continue
 
     def run_forever(self) -> None:
         """Run polling loop in foreground until interrupted."""
@@ -199,12 +216,14 @@ class TelegramAdapter:
                 raise
             except Exception as e:
                 if _is_conflicting_get_updates_error(e):
+                    self._set_transport_health("disabled_conflict", error=e, source="poll")
                     self._polling_disabled_due_to_conflict = True
                     print(
                         f"[telegram] Polling disabled ({type(e).__name__}: {e})",
                         file=sys.stderr,
                     )
                     break
+                self._set_transport_health("degraded", error=e, source="poll")
                 self._log_poll_error(e, source="poll")
                 if self._stop_event.wait(2.0):
                     break
@@ -229,15 +248,18 @@ class TelegramAdapter:
             )
             result = data.get("result")
             if not isinstance(result, list) or not result:
+                self._set_transport_health("healthy")
                 return
             latest_update_id = max(int(update["update_id"]) for update in result if "update_id" in update)
             self._offset = latest_update_id + 1
             self._startup_synced = True
+            self._set_transport_health("healthy")
             print(
                 f"[telegram] Skipped {len(result)} pending update(s) on startup",
                 file=sys.stderr,
             )
         except Exception as e:
+            self._set_transport_health("degraded", error=e, source="startup_sync")
             self._log_poll_error(e, source="startup_sync")
 
     def _sync_bot_commands(self) -> None:
@@ -287,9 +309,11 @@ class TelegramAdapter:
         while True:
             try:
                 data = self._api_call("getUpdates", payload, timeout=self.poll_timeout_sec + 10)
+                self._set_transport_health("healthy")
                 break
             except Exception as e:
                 if attempts >= 1 or not _is_transient_get_updates_error(e):
+                    self._set_transport_health("degraded", error=e, source="poll")
                     raise
                 attempts += 1
         result = data.get("result")
@@ -392,19 +416,24 @@ class TelegramAdapter:
             return
 
         if cmd == "/reset":
-            agent = self._agents.pop(chat_id, None)
-            if agent is not None:
-                session_id = str(getattr(agent, "session_id", "") or "").strip()
+            with self._state_lock:
+                agent = self._agents.pop(chat_id, None)
+                session_id = str(getattr(agent, "session_id", "") or "").strip() if agent is not None else ""
                 if session_id:
                     self._session_to_chat.pop(session_id, None)
+                history_session_id = self._history_session_ids.pop(chat_id, None)
+                if history_session_id:
+                    self._session_to_chat.pop(str(history_session_id), None)
+                collector = self._batch_collectors.pop(chat_id, None)
+                self._pending_approvals.pop(chat_id, None)
+                self._active_replay_approval_ids.pop(chat_id, None)
+                self._current_request_ctx.pop(chat_id, None)
+                self._approve_next_tokens.pop(chat_id, None)
+                self._approval_elevated_until.pop(chat_id, None)
+            if agent is not None:
                 agent.reset()
-            history_session_id = self._history_session_ids.pop(chat_id, None)
-            if history_session_id:
-                self._session_to_chat.pop(str(history_session_id), None)
-            collector = self._batch_collectors.pop(chat_id, None)
             if collector is not None:
                 collector.cancel()
-            self._pending_approvals.pop(chat_id, None)
             self._send_text_and_record(chat_id, body, "History cleared for this Telegram chat.")
             return
 
@@ -478,7 +507,9 @@ class TelegramAdapter:
             return
 
         if cmd == "/approve_next":
-            self._approve_next_tokens[chat_id] = self._approve_next_tokens.get(chat_id, 0) + 1
+            with self._state_lock:
+                self._approve_next_tokens[chat_id] = self._approve_next_tokens.get(chat_id, 0) + 1
+                allow_once_remaining = self._approve_next_tokens.get(chat_id, 0)
             self._send_text_and_record(
                 chat_id,
                 body,
@@ -486,7 +517,7 @@ class TelegramAdapter:
                     result="allow_once_armed",
                     dangerous_mode=self._dangerous_mode_enabled(chat_id),
                     pending_request=self._pending_request_preview(chat_id),
-                    allow_once_remaining=self._approve_next_tokens.get(chat_id, 0),
+                    allow_once_remaining=allow_once_remaining,
                     next_step="one_future_dangerous_action_allowed",
                 ),
             )
@@ -554,6 +585,8 @@ class TelegramAdapter:
             handled, msg = handler(agent, body)
             if handled:
                 response = self._format_degraded_local_response(agent, body, msg)
+                if cmd == "/status":
+                    response = self._prefix_transport_health(response)
                 self._send_text_and_record(chat_id, body, response)
                 return True
         return False
@@ -627,26 +660,27 @@ class TelegramAdapter:
         )
 
     def _get_or_create_chat_agent(self, chat_id: int) -> "Agent":
-        agent = self._agents.get(chat_id)
-        history_session_id = self._history_session_id(chat_id)
-        if agent is None:
-            agent = self.agent_factory()
-            agent.log_label = f"telegram chat={chat_id}"
-            agent.session_id = history_session_id
-            self._session_to_chat[history_session_id] = chat_id
-            if callable(self._activity_sink):
-                agent.terminal_activity_feed = _ActivitySinkTextProxy(self._activity_sink)
-            self._wire_chat_confirmer(agent, chat_id)
-            self._wire_chat_route_progress(agent, chat_id)
-            self._refresh_activity_summary(agent)
-            self._agents[chat_id] = agent
-        else:
-            agent.log_label = f"telegram chat={chat_id}"
-            agent.session_id = history_session_id
-            self._session_to_chat[history_session_id] = chat_id
-            if callable(self._activity_sink):
-                agent.terminal_activity_feed = _ActivitySinkTextProxy(self._activity_sink)
-        return agent
+        with self._state_lock:
+            agent = self._agents.get(chat_id)
+            history_session_id = self._history_session_id(chat_id)
+            if agent is None:
+                agent = self.agent_factory()
+                agent.log_label = f"telegram chat={chat_id}"
+                agent.session_id = history_session_id
+                self._session_to_chat[history_session_id] = chat_id
+                if callable(self._activity_sink):
+                    agent.terminal_activity_feed = _ActivitySinkTextProxy(self._activity_sink)
+                self._wire_chat_confirmer(agent, chat_id)
+                self._wire_chat_route_progress(agent, chat_id)
+                self._refresh_activity_summary(agent)
+                self._agents[chat_id] = agent
+            else:
+                agent.log_label = f"telegram chat={chat_id}"
+                agent.session_id = history_session_id
+                self._session_to_chat[history_session_id] = chat_id
+                if callable(self._activity_sink):
+                    agent.terminal_activity_feed = _ActivitySinkTextProxy(self._activity_sink)
+            return agent
 
     def _refresh_activity_summary(self, agent) -> None:
         config = getattr(getattr(agent, "config", None), "activity", None)
@@ -735,13 +769,14 @@ class TelegramAdapter:
                 self._send_text(chat_id, auto_skill_msg)
                 skill_name = auto_skill_msg.split(":", 1)[-1].strip()
                 self._emit_activity(f"skill auto-activated for {chat_id}: {skill_name}")
-            self._current_request_ctx[chat_id] = {
-                "user_id": user_id,
-                "chat_id": chat_id,
-                "user_text": body,
-                "blocked_approval_id": None,
-                "route_progress_turn_id": None,
-            }
+            with self._state_lock:
+                self._current_request_ctx[chat_id] = {
+                    "user_id": user_id,
+                    "chat_id": chat_id,
+                    "user_text": body,
+                    "blocked_approval_id": None,
+                    "route_progress_turn_id": None,
+                }
             response = agent.run(body)
         except Exception as e:
             response = f"Error: {type(e).__name__}: {e}"
@@ -749,7 +784,8 @@ class TelegramAdapter:
             turn_info = f" turn={turn_id}" if turn_id else ""
             print(f"[telegram] Agent error for chat {chat_id}{turn_info}: {response}", file=sys.stderr)
         finally:
-            ctx = self._current_request_ctx.pop(chat_id, None)
+            with self._state_lock:
+                ctx = self._current_request_ctx.pop(chat_id, None)
 
         if ctx and ctx.get("blocked_approval_id") and looks_like_safety_gate_rejection(response):
             # Approval prompt already sent from the confirmer; suppress the extra generic rejection.
@@ -819,14 +855,9 @@ class TelegramAdapter:
             answer_callback_query_safe(self._bot, callback_id, text="Unknown action")
             return
         approval_id, action = parsed
-        pending = self._pending_approvals.get(chat_id)
+        pending = self._pending_approval_for_status(chat_id)
         if not pending or pending.get("approval_id") != approval_id:
             answer_callback_query_safe(self._bot, callback_id, text="Approval request expired")
-            return
-        if self._pending_is_expired(pending):
-            pending["status"] = "expired"
-            self._pending_approvals.pop(chat_id, None)
-            answer_callback_query_safe(self._bot, callback_id, text="Approval expired")
             return
         if pending.get("status") != "pending":
             answer_callback_query_safe(self._bot, callback_id, text="Already handled")
@@ -834,21 +865,21 @@ class TelegramAdapter:
 
         if action == APPROVAL_ACTION_APPROVE:
             answer_callback_query_safe(self._bot, callback_id, text="Approved. Replaying request…")
-            self._update_approval_prompt(chat_id, pending, "Approved. Replaying request…")
-            self._replay_pending_request(chat_id, pending, elevated_ttl_sec=None)
+            self._approve_pending_request(chat_id)
             return
 
         if action == APPROVAL_ACTION_ALLOW15:
             answer_callback_query_safe(self._bot, callback_id, text="Unlocked for 15m. Replaying…")
-            self._update_approval_prompt(chat_id, pending, "Unlocked for 15m. Replaying request…")
-            self._replay_pending_request(chat_id, pending, elevated_ttl_sec=ELEVATED_APPROVAL_TTL_SEC)
+            self._approve_pending_request(
+                chat_id,
+                elevated_ttl_sec=ELEVATED_APPROVAL_TTL_SEC,
+                status_text="Unlocked for 15m. Replaying request…",
+            )
             return
 
         if action == APPROVAL_ACTION_DENY:
-            pending["status"] = "denied"
-            self._pending_approvals.pop(chat_id, None)
             answer_callback_query_safe(self._bot, callback_id, text="Denied")
-            self._update_approval_prompt(chat_id, pending, "Denied.")
+            self._deny_pending_request(chat_id)
             return
 
         answer_callback_query_safe(self._bot, callback_id, text="Unknown approval action")
@@ -879,13 +910,14 @@ class TelegramAdapter:
         lane = str(payload.get("lane", "")).strip().lower()
         if lane != "job":
             return
-        ctx = self._current_request_ctx.get(chat_id)
-        if not isinstance(ctx, dict):
-            return
         turn_id = str(payload.get("turn_id", "")).strip()
-        if turn_id and ctx.get("route_progress_turn_id") == turn_id:
-            return
-        ctx["route_progress_turn_id"] = turn_id
+        with self._state_lock:
+            ctx = self._current_request_ctx.get(chat_id)
+            if not isinstance(ctx, dict):
+                return
+            if turn_id and ctx.get("route_progress_turn_id") == turn_id:
+                return
+            ctx["route_progress_turn_id"] = turn_id
         self._send_text(chat_id, self._format_route_progress_text(payload))
         lane = str(payload.get("lane", "")).strip().lower() or "operator"
         reason = str(payload.get("reason", "")).strip().replace("_", " ")
@@ -917,24 +949,33 @@ class TelegramAdapter:
             self._emit_activity(f"approval allowed for {chat_id}: {truncate_approval_command(command)}")
             return True
 
-        active_replay_id = self._active_replay_approval_ids.get(chat_id)
+        with self._state_lock:
+            active_replay_id = self._active_replay_approval_ids.get(chat_id)
         if active_replay_id:
             print(f"[telegram] APPROVED (mode=request-replay): {command}", file=sys.stderr)
             self._emit_activity(f"approval allowed for {chat_id}: {truncate_approval_command(command)}")
             return True
 
-        if chat_id in self._approval_always_on_chats:
+        remaining = 0
+        with self._state_lock:
+            if chat_id in self._approval_always_on_chats:
+                mode = "always"
+            else:
+                tokens = self._approve_next_tokens.get(chat_id, 0)
+                if tokens > 0:
+                    remaining = tokens - 1
+                    if remaining:
+                        self._approve_next_tokens[chat_id] = remaining
+                    else:
+                        self._approve_next_tokens.pop(chat_id, None)
+                    mode = "next"
+                else:
+                    mode = ""
+        if mode == "always":
             print(f"[telegram] APPROVED (mode=always): {command}", file=sys.stderr)
             self._emit_activity(f"approval allowed for {chat_id}: {truncate_approval_command(command)}")
             return True
-
-        tokens = self._approve_next_tokens.get(chat_id, 0)
-        if tokens > 0:
-            remaining = tokens - 1
-            if remaining:
-                self._approve_next_tokens[chat_id] = remaining
-            else:
-                self._approve_next_tokens.pop(chat_id, None)
+        if mode == "next":
             print(
                 f"[telegram] APPROVED (mode=next, remaining={remaining}): {command}",
                 file=sys.stderr,
@@ -950,74 +991,76 @@ class TelegramAdapter:
     def _handle_approvals_command(self, body: str, chat_id: int) -> str:
         parts = [p.strip().lower() for p in body.split() if p.strip()]
         subcmd = parts[1] if len(parts) > 1 else ""
-        pending_request = self._pending_request_preview(chat_id)
-        is_elevated = self._is_chat_elevated(chat_id)
-        elevated_until = self._approval_elevated_until.get(chat_id, 0.0)
-        elevated_remaining = max(0, int(elevated_until - time.time())) if is_elevated else 0
-        dangerous_mode = chat_id in self._approval_always_on_chats or is_elevated
-        allow_once_remaining = self._approve_next_tokens.get(chat_id, 0)
+        with self._state_lock:
+            pending_request = self._pending_request_preview(chat_id)
+            is_elevated = self._is_chat_elevated(chat_id)
+            elevated_until = self._approval_elevated_until.get(chat_id, 0.0)
+            elevated_remaining = max(0, int(elevated_until - time.time())) if is_elevated else 0
+            dangerous_mode = chat_id in self._approval_always_on_chats or is_elevated
+            allow_once_remaining = self._approve_next_tokens.get(chat_id, 0)
 
-        if subcmd in {"on", "enable"}:
-            self._approval_always_on_chats.add(chat_id)
+            if subcmd in {"on", "enable"}:
+                self._approval_always_on_chats.add(chat_id)
+                return build_approvals_overview_message(
+                    result="dangerous_mode_enabled",
+                    dangerous_mode=True,
+                    pending_request=pending_request,
+                    allow_once_remaining=allow_once_remaining,
+                    elevated_ttl_sec=elevated_remaining,
+                )
+            if subcmd in {"off", "disable"}:
+                self._approval_always_on_chats.discard(chat_id)
+                self._approval_elevated_until.pop(chat_id, None)
+                return build_approvals_overview_message(
+                    result="dangerous_mode_disabled",
+                    dangerous_mode=False,
+                    pending_request=pending_request,
+                    allow_once_remaining=allow_once_remaining,
+                )
+            if subcmd in {"once", "next"}:
+                self._approve_next_tokens[chat_id] = self._approve_next_tokens.get(chat_id, 0) + 1
+                return build_approval_result_message(
+                    result="allow_once_armed",
+                    dangerous_mode=self._dangerous_mode_enabled(chat_id),
+                    pending_request=pending_request,
+                    allow_once_remaining=self._approve_next_tokens.get(chat_id, 0),
+                    next_step="one_future_dangerous_action_allowed",
+                )
+            if subcmd in {"unlock"}:
+                self._approval_elevated_until[chat_id] = time.time() + ELEVATED_APPROVAL_TTL_SEC
+                return build_approvals_overview_message(
+                    result="dangerous_mode_enabled",
+                    dangerous_mode=True,
+                    pending_request=pending_request,
+                    allow_once_remaining=allow_once_remaining,
+                    elevated_ttl_sec=ELEVATED_APPROVAL_TTL_SEC,
+                )
+            if subcmd in {"lock"}:
+                self._approval_elevated_until.pop(chat_id, None)
+                self._approval_always_on_chats.discard(chat_id)
+                return build_approvals_overview_message(
+                    result="dangerous_mode_disabled",
+                    dangerous_mode=False,
+                    pending_request=pending_request,
+                    allow_once_remaining=allow_once_remaining,
+                )
+
             return build_approvals_overview_message(
-                result="dangerous_mode_enabled",
-                dangerous_mode=True,
+                dangerous_mode=dangerous_mode,
                 pending_request=pending_request,
                 allow_once_remaining=allow_once_remaining,
                 elevated_ttl_sec=elevated_remaining,
             )
-        if subcmd in {"off", "disable"}:
-            self._approval_always_on_chats.discard(chat_id)
-            self._approval_elevated_until.pop(chat_id, None)
-            return build_approvals_overview_message(
-                result="dangerous_mode_disabled",
-                dangerous_mode=False,
-                pending_request=pending_request,
-                allow_once_remaining=allow_once_remaining,
-            )
-        if subcmd in {"once", "next"}:
-            self._approve_next_tokens[chat_id] = self._approve_next_tokens.get(chat_id, 0) + 1
-            return build_approval_result_message(
-                result="allow_once_armed",
-                dangerous_mode=self._dangerous_mode_enabled(chat_id),
-                pending_request=pending_request,
-                allow_once_remaining=self._approve_next_tokens.get(chat_id, 0),
-                next_step="one_future_dangerous_action_allowed",
-            )
-        if subcmd in {"unlock"}:
-            self._approval_elevated_until[chat_id] = time.time() + ELEVATED_APPROVAL_TTL_SEC
-            return build_approvals_overview_message(
-                result="dangerous_mode_enabled",
-                dangerous_mode=True,
-                pending_request=pending_request,
-                allow_once_remaining=allow_once_remaining,
-                elevated_ttl_sec=ELEVATED_APPROVAL_TTL_SEC,
-            )
-        if subcmd in {"lock"}:
-            self._approval_elevated_until.pop(chat_id, None)
-            self._approval_always_on_chats.discard(chat_id)
-            return build_approvals_overview_message(
-                result="dangerous_mode_disabled",
-                dangerous_mode=False,
-                pending_request=pending_request,
-                allow_once_remaining=allow_once_remaining,
-            )
-
-        return build_approvals_overview_message(
-            dangerous_mode=dangerous_mode,
-            pending_request=pending_request,
-            allow_once_remaining=allow_once_remaining,
-            elevated_ttl_sec=elevated_remaining,
-        )
 
     def _is_chat_elevated(self, chat_id: int) -> bool:
-        until = self._approval_elevated_until.get(chat_id)
-        if until is None:
-            return False
-        if until <= time.time():
-            self._approval_elevated_until.pop(chat_id, None)
-            return False
-        return True
+        with self._state_lock:
+            until = self._approval_elevated_until.get(chat_id)
+            if until is None:
+                return False
+            if until <= time.time():
+                self._approval_elevated_until.pop(chat_id, None)
+                return False
+            return True
 
     def _dangerous_mode_enabled(self, chat_id: int) -> bool:
         return chat_id in self._approval_always_on_chats or self._is_chat_elevated(chat_id)
@@ -1027,22 +1070,58 @@ class TelegramAdapter:
         return isinstance(expires_at, (int, float)) and expires_at <= time.time()
 
     def _pending_approval_for_status(self, chat_id: int) -> dict | None:
-        pending = self._pending_approvals.get(chat_id)
-        if not pending:
-            return None
-        if self._pending_is_expired(pending):
-            pending["status"] = "expired"
-            self._pending_approvals.pop(chat_id, None)
-            return None
-        return pending
+        with self._state_lock:
+            pending = self._pending_approvals.get(chat_id)
+            if not pending:
+                return None
+            if self._pending_is_expired(pending):
+                pending["status"] = "expired"
+                self._pending_approvals.pop(chat_id, None)
+                return None
+            return pending
 
     def _pending_request_preview(self, chat_id: int) -> str:
         pending = self._pending_approval_for_status(chat_id) or {}
         return str(pending.get("blocked_command_preview") or "")
 
     def _queue_pending_approval(self, chat_id: int, command: str) -> None:
-        ctx = self._current_request_ctx.get(chat_id) or {}
-        user_text = str(ctx.get("user_text") or "")
+        refresh_pending: dict | None = None
+        send_pending: dict | None = None
+        with self._state_lock:
+            ctx = self._current_request_ctx.get(chat_id)
+            user_text = str((ctx or {}).get("user_text") or "")
+            if user_text:
+                existing = self._pending_approvals.get(chat_id)
+                if (
+                    existing
+                    and existing.get("status") == "pending"
+                    and not self._pending_is_expired(existing)
+                ):
+                    existing["created_at"] = time.time()
+                    existing["expires_at"] = time.time() + PENDING_APPROVAL_TTL_SEC
+                    existing["user_text"] = user_text
+                    existing["user_id"] = (ctx or {}).get("user_id")
+                    existing["blocked_command_preview"] = truncate_approval_command(command)
+                    refresh_pending = existing
+                    if isinstance(ctx, dict):
+                        ctx["blocked_approval_id"] = existing.get("approval_id")
+                else:
+                    approval_id = secrets.token_hex(4)
+                    pending = {
+                        "approval_id": approval_id,
+                        "status": "pending",
+                        "created_at": time.time(),
+                        "expires_at": time.time() + PENDING_APPROVAL_TTL_SEC,
+                        "user_text": user_text,
+                        "user_id": (ctx or {}).get("user_id"),
+                        "blocked_command_preview": truncate_approval_command(command),
+                        "approval_message_id": None,
+                    }
+                    self._pending_approvals[chat_id] = pending
+                    if isinstance(ctx, dict):
+                        ctx["blocked_approval_id"] = approval_id
+                    send_pending = pending
+
         if not user_text:
             self._send_text(
                 chat_id,
@@ -1053,34 +1132,13 @@ class TelegramAdapter:
                 ),
             )
             return
-        existing = self._pending_approvals.get(chat_id)
-        if existing and existing.get("status") == "pending" and not self._pending_is_expired(existing):
+        if refresh_pending is not None:
             # Keep only the latest blocked request so /approve replays current intent.
-            existing["created_at"] = time.time()
-            existing["expires_at"] = time.time() + PENDING_APPROVAL_TTL_SEC
-            existing["user_text"] = user_text
-            existing["user_id"] = ctx.get("user_id")
-            existing["blocked_command_preview"] = truncate_approval_command(command)
-            self._refresh_pending_approval_prompt(chat_id, existing)
-            if ctx is not None:
-                ctx["blocked_approval_id"] = existing.get("approval_id")
+            self._refresh_pending_approval_prompt(chat_id, refresh_pending)
             return
 
-        approval_id = secrets.token_hex(4)
-        pending = {
-            "approval_id": approval_id,
-            "status": "pending",
-            "created_at": time.time(),
-            "expires_at": time.time() + PENDING_APPROVAL_TTL_SEC,
-            "user_text": user_text,
-            "user_id": ctx.get("user_id"),
-            "blocked_command_preview": truncate_approval_command(command),
-            "approval_message_id": None,
-        }
-        self._pending_approvals[chat_id] = pending
-        if ctx is not None:
-            ctx["blocked_approval_id"] = approval_id
-        self._send_pending_approval_prompt(chat_id, pending)
+        if send_pending is not None:
+            self._send_pending_approval_prompt(chat_id, send_pending)
 
     def _refresh_pending_approval_prompt(self, chat_id: int, pending: dict) -> None:
         message_id = pending.get("approval_message_id")
@@ -1100,6 +1158,7 @@ class TelegramAdapter:
 
     def _send_pending_approval_prompt(self, chat_id: int, pending: dict) -> None:
         text = build_pending_approval_text(str(pending.get("blocked_command_preview") or ""))
+        approval_id = str(pending.get("approval_id") or "")
         try:
             result = self._bot.send_message(
                 chat_id,
@@ -1110,7 +1169,13 @@ class TelegramAdapter:
             )
             message_id = result.get("message_id")
             if isinstance(message_id, int):
-                pending["approval_message_id"] = message_id
+                with self._state_lock:
+                    current = self._pending_approvals.get(chat_id)
+                    if (
+                        isinstance(current, dict)
+                        and str(current.get("approval_id") or "") == approval_id
+                    ):
+                        current["approval_message_id"] = message_id
         except Exception:
             self._send_text(
                 chat_id,
@@ -1133,38 +1198,49 @@ class TelegramAdapter:
         except Exception:
             pass
 
-    def _approve_pending_request(self, chat_id: int) -> str:
-        pending = self._pending_approvals.get(chat_id)
-        if not pending:
-            return build_approval_result_message(
-                result="no_pending_request",
-                pending_request="none",
-            )
-        if self._pending_is_expired(pending):
-            pending["status"] = "expired"
-            self._pending_approvals.pop(chat_id, None)
-            return build_approval_result_message(
-                result="expired",
-                pending_request="none",
-            )
-        if pending.get("status") != "pending":
-            return build_approval_result_message(
-                result=f"already_{pending.get('status')}",
-                pending_request=str(pending.get("blocked_command_preview") or ""),
-            )
-        self._update_approval_prompt(chat_id, pending, "Approved. Replaying request…")
-        return self._replay_pending_request(chat_id, pending, elevated_ttl_sec=None)
+    def _approve_pending_request(
+        self,
+        chat_id: int,
+        elevated_ttl_sec: int | None = None,
+        status_text: str = "Approved. Replaying request…",
+    ) -> str:
+        with self._state_lock:
+            pending = self._pending_approvals.get(chat_id)
+            if not pending:
+                return build_approval_result_message(
+                    result="no_pending_request",
+                    pending_request="none",
+                )
+            if self._pending_is_expired(pending):
+                pending["status"] = "expired"
+                self._pending_approvals.pop(chat_id, None)
+                return build_approval_result_message(
+                    result="expired",
+                    pending_request="none",
+                )
+            if pending.get("status") != "pending":
+                return build_approval_result_message(
+                    result=f"already_{pending.get('status')}",
+                    pending_request=str(pending.get("blocked_command_preview") or ""),
+                )
+        return self._replay_pending_request(
+            chat_id,
+            pending,
+            elevated_ttl_sec=elevated_ttl_sec,
+            status_text=status_text,
+        )
 
     def _deny_pending_request(self, chat_id: int) -> str:
-        pending = self._pending_approvals.get(chat_id)
-        if not pending:
-            return build_approval_result_message(
-                result="no_pending_request",
-                pending_request="none",
-            )
-        preview = str(pending.get("blocked_command_preview") or "")
-        pending["status"] = "denied"
-        self._pending_approvals.pop(chat_id, None)
+        with self._state_lock:
+            pending = self._pending_approvals.get(chat_id)
+            if not pending:
+                return build_approval_result_message(
+                    result="no_pending_request",
+                    pending_request="none",
+                )
+            preview = str(pending.get("blocked_command_preview") or "")
+            pending["status"] = "denied"
+            self._pending_approvals.pop(chat_id, None)
         self._update_approval_prompt(chat_id, pending, "Denied.")
         return build_approval_result_message(
             result="denied",
@@ -1174,27 +1250,54 @@ class TelegramAdapter:
             allow_once_remaining=self._approve_next_tokens.get(chat_id, 0),
         )
 
-    def _replay_pending_request(self, chat_id: int, pending: dict, elevated_ttl_sec: int | None) -> str:
-        user_text = str(pending.get("user_text") or "").strip()
-        preview = str(pending.get("blocked_command_preview") or "")
-        if not user_text:
-            pending["status"] = "error"
-            self._pending_approvals.pop(chat_id, None)
-            return build_approval_result_message(
-                result="approved_replay_unavailable",
-                replayed_request=preview,
-                dangerous_mode=self._dangerous_mode_enabled(chat_id),
-                pending_request="none",
-                allow_once_remaining=self._approve_next_tokens.get(chat_id, 0),
-            )
-        if elevated_ttl_sec:
-            self._approval_elevated_until[chat_id] = time.time() + int(elevated_ttl_sec)
+    def _replay_pending_request(
+        self,
+        chat_id: int,
+        pending: dict,
+        elevated_ttl_sec: int | None,
+        *,
+        status_text: str = "Approved. Replaying request…",
+    ) -> str:
         approval_id = str(pending.get("approval_id") or "")
-        pending["status"] = "approved"
-        self._active_replay_approval_ids[chat_id] = approval_id
-        replay_user_id = pending.get("user_id")
+        with self._state_lock:
+            current = self._pending_approvals.get(chat_id)
+            if not isinstance(current, dict) or str(current.get("approval_id") or "") != approval_id:
+                return build_approval_result_message(
+                    result="no_pending_request",
+                    pending_request="none",
+                )
+            if self._pending_is_expired(current):
+                current["status"] = "expired"
+                self._pending_approvals.pop(chat_id, None)
+                return build_approval_result_message(
+                    result="expired",
+                    pending_request="none",
+                )
+            if current.get("status") != "pending":
+                return build_approval_result_message(
+                    result=f"already_{current.get('status')}",
+                    pending_request=str(current.get("blocked_command_preview") or ""),
+                )
+            user_text = str(current.get("user_text") or "").strip()
+            preview = str(current.get("blocked_command_preview") or "")
+            if not user_text:
+                current["status"] = "error"
+                self._pending_approvals.pop(chat_id, None)
+                return build_approval_result_message(
+                    result="approved_replay_unavailable",
+                    replayed_request=preview,
+                    dangerous_mode=self._dangerous_mode_enabled(chat_id),
+                    pending_request="none",
+                    allow_once_remaining=self._approve_next_tokens.get(chat_id, 0),
+                )
+            if elevated_ttl_sec:
+                self._approval_elevated_until[chat_id] = time.time() + int(elevated_ttl_sec)
+            current["status"] = "approved"
+            self._active_replay_approval_ids[chat_id] = approval_id
+            replay_user_id = current.get("user_id")
         if not isinstance(replay_user_id, int):
             replay_user_id = chat_id
+        self._update_approval_prompt(chat_id, pending, status_text)
         try:
             self._handle_message(
                 {
@@ -1205,8 +1308,11 @@ class TelegramAdapter:
                 }
             )
         finally:
-            self._active_replay_approval_ids.pop(chat_id, None)
-            self._pending_approvals.pop(chat_id, None)
+            with self._state_lock:
+                self._active_replay_approval_ids.pop(chat_id, None)
+                current = self._pending_approvals.get(chat_id)
+                if isinstance(current, dict) and str(current.get("approval_id") or "") == approval_id:
+                    self._pending_approvals.pop(chat_id, None)
         return build_approval_result_message(
             result="approved_replaying",
             replayed_request=preview,
@@ -1287,7 +1393,9 @@ class TelegramAdapter:
         text = event.render_text()
         if not text:
             return
-        for chat_id in list(self._agents):
+        with self._state_lock:
+            chat_ids = list(self._agents)
+        for chat_id in chat_ids:
             try:
                 self._send_text(chat_id, text)
             except Exception:
@@ -1318,14 +1426,16 @@ class TelegramAdapter:
         session_id = str(getattr(event, "session_id", "") or event.data.get("session_id", "")).strip()
         if not session_id:
             return
-        chat_id = self._session_to_chat.get(session_id)
+        with self._state_lock:
+            chat_id = self._session_to_chat.get(session_id)
         if chat_id is None:
             return
         if event.kind == "tool_running" and event.data.get("detail_type") == "output_line":
             self._get_or_create_batch_collector(chat_id).add_line(str(event.data.get("line", "") or ""))
             return
         if event.kind == "tool_end":
-            collector = self._batch_collectors.pop(chat_id, None)
+            with self._state_lock:
+                collector = self._batch_collectors.pop(chat_id, None)
             if collector is not None:
                 collector.flush()
         text = self._telegram_renderer.format_event(event, status=str(payload.get("status", "") or ""))
@@ -1337,11 +1447,14 @@ class TelegramAdapter:
             pass
 
     def _get_or_create_batch_collector(self, chat_id: int) -> OutputBatchCollector:
-        collector = self._batch_collectors.get(chat_id)
-        if collector is None:
-            collector = OutputBatchCollector(flush_fn=lambda text, _chat_id=chat_id: self._send_text(_chat_id, text))
-            self._batch_collectors[chat_id] = collector
-        return collector
+        with self._state_lock:
+            collector = self._batch_collectors.get(chat_id)
+            if collector is None:
+                collector = OutputBatchCollector(
+                    flush_fn=lambda text, _chat_id=chat_id: self._send_text(_chat_id, text)
+                )
+                self._batch_collectors[chat_id] = collector
+            return collector
 
     def _preview_text(self, text: str, limit: int = 80) -> str:
         compact = sanitize_terminal_notice_text(text)
@@ -1350,12 +1463,67 @@ class TelegramAdapter:
         return compact[: max(0, limit - 3)] + "..."
 
     def _history_session_id(self, chat_id: int) -> str:
-        sid = self._history_session_ids.get(chat_id)
-        if sid:
+        with self._state_lock:
+            sid = self._history_session_ids.get(chat_id)
+            if sid:
+                return sid
+            sid = f"tg-{chat_id}-{new_session_id()}"
+            self._history_session_ids[chat_id] = sid
             return sid
-        sid = f"tg-{chat_id}-{new_session_id()}"
-        self._history_session_ids[chat_id] = sid
-        return sid
+
+    def _set_transport_health(self, state: str, *, error: Exception | None = None, source: str = "") -> None:
+        with self._state_lock:
+            self._transport_health_state = str(state or "healthy").strip() or "healthy"
+            self._polling_disabled_due_to_conflict = self._transport_health_state == "disabled_conflict"
+            if error is None:
+                if self._transport_health_state == "healthy":
+                    self._transport_last_error = ""
+                    self._transport_last_error_source = ""
+                    self._transport_last_error_at = 0.0
+                return
+            self._transport_last_error = f"{type(error).__name__}: {error}"
+            self._transport_last_error_source = str(source or "").strip()
+            self._transport_last_error_at = time.time()
+
+    def _transport_health_snapshot(self) -> dict:
+        with self._state_lock:
+            return {
+                "state": self._transport_health_state,
+                "last_error": self._transport_last_error,
+                "last_error_source": self._transport_last_error_source,
+                "last_error_at": self._transport_last_error_at,
+            }
+
+    def _transport_health_text(self) -> str:
+        snapshot = self._transport_health_snapshot()
+        state = str(snapshot.get("state") or "healthy")
+        if state == "healthy":
+            return ""
+        if state == "disabled_conflict":
+            return "Telegram transport: disabled_conflict"
+        source = str(snapshot.get("last_error_source") or "").strip()
+        error = str(snapshot.get("last_error") or "").strip()
+        message = f"Telegram transport: {state}"
+        if source:
+            message += f" | source={source}"
+        if error:
+            message += f" | error={error}"
+        return message
+
+    def _prefix_transport_health(self, text: str) -> str:
+        prefix = self._transport_health_text()
+        if not prefix:
+            return text
+        body = str(text or "").strip()
+        if not body:
+            return prefix
+        return f"{prefix}\n{body}"
+
+    def _drain_batch_collectors(self) -> list[OutputBatchCollector]:
+        with self._state_lock:
+            collectors = list(self._batch_collectors.values())
+            self._batch_collectors.clear()
+            return collectors
 
     def _api_call(self, method: str, payload: dict, timeout: int) -> dict:
         return self._bot.api_call(method, payload, timeout=timeout)
