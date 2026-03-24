@@ -29,7 +29,39 @@ class ToolRegistry:
         archon_source_dir: str | None = None,
         confirmer: Callable[[str, Level], bool] | None = None,
         config: Config | None = None,
+        *,
+        register_builtins: bool = True,
     ):
+        self._init_core_state(
+            archon_source_dir=archon_source_dir,
+            confirmer=confirmer,
+            config=config,
+        )
+        if register_builtins:
+            self._register_builtins()
+
+    @classmethod
+    def empty(
+        cls,
+        *,
+        archon_source_dir: str | None = None,
+        confirmer: Callable[[str, Level], bool] | None = None,
+        config: Config | None = None,
+    ) -> "ToolRegistry":
+        return cls(
+            archon_source_dir=archon_source_dir,
+            confirmer=confirmer,
+            config=config,
+            register_builtins=False,
+        )
+
+    def _init_core_state(
+        self,
+        *,
+        archon_source_dir: str | None,
+        confirmer: Callable[[str, Level], bool] | None,
+        config: Config | None,
+    ) -> None:
         self.tools: dict[str, dict] = {}
         self.handlers: dict[str, Callable] = {}
         self.archon_source_dir = archon_source_dir
@@ -39,7 +71,6 @@ class ToolRegistry:
         self._execute_event_handler: Callable[[str, dict], None] | None = None
         self._worker_session_affinity: dict[tuple[str, str], str] = {}
         self._session_id: str = ""
-        self._register_builtins()
 
     def register(self, name: str, description: str,
                  parameters: dict, handler: Callable):
