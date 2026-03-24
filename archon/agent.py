@@ -6,11 +6,9 @@ import logging
 import os
 import re
 import sys
-import queue
-import threading
 import time
 from datetime import datetime, timezone
-from typing import Callable, Generator, TypeVar, cast
+from typing import Callable, Generator
 
 from archon import memory as memory_store
 from archon.control.hooks import HookBus
@@ -41,6 +39,7 @@ from archon.prompt import (
 )
 from archon.config import Config
 from archon.context_metrics import estimate_tokens_from_chars
+from archon.execution.llm_runtime import _chat_with_retry
 from archon.security.redaction import redact_secret_like_text
 from archon.research import store as research_store
 from archon.streaming import chat_once_with_timeout, stream_chat_with_retry
@@ -235,6 +234,7 @@ class Agent:
                     visible_tool_schemas,
                     max_attempts=self.llm_retry_attempts,
                     request_timeout_sec=self.llm_request_timeout_sec,
+                    is_transient_error=_is_transient_llm_error,
                 ),
                 llm_step_no_tools=lambda iter_system_prompt: _chat_with_retry(
                     self.llm,
@@ -243,6 +243,7 @@ class Agent:
                     [],
                     max_attempts=self.llm_retry_attempts,
                     request_timeout_sec=self.llm_request_timeout_sec,
+                    is_transient_error=_is_transient_llm_error,
                 ),
             ),
             emit_hook=self._emit_hook,
@@ -322,6 +323,7 @@ class Agent:
                     [],
                     max_attempts=self.llm_retry_attempts,
                     request_timeout_sec=self.llm_request_timeout_sec,
+                    is_transient_error=_is_transient_llm_error,
                 ),
             ),
             emit_hook=self._emit_hook,
@@ -1169,34 +1171,6 @@ def _count_result_items(result_text: str) -> int:
     return count
 
 
-def _chat_with_retry(
-    llm,
-    system_prompt: str,
-    history: list[dict],
-    tools: list[dict],
-    max_attempts: int = 3,
-    request_timeout_sec: float | None = None,
-) -> LLMResponse:
-    """Best-effort retry for transient provider errors (kept intentionally simple)."""
-    delays = (0.35, 1.0)
-
-    def _attempt_chat(active_llm) -> LLMResponse:
-        attempt = 0
-        while True:
-            attempt += 1
-            try:
-                return _call_with_timeout(
-                    lambda: active_llm.chat(system_prompt, history, tools=tools),
-                    request_timeout_sec,
-                )
-            except Exception as e:
-                if attempt >= max_attempts or not _is_transient_llm_error(e):
-                    raise
-                time.sleep(delays[min(attempt - 1, len(delays) - 1)])
-
-    return _attempt_chat(llm)
-
-
 def _chat_stream_collect_with_retry(
     llm,
     system_prompt: str,
@@ -1241,32 +1215,6 @@ def _collect_stream_response(
         elif isinstance(chunk, LLMResponse):
             response = chunk
     return collected_text, response
-
-
-T = TypeVar("T")
-
-
-def _call_with_timeout(fn: Callable[[], T], timeout_sec: float | None) -> T:
-    if timeout_sec is None or float(timeout_sec) <= 0:
-        return fn()
-
-    mailbox: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
-
-    def _runner() -> None:
-        try:
-            mailbox.put((True, fn()))
-        except Exception as e:
-            mailbox.put((False, e))
-
-    thread = threading.Thread(target=_runner, daemon=True)
-    thread.start()
-    try:
-        ok, payload = mailbox.get(timeout=float(timeout_sec))
-    except queue.Empty as e:
-        raise TimeoutError(f"LLM request TIMEOUT after {timeout_sec}s") from e
-    if ok:
-        return cast(T, payload)
-    raise cast(Exception, payload)
 
 
 def _is_transient_llm_error(exc: Exception) -> bool:

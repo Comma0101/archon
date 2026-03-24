@@ -14,11 +14,11 @@ import archon.prompt as prompt_module
 from archon.research import store as research_store
 from archon.agent import (
     Agent,
-    _chat_with_retry,
     _estimate_history_chars,
     _print_tool_call,
     _print_tool_result,
 )
+from archon.execution.llm_runtime import _chat_with_retry
 from archon.llm import LLMResponse, ToolCall
 from archon.streaming import chat_once_with_timeout, stream_chat_with_retry
 from archon.tools import ToolRegistry
