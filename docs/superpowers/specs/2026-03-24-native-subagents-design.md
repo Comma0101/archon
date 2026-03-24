@@ -158,16 +158,39 @@ class SubagentRunner:
 ### What SubagentRunner creates
 
 - Fresh `history` list with `[{"role": "user", "content": task + context}]`
-- A minimal agent-like object that `execute_turn()` can operate on (duck-typed to satisfy the function's attribute access: `history`, `max_iterations`, `wall_clock_timeout_sec`, `total_input_tokens`, `total_output_tokens`, etc.)
+- `llm_step` and `llm_step_no_tools` callables — closures over the subagent's `LLMClient` and history, passed as explicit keyword arguments to `execute_turn()`
+- A minimal agent-like shim object that `execute_turn()` can operate on. The turn executor accesses many attributes and methods on the agent object. The shim must provide:
+
+**Required attributes:**
+- `history` — the fresh message list
+- `config` — parent's Config (for policy evaluation)
+- `tools` — the filtered ToolRegistry
+- `max_iterations` — from SubagentConfig
+- `wall_clock_timeout_sec` — from SubagentConfig
+- `max_consecutive_tool_errors` — hardcoded (3)
+- `total_input_tokens`, `total_output_tokens` — counters (start at 0)
+- `on_thinking` — `None` (no UI callback)
+- `last_turn_id` — static string like `"subagent"`
+- `last_suspension_request` — `None`
+- `log_label` — `f"subagent:{type}"`
+- `diagnostic_tool_error_threshold` — hardcoded (2)
+
+**Required methods (with subagent-appropriate implementations):**
+- `_make_assistant_msg(response)` — same as Agent's (converts LLMResponse to history message)
+- `_emit_hook(kind, payload)` — no-op (parent handles hooks)
+- `_record_llm_usage(turn_id, source, response)` — no-op (token tracking via attributes)
+- `_consume_pending_compactions_into_prompt(prompt)` — returns prompt unchanged (no compaction)
+- `_shape_tool_result_for_history(result, name)` — truncation logic (can reuse Agent's or simplified version)
 
 ### What SubagentRunner does NOT have
 
 - History trimming (short-lived, won't hit context limits)
-- Compaction (same reason)
+- Compaction — `_consume_pending_compactions_into_prompt()` is a no-op that returns the prompt unchanged
 - Skills or profiles (subagents are task-focused)
-- Hook bus (parent handles hooks)
+- Hook bus — `_emit_hook()` is a no-op
 - Activity summary or memory prefetch
 - Session ID or session persistence
+- LLM usage recording — `_record_llm_usage()` is a no-op; token counts tracked via `total_input_tokens`/`total_output_tokens` attributes and rolled into parent after run
 
 ### What SubagentRunner passes through
 
