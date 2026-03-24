@@ -3336,6 +3336,84 @@ def test_chat_cmd_streams_final_text_in_interactive_session():
     assert saved == [("sess-1", "hello", "Hello world")]
 
 
+def test_chat_cmd_streams_no_chunk_turn_uses_buffered_reply():
+    class _NoChunkAgent:
+        def __init__(self):
+            self.hooks = HookBus()
+            self.config = Config()
+            self.config.llm.model = "test-model"
+            self.total_input_tokens = 0
+            self.total_output_tokens = 0
+            self.log_label = ""
+            self.policy_profile = "default"
+            self.on_thinking = None
+            self.on_tool_call = None
+            self.history = []
+
+        def run(self, text):
+            raise AssertionError(f"run() should not be called after no-chunk stream: {text}")
+
+        def run_stream(self, text):
+            assert text == "hello"
+            self.total_input_tokens += 8
+            self.total_output_tokens += 2
+            self.history.append(
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "buffered reply"}],
+                }
+            )
+            if False:
+                yield text
+
+        def reset(self):
+            return None
+
+    outputs = []
+    streamed = []
+    saved = []
+    agent = _NoChunkAgent()
+    session_ids = iter(["sess-1", "sess-2"])
+    inputs = iter(["hello", "quit"])
+
+    _chat_cmd(
+        make_agent_fn=lambda: agent,
+        make_telegram_adapter_fn=lambda _cfg: None,
+        new_session_id_fn=lambda: next(session_ids),
+        save_exchange_fn=lambda *args: saved.append(args),
+        slash_completer_fn=lambda *_args: None,
+        pick_slash_command_fn=lambda: None,
+        is_bracketed_paste_start_fn=lambda _text: False,
+        collect_bracketed_paste_fn=lambda *_args, **_kwargs: "",
+        is_paste_command_fn=lambda _text: False,
+        collect_paste_message_fn=lambda *_args, **_kwargs: "",
+        handle_repl_command_fn=_handle_repl_command,
+        is_model_runtime_error_fn=lambda _err: False,
+        format_session_summary_fn=_format_session_summary,
+        format_chat_response_fn=lambda text: text,
+        format_turn_stats_fn=_format_turn_stats,
+        make_readline_prompt_fn=lambda label, _ansi: label,
+        spinner_cls=_FakeSpinner,
+        ansi_prompt_user="",
+        ansi_error="",
+        ansi_reset="",
+        click_echo_fn=lambda text="", err=False: outputs.append((text, err)),
+        input_fn=lambda _prompt: next(inputs),
+        readline_module=_FakeReadline(),
+        time_time_fn=lambda: 1.0,
+        version="test",
+        stream_write_fn=lambda text: streamed.append(text),
+        stream_flush_fn=lambda: None,
+    )
+
+    plain_stream = re.sub(r"\x1b\[[0-9;]*m", "", "".join(streamed))
+    plain_outputs = [re.sub(r"\x1b\[[0-9;]*m", "", text) for text, _err in outputs]
+
+    assert "buffered reply" in plain_stream
+    assert any("buffered reply" in text for text in plain_outputs)
+    assert saved == [("sess-1", "hello", "buffered reply")]
+
+
 def test_run_cmd_keeps_buffered_output():
     class _Agent:
         def __init__(self):

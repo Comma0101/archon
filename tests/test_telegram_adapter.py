@@ -2293,6 +2293,73 @@ def test_chat_body_streaming_edit_failure_falls_back_to_plain_send(monkeypatch):
     assert saved == [("tg-99-20260323-140100", "hello", "Hello from telegram stream done")]
 
 
+def test_chat_body_stream_no_chunk_does_not_rerun_turn(monkeypatch):
+    class _NoChunkAgent:
+        def __init__(self):
+            self.hooks = HookBus()
+            self.config = Config()
+            self.config.llm.provider = "openai"
+            self.config.llm.model = "gpt-5-mini"
+            self.config.llm.api_key = "test-key"
+            self.policy_profile = "default"
+            self.session_id = ""
+            self.total_input_tokens = 0
+            self.total_output_tokens = 0
+            self.history = []
+            self.log_label = ""
+            self.on_thinking = None
+            self.on_tool_call = None
+
+        def run_stream(self, text):
+            assert text == "hello"
+            self.total_input_tokens += 7
+            self.total_output_tokens += 2
+            self.history.append(
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "buffered reply"}],
+                }
+            )
+            if False:
+                yield text
+
+        def run(self, text):
+            raise AssertionError(f"run() should not be called after no-chunk stream: {text}")
+
+        def reset(self):
+            return None
+
+    adapter = TelegramAdapter(
+        token="123:abc",
+        allowed_user_ids=[42],
+        agent_factory=lambda: _NoChunkAgent(),
+        poll_timeout_sec=1,
+    )
+    sent_messages = []
+    saved = []
+
+    monkeypatch.setattr(adapter, "_send_typing", lambda chat_id: None)
+    monkeypatch.setattr(
+        "archon.adapters.telegram.new_session_id",
+        lambda: "20260323-140200",
+    )
+    monkeypatch.setattr(
+        "archon.adapters.telegram.save_exchange",
+        lambda session_id, user_msg, assistant_msg: saved.append((session_id, user_msg, assistant_msg)),
+    )
+    monkeypatch.setattr(
+        adapter._bot,
+        "send_message",
+        lambda chat_id, text, **kwargs: sent_messages.append((chat_id, text)) or {"message_id": 703},
+    )
+
+    adapter._handle_message({"text": "hello", "chat": {"id": 99}, "from": {"id": 42}})
+
+    assert len(sent_messages) == 1
+    assert sent_messages[0][1] == "buffered reply"
+    assert saved == [("tg-99-20260323-140200", "hello", "buffered reply")]
+
+
 def test_streaming_blocked_dangerous_action_suppresses_streamed_rejection(monkeypatch):
     adapter = TelegramAdapter(
         token="123:abc",

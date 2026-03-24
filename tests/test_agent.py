@@ -3039,6 +3039,23 @@ class TestAgentLoop:
         assert [msg["role"] for msg in agent.history] == ["user", "assistant"]
         assert agent.history[-1]["content"] == [{"type": "text", "text": "single fallback reply"}]
 
+    def test_run_stream_pre_delta_fallback_calls_chat_once_exactly_once(self):
+        final_resp = LLMResponse(
+            text="fallback reply",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "fallback reply"}],
+            input_tokens=7,
+            output_tokens=3,
+        )
+        agent = make_agent([], stream_chunks=None)
+        agent.llm.chat_stream = MagicMock(side_effect=RuntimeError("stream broke"))
+        agent.llm.chat = MagicMock(side_effect=[RuntimeError("503 UNAVAILABLE"), final_resp])
+
+        chunks = list(agent.run_stream("hello"))
+
+        assert chunks == ["fallback reply"]
+        assert agent.llm.chat.call_count == 1
+
     def test_run_stream_with_tool_calls(self):
         tool_resp = LLMResponse(
             text=None,
