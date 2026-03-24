@@ -184,6 +184,12 @@ def classify(command: str, archon_source_dir: str | None = None) -> Level:
     if binary == "sed" and _sed_has_in_place_flag(parts[1:]):
         return Level.DANGEROUS
 
+    # Shell-level writes via redirection or tee should never be treated as read-only.
+    if _has_output_redirection(parts[1:]):
+        return Level.DANGEROUS
+    if binary == "tee" and _tee_has_file_target(parts[1:]):
+        return Level.DANGEROUS
+
     # Check safe commands
     if binary in SAFE_COMMANDS:
         return Level.SAFE
@@ -235,6 +241,49 @@ def _sed_has_in_place_flag(args: list[str]) -> bool:
         # Combined short flags like `-Ei` or `-nri`
         if short.isalpha() and "i" in short:
             return True
+    return False
+
+
+def _has_output_redirection(args: list[str]) -> bool:
+    """Detect shell output redirection to a file target.
+
+    Safe descriptor rewrites like `>&2` or `2>&1` are ignored.
+    """
+    i = 0
+    while i < len(args):
+        token = args[i]
+        match = re.match(r"^(?:\d+|&)?(?:>>|>\||>)(.*)$", token)
+        if match is None:
+            i += 1
+            continue
+
+        suffix = (match.group(1) or "").strip()
+        if suffix:
+            if suffix.startswith("&"):
+                i += 1
+                continue
+            return True
+
+        if i + 1 < len(args):
+            target = args[i + 1].strip()
+            if target and not target.startswith("&"):
+                return True
+        i += 1
+    return False
+
+
+def _tee_has_file_target(args: list[str]) -> bool:
+    """Detect when tee is being used to write to a file target."""
+    saw_separator = False
+    for arg in args:
+        if not saw_separator and arg == "--":
+            saw_separator = True
+            continue
+        if not saw_separator and arg.startswith("-") and arg != "-":
+            continue
+        if arg == "-":
+            continue
+        return True
     return False
 
 

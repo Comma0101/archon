@@ -231,3 +231,8 @@ class TestShell:
         result = reg.execute("shell", {"command": "echo hello"})
         assert "rejected by safety gate" in result.lower()
         assert calls
+
+    def test_shell_rejects_output_redirection_write(self):
+        reg = make_registry()
+        result = reg.execute("shell", {"command": "echo alpha > /tmp/subagent-smoke.txt"})
+        assert "rejected by safety gate" in result.lower()

@@ -306,3 +306,41 @@ def test_runner_appends_shaped_tool_results_to_history():
     assert "excerpt:" in shaped
     assert "... [7 lines omitted] ..." in shaped
     assert "line 19" not in shaped
+
+
+def test_runner_rejects_unsupported_deep_research_job_before_llm_call():
+    llm = MagicMock()
+    registry = ToolRegistry.empty()
+    registry.register(
+        "read_file",
+        "Read a file",
+        {"properties": {"path": {"type": "string"}}, "required": ["path"]},
+        lambda path, _ctx=None: "ok",
+    )
+    runner = _make_runner(llm, registry)
+
+    result = runner.run("start a deep research job")
+
+    assert result.status == "failed"
+    assert "deep research" in result.text.lower()
+    assert result.iterations_used == 0
+    assert llm.chat.call_count == 0
+
+
+def test_runner_rejects_unsupported_worker_session_before_llm_call():
+    llm = MagicMock()
+    registry = ToolRegistry.empty()
+    registry.register(
+        "read_file",
+        "Read a file",
+        {"properties": {"path": {"type": "string"}}, "required": ["path"]},
+        lambda path, _ctx=None: "ok",
+    )
+    runner = _make_runner(llm, registry)
+
+    result = runner.run("start a worker session in the background")
+
+    assert result.status == "failed"
+    assert "worker" in result.text.lower() or "background" in result.text.lower()
+    assert result.iterations_used == 0
+    assert llm.chat.call_count == 0

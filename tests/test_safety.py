@@ -108,6 +108,12 @@ class TestDangerous:
     def test_sed_in_place_combined_flags(self):
         assert classify("sed -Ei 's/a/b/' file.txt") == Level.DANGEROUS
 
+    def test_shell_output_redirection_to_file(self):
+        assert classify("echo alpha > /tmp/subagent-smoke.txt") == Level.DANGEROUS
+
+    def test_tee_with_file_target(self):
+        assert classify("printf alpha | tee /tmp/subagent-smoke.txt") == Level.DANGEROUS
+
 
 class TestPipes:
     def test_safe_pipe(self):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -15,6 +16,17 @@ from archon.execution.llm_runtime import _chat_with_retry
 from archon.llm import LLMClient, LLMResponse, ToolCall
 from archon.security.redaction import redact_secret_like_text
 from archon.tools import ToolRegistry
+
+
+_DEEP_RESEARCH_START_PATTERN = re.compile(
+    r"\b(?:start|run|launch|begin|do|perform|create|open|kick\s+off)\b.*\bdeep research\b"
+    r"|\bdeep research\b.*\bjob\b",
+    re.IGNORECASE,
+)
+_WORKER_SESSION_START_PATTERN = re.compile(
+    r"\b(?:start|run|launch|begin|create|open|spawn)\b.*\b(?:worker(?:\s+session)?|background\s+job|background\s+worker)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -73,6 +85,15 @@ class SubagentRunner:
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.history.append({"role": "user", "content": self._format_user_message(task, context)})
+        unsupported_reason = self._detect_unsupported_request(task)
+        if unsupported_reason:
+            return SubagentResult(
+                status="failed",
+                text=unsupported_reason,
+                input_tokens=0,
+                output_tokens=0,
+                iterations_used=0,
+            )
         started_at = time.monotonic()
         tool_error_streak = 0
         iterations_used = 0
@@ -222,3 +243,22 @@ class SubagentRunner:
             "tool_name": call.name,
             "content": content,
         }
+
+    def _detect_unsupported_request(self, task: str) -> str | None:
+        normalized = str(task or "").strip().lower()
+        if not normalized:
+            return None
+        tool_names = {str(name or "").strip().lower() for name in self.tools.tools}
+        if "deep_research" not in tool_names and _DEEP_RESEARCH_START_PATTERN.search(normalized):
+            return (
+                "Error: This native subagent cannot start deep research jobs. "
+                "Use the parent agent or the deep_research tool directly."
+            )
+        if not any(name.startswith("worker_") for name in tool_names) and _WORKER_SESSION_START_PATTERN.search(
+            normalized
+        ):
+            return (
+                "Error: This native subagent cannot start or manage worker/background sessions. "
+                "Use the parent agent or the worker tools directly."
+            )
+        return None
