@@ -118,7 +118,18 @@ def resolve_tier_model(config: Config, tier: str) -> str:
 
 ### Design
 
-A lightweight wrapper around the existing `execute_turn()` function. It does NOT reuse `Agent` — it creates only what's needed:
+A lightweight wrapper that runs the subagent's agent loop. It does NOT reuse `Agent` — it creates only what's needed.
+
+**Why not reuse `execute_turn()` directly:** `execute_turn()` returns a plain `str` or `SuspensionRequest`. Timeouts and iteration limits are surfaced as normal assistant text via `_finalize_without_tools()`, with no structured status channel or iteration count. The `SubagentResult` contract requires `status` (ok/failed/timeout/iteration_limit) and `iterations_used`.
+
+**Solution:** `SubagentRunner.run()` implements its own iteration loop modeled on `execute_turn()` but adapted for subagent needs:
+- Same pattern: `for iteration in range(max_iterations): call LLM → process tool calls → repeat`
+- Reuses `_chat_with_retry()` for the LLM step (or direct `LLMClient` calls)
+- Reuses `ToolRegistry.execute()` for tool execution
+- Tracks iteration count and detects timeout/iteration-limit/failure as structured `SubagentResult.status`
+- Does NOT reuse `execute_turn()` as a black box — it is a simplified, purpose-built loop
+
+This is ~80 lines of straightforward loop code. The simplification vs `execute_turn()`: no streaming path, no suspension requests, no skill guidance, no compaction injection, no hook emission. Just: LLM call → tool execution → repeat → return structured result.
 
 ```python
 @dataclass
@@ -155,45 +166,42 @@ class SubagentRunner:
         """Execute the subagent task and return a condensed result."""
 ```
 
-### What SubagentRunner creates
+### What SubagentRunner manages
 
-- Fresh `history` list with `[{"role": "user", "content": task + context}]`
-- `llm_step` and `llm_step_no_tools` callables — closures over the subagent's `LLMClient` and history, passed as explicit keyword arguments to `execute_turn()`
-- A minimal agent-like shim object that `execute_turn()` can operate on. The turn executor accesses many attributes and methods on the agent object. The shim must provide:
+Since the runner implements its own loop (not delegating to `execute_turn()`), it does not need a duck-typed agent shim. It manages:
 
-**Required attributes:**
-- `history` — the fresh message list
-- `config` — parent's Config (for policy evaluation)
-- `tools` — the filtered ToolRegistry
-- `max_iterations` — from SubagentConfig
-- `wall_clock_timeout_sec` — from SubagentConfig
-- `max_consecutive_tool_errors` — hardcoded (3)
+- `history: list[dict]` — fresh message list, starts with `[{"role": "user", "content": task + context}]`
+- `tools: ToolRegistry` — the filtered registry (freshly built, not copied)
+- `llm: LLMClient` — tier-appropriate client
 - `total_input_tokens`, `total_output_tokens` — counters (start at 0)
-- `on_thinking` — `None` (no UI callback)
-- `on_tool_call` — `None` (no UI callback)
-- `last_turn_id` — static string like `"subagent"`
-- `last_suspension_request` — `None`
-- `diagnostic_tool_error_threshold` — hardcoded (2)
+- `iterations_used: int` — tracks loop progress
 
-**Required methods (with subagent-appropriate implementations):**
-- `_make_assistant_msg(response)` — same as Agent's (converts LLMResponse to history message)
-- `_emit_hook(kind, payload)` — no-op (parent handles hooks)
-- `_record_llm_usage(turn_id, source, response)` — no-op (token tracking via attributes)
-- `_consume_pending_compactions_into_prompt(prompt)` — returns prompt unchanged (no compaction)
-- `_enforce_iteration_budget()` — no-op (subagents are short-lived, no budget enforcement)
-- `_shape_tool_result_for_history(tool_name, tool_args, result_text)` — truncation logic (can reuse Agent's or simplified version)
+**Helper functions reused from Agent (extracted or duplicated):**
+- `_make_assistant_msg(response)` — converts `LLMResponse` to Anthropic-format history message. This is a pure function (~10 lines) that can be extracted from `Agent` or duplicated in the runner.
+- `_shape_tool_result_for_history(tool_name, tool_args, result_text)` — truncation logic for tool results. Same approach: extract or duplicate.
+- Tool policy evaluation — the runner calls `evaluate_tool_policy()` directly (it's already a standalone function in `archon/control/policy.py`), passing `profile_name="default"`.
+- Secret redaction — `redact_secret_like_text()` is a standalone function, called on tool results before adding to history.
 
-**Note:** `log_label` and `terminal_activity_feed` are accessed via `getattr()` with defaults in print helpers — safe to omit from the shim.
+### Profile Handling
+
+`execute_turn()` requires an `active_profile` parameter and uses it for tool policy evaluation (`evaluate_tool_policy()` in `turn_executor.py`). Subagents cannot simply skip this.
+
+**Solution:** The subagent shim passes `"default"` as `active_profile`. This is safe because:
+1. Tool visibility is already controlled by which tools are registered in the subagent's fresh registry (not by profile filtering)
+2. The `"default"` profile's policy evaluation is permissive — it does not restrict tools beyond what the registry exposes
+3. The explore safety override is handled at the registry's `confirmer` level, not the profile level
+
+The shim's `_visible_tool_schemas()` method (if accessed) returns all schemas from the subagent's registry — profile-based filtering is not applied since the registry already contains only the allowed tools.
 
 ### What SubagentRunner does NOT have
 
 - History trimming (short-lived, won't hit context limits)
 - Compaction — `_consume_pending_compactions_into_prompt()` is a no-op that returns the prompt unchanged
-- Skills or profiles (subagents are task-focused)
+- Skills — subagents are task-focused; no skill guidance is injected into the system prompt
 - Hook bus — `_emit_hook()` is a no-op
 - Activity summary or memory prefetch
 - Session ID or session persistence
-- LLM usage recording — `_record_llm_usage()` is a no-op; token counts tracked via `total_input_tokens`/`total_output_tokens` attributes and rolled into parent after run
+- LLM usage recording within the runner loop — the runner tracks tokens via counters, not per-call ledger writes
 
 ### What SubagentRunner passes through
 
@@ -219,26 +227,43 @@ Not allowed:
 - Setup tools
 - Call/mission tools
 
-### General Type (full minus nesting)
+### General Type (full minus nesting and persistent work)
 
 Allowed tools:
-- Everything the parent has registered, EXCEPT `spawn_subagent`
+- All `register_*_tools()` functions are called EXCEPT:
+  - `register_subagent_tools()` — prevents nesting
+  - `register_worker_tools()` — prevents spawning durable background worker sessions (see Implementation section below)
 
 Uses the parent's `confirmer` for safety gates.
 
 ### Implementation
 
-Tool filtering happens at registry construction time. For each subagent type, we build a new `ToolRegistry` and copy only the allowed tools from the parent registry:
+**Problem with naive registry copying:** Tool handlers in Archon are closures over the original `ToolRegistry` instance. For example, `shell()` in `filesystem_tools.py` closes over `registry` to access `registry.confirmer`, `registry.archon_source_dir`, and `registry.config`. Worker tool handlers similarly close over their registry. Copying handler functions into a new registry means they still reference the *parent* registry's confirmer and config, breaking the explore safety override.
+
+**Solution: build a fresh registry with re-registered tools.** Instead of copying handlers, we construct a new `ToolRegistry` and call the same `register_*_tools()` functions that `_register_builtins()` uses, but only the ones appropriate for the subagent type. The new registry gets its own `confirmer` (overridden for explore) and `config`, so closures bind to the correct instance.
 
 ```python
 def build_subagent_registry(
-    parent_registry: ToolRegistry,
+    parent_config: Config,
     subagent_type: str,
     confirmer: Callable | None = None,
+    archon_source_dir: str | None = None,
 ) -> ToolRegistry:
+    """Build a fresh ToolRegistry for a subagent by calling registration
+    functions directly, so handler closures bind to the new registry."""
 ```
 
-For `explore`, the shell tool's confirmer is wrapped to reject non-SAFE commands.
+For `explore`:
+- Call only `register_filesystem_tools(registry)` (provides shell, read_file, grep, glob)
+- The registry's `confirmer` is wrapped: rejects anything classified as `DANGEROUS` or `FORBIDDEN`, only passes `SAFE` commands through
+- Do NOT call `register_worker_tools`, `register_memory_tools`, `register_mcp_tools`, etc.
+
+For `general`:
+- Call all `register_*_tools()` functions EXCEPT `register_subagent_tools()` (prevents nesting)
+- Also exclude `register_worker_tools()` to prevent spawning durable background worker sessions (see below)
+- Uses parent's `confirmer` unchanged
+
+**Why exclude worker tools from general subagents:** The spec's non-goals include "persistent subagent sessions / resumption." Worker tools like `worker_start` default to background=True and create durable sessions that outlive the subagent's turn. A short-lived native subagent should not spawn persistent background work. If the parent needs heavy delegation, it should use `delegate_code_task` directly.
 
 ## The `spawn_subagent` Tool
 
@@ -261,12 +286,12 @@ Registered in the parent's `ToolRegistry` via `register_subagent_tools(registry)
 1. Validate `type` is "explore" or "general"
 2. Resolve model from tier config
 3. Look up type defaults (max_iterations, timeout, system_prompt)
-4. Build filtered `ToolRegistry` for the type
+4. Build filtered `ToolRegistry` for the type (fresh registration, not handler copying)
 5. Create `LLMClient` with tier model (reuses parent's API key, provider, base_url)
 6. Create `SubagentConfig` and `SubagentRunner`
 7. Call `runner.run()`
 8. Format `SubagentResult` as tool result string
-9. Add subagent's token usage to parent's totals
+9. Roll up token usage: add to parent's `total_input_tokens`/`total_output_tokens` AND call parent's `_record_llm_usage()` with `source="subagent:{type}"` so ledger-backed `/cost` totals include subagent usage
 
 ### System Prompts
 
@@ -316,19 +341,20 @@ archon/subagents/
 | `archon/tools.py` | `_register_builtins()` calls `register_subagent_tools(self)` |
 | `archon/config.py` | Add `TierConfig` dataclass, `[llm.tiers]` parsing in `load_config()`, add `tiers` field to `Config` |
 | `archon/llm.py` | No changes — instantiate with different model string |
-| `archon/execution/turn_executor.py` | No changes — reused as-is |
+| `archon/execution/turn_executor.py` | No changes — SubagentRunner has its own simplified loop |
 | `archon/agent.py` | Token rollup: add subagent tokens to `total_input_tokens`/`total_output_tokens` |
 
 ## Error Handling
 
 | Scenario | Behavior |
 |----------|----------|
-| LLM API failure | `execute_turn()` handles retries. Subagent returns `status="failed"` with error. |
-| Repeated tool errors | `execute_turn()`'s `consecutive_tool_errors` logic stops the subagent. Returns `status="failed"`. |
-| Iteration limit hit | `execute_turn()` calls `_finalize_without_tools()`. Returns `status="iteration_limit"` with summary. |
-| Wall-clock timeout | `execute_turn()` handles this. Returns `status="timeout"`. |
+| LLM API failure | `SubagentRunner` catches the exception. Returns `SubagentResult(status="failed", text=error_message)`. |
+| Repeated tool errors | Runner tracks `consecutive_tool_errors`. After 3, stops iterating. Returns `status="failed"` with last error. |
+| Iteration limit hit | Runner exits loop after `max_iterations`. Returns `status="iteration_limit"` with last assistant text. |
+| Wall-clock timeout | Runner checks `time.monotonic()` each iteration. Returns `status="timeout"` with partial result. |
 | Invalid subagent type | Tool handler returns error string immediately. No subagent spawned. |
 | Empty task | Tool handler returns error string immediately. |
+| SuspensionRequest from tool | Runner treats as error — subagents don't support suspension. Returns `status="failed"`. |
 
 All errors are non-fatal to the parent — the tool result contains the error, and the parent agent decides how to proceed.
 
@@ -363,7 +389,7 @@ All LLM interactions are mocked. The `execute_turn()` function is tested elsewhe
 2. `spawn_subagent(type="general", task="do X")` runs with the parent's model and full tools (minus nesting) and returns results
 3. Explore subagents cannot write files or execute dangerous commands
 4. General subagents cannot spawn sub-subagents
-5. Token usage from subagents appears in `/cost` output
+5. Token usage from subagents appears in `/cost` output (both session counters and ledger-backed workflow totals)
 6. Model tier auto-detection works for Anthropic, OpenAI, Google providers
 7. User can override tier models via `[llm.tiers]` config
 8. Subagent failures return error info to parent without crashing the parent's turn
