@@ -29,3 +29,4 @@ def test_general_excludes_spawn_worker_and_call_tools():
     assert "call_mission_status" not in general.allowed_tools
     assert "call_mission_list" not in general.allowed_tools
     assert "call_mission_cancel" not in general.allowed_tools
+    assert "deep_research" not in general.allowed_tools

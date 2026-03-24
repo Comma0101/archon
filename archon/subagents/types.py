@@ -35,7 +35,6 @@ GENERAL_SUBAGENT_TYPE = SubagentType(
         "news_brief",
         "web_search",
         "web_read",
-        "deep_research",
         "check_research_job",
         "list_research_jobs",
     ),

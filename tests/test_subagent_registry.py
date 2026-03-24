@@ -100,3 +100,4 @@ def test_general_registry_excludes_worker_delegate_and_spawn_tools():
     assert "spawn_subagent" not in tool_names
     assert "delegate_code_task" not in tool_names
     assert not any(name.startswith("worker_") for name in tool_names)
+    assert "deep_research" not in tool_names
