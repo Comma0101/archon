@@ -126,3 +126,20 @@ def test_live_reply_editor_falls_back_after_edit_failure():
 
     assert sent == ["Hello", "fallback:Hello world"]
     assert editor.finalize("Hello world") is True
+
+
+def test_live_reply_editor_long_finalize_sends_only_unsent_remainder():
+    sent = []
+    editor = LiveReplyEditor(
+        send_fn=lambda text: sent.append(text) or {"message_id": 91},
+        edit_fn=lambda *_args, **_kwargs: None,
+        fallback_send_fn=lambda text: sent.append(f"fallback:{text}"),
+        throttle_s=0.0,
+        min_start_chars=1,
+        message_limit=10,
+    )
+
+    editor.observe("Hello")
+
+    assert editor.finalize("Hello world from Archon") is True
+    assert sent == ["Hello", "fallback: world from Archon"]

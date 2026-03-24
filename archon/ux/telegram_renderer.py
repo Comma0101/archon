@@ -126,9 +126,17 @@ class LiveReplyEditor:
         if not final_text:
             return False
         if self._fallback_mode or len(final_text) > self._message_limit:
-            if final_text != self._last_sent_text:
-                self._fallback_send_fn(final_text)
-                self._last_sent_text = final_text
+            fallback_text = final_text
+            if (
+                len(final_text) > self._message_limit
+                and self._message_id is not None
+                and self._last_sent_text
+                and final_text.startswith(self._last_sent_text)
+            ):
+                fallback_text = final_text[len(self._last_sent_text):]
+            if fallback_text and final_text != self._last_sent_text:
+                self._fallback_send_fn(fallback_text)
+            self._last_sent_text = final_text
             return True
         if self._message_id is None:
             return False
