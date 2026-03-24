@@ -438,7 +438,7 @@ from __future__ import annotations
 from typing import Callable
 
 from archon.config import Config
-from archon.safety import Level, classify
+from archon.safety import Level
 from archon.subagents.types import get_subagent_type
 from archon.tools import ToolRegistry
 from archon.tooling import (
