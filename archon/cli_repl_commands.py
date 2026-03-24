@@ -6,7 +6,9 @@ import os
 import re
 from typing import Callable
 
+from archon.cli_activity_commands import activity_summary_impl
 from archon.calls.store import list_call_job_summaries, load_call_job_summary
+from archon.config import ACTIVITY_DIR
 from archon.control.jobs import format_job_summary, format_job_summary_list
 from archon.control.orchestrator import describe_orchestrator_mode
 from archon.control.policy import resolve_profile
@@ -235,6 +237,24 @@ def handle_clear_command(agent, text: str) -> tuple[bool, str]:
     agent.last_input_tokens = 0
     agent.last_output_tokens = 0
     return True, build_fresh_start_text(cleared_messages=count)
+
+
+def handle_activity_command(agent, text: str) -> tuple[bool, str]:
+    """Handle `/activity` — show recent activity without mutating the session cursor."""
+    raw = (text or "").strip().lower()
+    if raw != "/activity":
+        return False, ""
+    config = getattr(agent, "config", None)
+    if config is None:
+        return True, "Activity context: no config available"
+    lines: list[str] = []
+    activity_dir = ACTIVITY_DIR
+    activity_summary_impl(
+        config=config.activity,
+        activity_dir=activity_dir,
+        echo_fn=lines.append,
+    )
+    return True, "\n".join(lines)
 
 
 def handle_context_command(agent, text: str) -> tuple[bool, str]:
@@ -1314,6 +1334,9 @@ def handle_repl_command(
     handled, msg = handle_clear_command(agent, raw)
     if handled:
         return "clear", msg
+    handled, msg = handle_activity_command(agent, raw)
+    if handled:
+        return "activity", msg
     handled, msg = handle_context_command(agent, raw)
     if handled:
         return "context", msg

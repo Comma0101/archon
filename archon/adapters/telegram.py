@@ -28,8 +28,10 @@ from archon.adapters.telegram_client import (
     DEFAULT_TELEGRAM_MESSAGE_LIMIT,
     TelegramBotClient,
 )
+from archon.activity import scan_and_store as _activity_scan_and_store
 from archon.audio.stt import transcribe_audio_bytes
 from archon.audio.tts import convert_wav_to_ogg_opus, synthesize_speech_wav
+from archon.cli_activity_commands import activity_summary_impl
 from archon.cli_repl_commands import (
     _maybe_auto_activate_skill,
     handle_clear_command,
@@ -46,7 +48,7 @@ from archon.cli_repl_commands import (
     handle_skills_command,
     handle_status_command,
 )
-from archon.config import ensure_dirs, load_config
+from archon.config import ACTIVITY_DIR, ensure_dirs, load_config
 from archon.control.session_controller import (
     extract_explicit_job_status_ref,
     is_ai_news_request,
@@ -78,6 +80,7 @@ _TELEGRAM_BOT_COMMANDS: tuple[tuple[str, str], ...] = (
     ("new", "Fresh chat context"),
     ("compact", "Reduce context pressure"),
     ("context", "Inspect context state"),
+    ("activity", "Show recent activity"),
     ("cost", "Show token usage"),
     ("jobs", "List background jobs"),
     ("approvals", "Inspect approval state"),
@@ -350,7 +353,7 @@ class TelegramAdapter:
                 build_operator_help_text(
                     intro="Archon is connected.",
                     core="/status, /approvals, /jobs, /skills, /mcp, /reset",
-                    context="/new, /clear, /compact, /context, /cost",
+                    context="/new, /clear, /compact, /context, /cost, /activity",
                     footer="Use /help for the compact command guide.",
                 ),
             )
@@ -362,12 +365,30 @@ class TelegramAdapter:
                 body,
                 build_operator_help_text(
                     core="/status, /approvals, /jobs, /skills, /mcp, /reset",
-                    context="/new, /clear, /compact, /context, /cost",
+                    context="/new, /clear, /compact, /context, /cost, /activity",
                     advanced="/doctor, /permissions, /plugins, /profile, /jobs show <job-id>, "
                     "/approve, /deny, /approve_next, /news, /news_status",
                     footer="Dangerous commands can be approved with inline buttons or /approve.",
                 ),
             )
+            return
+
+        if cmd == "/activity":
+            lines: list[str] = []
+            try:
+                agent = self._get_or_create_chat_agent(chat_id)
+                config = getattr(getattr(agent, "config", None), "activity", None)
+                if config is None:
+                    lines.append("Activity context unavailable.")
+                else:
+                    activity_summary_impl(
+                        config=config,
+                        activity_dir=ACTIVITY_DIR,
+                        echo_fn=lines.append,
+                    )
+            except Exception as exc:
+                lines.append(f"Activity error: {exc}")
+            self._send_text_and_record(chat_id, body, "\n".join(lines) if lines else "No activity data.")
             return
 
         if cmd == "/reset":
@@ -617,6 +638,7 @@ class TelegramAdapter:
                 agent.terminal_activity_feed = _ActivitySinkTextProxy(self._activity_sink)
             self._wire_chat_confirmer(agent, chat_id)
             self._wire_chat_route_progress(agent, chat_id)
+            self._refresh_activity_summary(agent)
             self._agents[chat_id] = agent
         else:
             agent.log_label = f"telegram chat={chat_id}"
@@ -625,6 +647,18 @@ class TelegramAdapter:
             if callable(self._activity_sink):
                 agent.terminal_activity_feed = _ActivitySinkTextProxy(self._activity_sink)
         return agent
+
+    def _refresh_activity_summary(self, agent) -> None:
+        config = getattr(getattr(agent, "config", None), "activity", None)
+        if config is None:
+            return
+        try:
+            agent._activity_summary = _activity_scan_and_store(
+                config,
+                activity_dir=ACTIVITY_DIR,
+            )
+        except Exception:
+            return
 
     def _handle_voice_or_audio_message(
         self,

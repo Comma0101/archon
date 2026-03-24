@@ -11,6 +11,7 @@ from archon.config import Config, MCPServerConfig, ProfileConfig
 from archon.cli import _format_chat_response
 from archon.cli import _is_paste_command, _collect_paste_message
 from archon.cli import (
+    main as _main_cli,
     _make_readline_prompt,
     _make_runtime_prompt,
     _build_model_set_subvalues,
@@ -273,7 +274,7 @@ class TestCliCommands:
 
     def test_slash_commands_include_local_shell_status_commands(self):
         names = {name for name, _desc in _SLASH_COMMANDS}
-        assert {"/status", "/cost", "/doctor", "/permissions", "/new"} <= names
+        assert {"/status", "/cost", "/doctor", "/permissions", "/new", "/activity"} <= names
         assert "/model" in names
         assert "/model-list" not in names
         assert "/model-set" not in names
@@ -491,6 +492,17 @@ class TestCliCommands:
         assert "Inspect state: /status, /context" in msg
         assert "Reduce pressure: /compact, /new" in msg
         assert "Handle blocked actions: /approvals, /approve, /approve_next, /deny" in msg
+
+    def test_handle_repl_command_activity_reports_disabled_when_not_enabled(self):
+        agent = SimpleNamespace(config=Config())
+
+        action, msg = _handle_repl_command(agent, "/activity")
+
+        assert action == "activity"
+        assert "Activity context: disabled" in msg
+
+    def test_main_cli_exposes_activity_group(self):
+        assert "activity" in _main_cli.commands
 
     def test_handle_repl_command_approvals_toggle_reports_requested_mode_without_state(self):
         action, msg = _handle_repl_command(SimpleNamespace(), "/approvals on")
@@ -3352,6 +3364,65 @@ class TestCliLocalInteractiveCommands:
         _run_local_command_session(agent, ["/status", "/reset", "/status", "quit"])
 
         assert agent.session_id == "sess-2"
+
+    def test_local_shell_session_scans_activity_at_startup(self, monkeypatch):
+        agent = _LocalCommandAgent()
+        agent.config.activity.enabled = True
+        summary = object()
+        calls = []
+
+        monkeypatch.setattr(
+            "archon.cli_interactive_commands._activity_scan_and_store",
+            lambda config, activity_dir: calls.append((config, activity_dir)) or summary,
+            raising=False,
+        )
+
+        _run_local_command_session(agent, ["quit"])
+
+        assert len(calls) == 1
+        assert agent._activity_summary is summary
+
+    def test_local_shell_reset_rescans_activity(self, monkeypatch):
+        agent = _LocalCommandAgent()
+        agent.config.activity.enabled = True
+        summaries = [object(), object()]
+        calls = []
+
+        def fake_scan(config, activity_dir):
+            calls.append((config, activity_dir))
+            return summaries[len(calls) - 1]
+
+        monkeypatch.setattr(
+            "archon.cli_interactive_commands._activity_scan_and_store",
+            fake_scan,
+            raising=False,
+        )
+
+        _run_local_command_session(agent, ["/reset", "quit"])
+
+        assert len(calls) == 2
+        assert agent._activity_summary is summaries[-1]
+
+    def test_local_shell_new_rescans_activity(self, monkeypatch):
+        agent = _LocalCommandAgent()
+        agent.config.activity.enabled = True
+        summaries = [object(), object()]
+        calls = []
+
+        def fake_scan(config, activity_dir):
+            calls.append((config, activity_dir))
+            return summaries[len(calls) - 1]
+
+        monkeypatch.setattr(
+            "archon.cli_interactive_commands._activity_scan_and_store",
+            fake_scan,
+            raising=False,
+        )
+
+        _run_local_command_session(agent, ["/new", "quit"])
+
+        assert len(calls) == 2
+        assert agent._activity_summary is summaries[-1]
 
     def test_local_skills_commands_do_not_call_agent_run(self):
         agent = _LocalCommandAgent()

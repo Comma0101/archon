@@ -12,7 +12,7 @@ from typing import Callable
 import click
 
 from archon import __version__
-from archon.config import CONFIG_DIR, load_config, ensure_dirs
+from archon.config import ACTIVITY_DIR, CONFIG_DIR, load_config, ensure_dirs
 from archon.system import get_profile, format_profile
 from archon.introspect import format_self_awareness, get_source_dir
 from archon.memory import read as memory_read, search as memory_search, list_files
@@ -27,6 +27,11 @@ from archon.cli_history_commands import (
     history_delete_cmd as _history_delete_cmd_impl,
     history_list_cmd as _history_list_cmd_impl,
     history_show_cmd as _history_show_cmd_impl,
+)
+from archon.cli_activity_commands import (
+    activity_reset_impl as _activity_reset_cmd_impl,
+    activity_status_impl as _activity_status_cmd_impl,
+    activity_summary_impl as _activity_summary_cmd_impl,
 )
 from archon.cli_interactive_commands import (
     chat_cmd as _chat_cmd_impl,
@@ -424,6 +429,43 @@ def news_status_cmd():
 def memory_group():
     """Manage persistent memory."""
     pass
+
+
+@main.group("activity")
+def activity_group():
+    """Inspect activity context and stored snapshots."""
+    pass
+
+
+@activity_group.command("status")
+def activity_status_cmd():
+    cfg = load_config()
+    ensure_dirs()
+    _activity_status_cmd_impl(
+        config=cfg.activity,
+        activity_dir=ACTIVITY_DIR,
+        echo_fn=click.echo,
+    )
+
+
+@activity_group.command("summary")
+def activity_summary_cmd():
+    cfg = load_config()
+    ensure_dirs()
+    _activity_summary_cmd_impl(
+        config=cfg.activity,
+        activity_dir=ACTIVITY_DIR,
+        echo_fn=click.echo,
+    )
+
+
+@activity_group.command("reset")
+def activity_reset_cmd():
+    ensure_dirs()
+    _activity_reset_cmd_impl(
+        activity_dir=ACTIVITY_DIR,
+        echo_fn=click.echo,
+    )
 
 
 @memory_group.command("search")

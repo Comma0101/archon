@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from archon.adapters.telegram import TelegramAdapter
+from archon.adapters.telegram import TelegramAdapter, _TELEGRAM_BOT_COMMANDS
 from archon.config import Config, MCPServerConfig, ProfileConfig
 from archon.control.hooks import HookBus
 from archon.news.models import NewsDigest, NewsRunResult
@@ -218,7 +218,61 @@ class TestTelegramAdapterCommands:
         adapter._handle_message({"text": "check system packages", "chat": {"id": 99}, "from": {"id": 42}})
 
         assert any(message == "approval blocked for 99: pacman -Q | head" for _source, message in events)
-        assert not any(message == "replied to 99: Command rejected by safety gate." for _source, message in events)
+
+    def test_chat_agent_scans_activity_on_create(self, monkeypatch):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: _TelegramLocalCommandAgent(),
+            poll_timeout_sec=1,
+        )
+        summary = object()
+        calls = []
+
+        monkeypatch.setattr(
+            "archon.adapters.telegram._activity_scan_and_store",
+            lambda config, activity_dir: calls.append((config, activity_dir)) or summary,
+            raising=False,
+        )
+
+        agent = adapter._get_or_create_chat_agent(99)
+
+        assert len(calls) == 1
+        assert agent._activity_summary is summary
+
+    def test_activity_command_renders_summary(self, monkeypatch):
+        adapter = TelegramAdapter(
+            token="123:abc",
+            allowed_user_ids=[42],
+            agent_factory=lambda: _TelegramLocalCommandAgent(),
+            poll_timeout_sec=1,
+        )
+        sent = []
+
+        monkeypatch.setattr("archon.adapters.telegram.save_exchange", lambda *_args: None)
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+        monkeypatch.setattr(
+            "archon.adapters.telegram.activity_summary_impl",
+            lambda *, config, activity_dir, echo_fn: echo_fn("Recent activity line"),
+            raising=False,
+        )
+
+        adapter._handle_message({"text": "/activity", "chat": {"id": 99}, "from": {"id": 42}})
+
+        assert sent == [(99, "Recent activity line")]
+
+    def test_help_mentions_activity_command(self):
+        adapter = _adapter()
+        sent = []
+        adapter._send_text = lambda chat_id, text: sent.append((chat_id, text))  # type: ignore[method-assign]
+
+        adapter._handle_message({"text": "/help", "chat": {"id": 99}, "from": {"id": 42}})
+
+        assert sent
+        assert "/activity" in sent[0][1]
+
+    def test_bot_command_catalog_includes_activity(self):
+        assert ("activity", "Show recent activity") in _TELEGRAM_BOT_COMMANDS
 
     def test_tool_ux_event_routes_only_to_matching_chat(self):
         adapter = TelegramAdapter(

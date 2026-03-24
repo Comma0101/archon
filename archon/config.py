@@ -16,6 +16,7 @@ CONFIG_DIR = _xdg("XDG_CONFIG_HOME", "~/.config") / "archon"
 DATA_DIR = _xdg("XDG_DATA_HOME", "~/.local/share") / "archon"
 STATE_DIR = _xdg("XDG_STATE_HOME", "~/.local/state") / "archon"
 CACHE_DIR = _xdg("XDG_CACHE_HOME", "~/.cache") / "archon"
+ACTIVITY_DIR = STATE_DIR / "activity"
 
 SKILLS_DIR = DATA_DIR / "skills"
 MEMORY_DIR = DATA_DIR / "memory"
@@ -197,6 +198,18 @@ class NewsConfig:
 
 
 @dataclass
+class ActivityConfig:
+    enabled: bool = False
+    repo_paths: list[str] = field(default_factory=list)
+    gap_threshold_minutes: int = 60
+    token_budget: int = 200
+    retention_days: int = 30
+    summarizer: str = "code"
+    max_repos: int = 5
+    max_commits_per_repo: int = 50
+
+
+@dataclass
 class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
@@ -211,6 +224,7 @@ class Config:
     research: ResearchConfig = field(default_factory=ResearchConfig)
     news: NewsConfig = field(default_factory=NewsConfig)
     calls: CallsConfig = field(default_factory=CallsConfig)
+    activity: ActivityConfig = field(default_factory=ActivityConfig)
 
 
 def load_config() -> Config:
@@ -564,6 +578,45 @@ def load_config() -> Config:
             )
         )
 
+        activity = data.get("activity", {})
+        cfg.activity.enabled = bool(activity.get("enabled", cfg.activity.enabled))
+        repo_paths = activity.get("repo_paths", cfg.activity.repo_paths)
+        if isinstance(repo_paths, list):
+            cfg.activity.repo_paths = [str(path) for path in repo_paths]
+        cfg.activity.gap_threshold_minutes = max(
+            1,
+            int(
+                activity.get(
+                    "gap_threshold_minutes",
+                    cfg.activity.gap_threshold_minutes,
+                )
+            ),
+        )
+        cfg.activity.token_budget = max(
+            50,
+            int(activity.get("token_budget", cfg.activity.token_budget)),
+        )
+        cfg.activity.retention_days = max(
+            1,
+            int(activity.get("retention_days", cfg.activity.retention_days)),
+        )
+        cfg.activity.summarizer = str(
+            activity.get("summarizer", cfg.activity.summarizer)
+        )
+        cfg.activity.max_repos = max(
+            1,
+            int(activity.get("max_repos", cfg.activity.max_repos)),
+        )
+        cfg.activity.max_commits_per_repo = max(
+            1,
+            int(
+                activity.get(
+                    "max_commits_per_repo",
+                    cfg.activity.max_commits_per_repo,
+                )
+            ),
+        )
+
     # Environment variables override file config
     if key := os.environ.get("ANTHROPIC_API_KEY"):
         if cfg.llm.provider == "anthropic":
@@ -617,6 +670,7 @@ def ensure_dirs():
         MEMORY_DIR,
         HISTORY_DIR,
         CACHE_DIR,
+        ACTIVITY_DIR,
         NEWS_STATE_DIR,
         NEWS_CACHE_DIR,
         CALLS_MISSIONS_DIR,

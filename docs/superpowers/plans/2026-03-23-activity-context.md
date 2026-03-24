@@ -1328,7 +1328,7 @@ git commit -m "feat(activity): add aggregator and snapshot store"
 
 ---
 
-### Task 8: CodeOnlySummarizer + Injection Builder
+### Task 8: CodeOnlySummarizer + Report Builder + Injection Builder
 
 **Files:**
 - Modify: `archon/activity.py`
@@ -1339,7 +1339,7 @@ git commit -m "feat(activity): add aggregator and snapshot store"
 Append to `tests/test_activity.py`:
 
 ```python
-from archon.activity import CodeOnlySummarizer, build_injection_text
+from archon.activity import CodeOnlySummarizer, build_injection_text, format_activity_report
 
 
 def _make_full_summary() -> ActivitySummary:
@@ -1432,6 +1432,14 @@ def test_build_injection_text_empty_summary():
     )
     text = build_injection_text(summary=summary, token_budget=200)
     assert text == ""
+
+
+def test_format_activity_report_is_uncapped():
+    summary = _make_full_summary()
+    text = format_activity_report(summary)
+    assert "[Recent Activity" in text
+    assert "Working tree" in text
+    assert "System:" in text
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1439,7 +1447,7 @@ def test_build_injection_text_empty_summary():
 Run: `python -m pytest tests/test_activity.py::test_code_only_summarizer_basic -v`
 Expected: FAIL — `cannot import name 'CodeOnlySummarizer'`
 
-- [ ] **Step 3: Implement CodeOnlySummarizer and build_injection_text**
+- [ ] **Step 3: Implement CodeOnlySummarizer, format_activity_report, and build_injection_text**
 
 Append to `archon/activity.py`:
 
@@ -1536,6 +1544,47 @@ def build_injection_text(
         return ""
     summarizer = CodeOnlySummarizer()
     return summarizer.summarize(summary, token_budget)
+
+
+def format_activity_report(summary: ActivitySummary | None) -> str:
+    """Render an explicit operator-facing activity report without injection truncation."""
+    if summary is None:
+        return ""
+
+    lines: list[str] = []
+    since_str = summary.since.strftime("%Y-%m-%d %H:%M")
+    lines.append(f"[Recent Activity — since {since_str}]")
+
+    for repo in summary.git:
+        repo_name = repo.repo_path.name
+        dirs_str = ", ".join(f"{d} {c}" for d, c in repo.top_changed_dirs[:5]) or "no changed dirs"
+        branch_str = ", ".join(repo.branches) or "unknown"
+        lines.append(
+            f"Git: {repo_name}/ — {repo.commit_count} commits | dirs: {dirs_str} | branches: {branch_str} | last: {repo.last_commit_subject}"
+        )
+
+    if summary.packages.installed or summary.packages.upgraded or summary.packages.removed:
+        pkg_parts: list[str] = []
+        if summary.packages.installed:
+            pkg_parts.append("installed " + ", ".join(f"{e.package} {e.version}" for e in summary.packages.installed))
+        if summary.packages.upgraded:
+            pkg_parts.append("upgraded " + ", ".join(f"{e.package} {e.version}" for e in summary.packages.upgraded))
+        if summary.packages.removed:
+            pkg_parts.append("removed " + ", ".join(f"{e.package} {e.version}" for e in summary.packages.removed))
+        lines.append("Packages: " + " | ".join(pkg_parts))
+
+    for wt in summary.working_trees:
+        lines.append(
+            f"Working tree ({wt.repo_path.name}): branch={wt.branch} dirty={wt.dirty} modified={wt.modified} staged={wt.staged} untracked={wt.untracked} stashes={wt.stash_count}"
+        )
+
+    if summary.system:
+        s = summary.system
+        lines.append(
+            f"System: uptime={int(s.uptime_seconds)}s load={s.load_1}/{s.load_5}/{s.load_15} mem={s.mem_used_gb}/{s.mem_total_gb}GB disk={s.disk_used_gb}/{s.disk_total_gb}GB"
+        )
+
+    return "\n".join(lines)
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -1547,7 +1596,7 @@ Expected: PASS
 
 ```bash
 git add archon/activity.py tests/test_activity.py
-git commit -m "feat(activity): add CodeOnlySummarizer and injection builder"
+git commit -m "feat(activity): add activity summary and report builders"
 ```
 
 ---
@@ -1571,6 +1620,18 @@ def test_scan_and_store_disabled():
     config = ActivityConfig(enabled=False)
     result = scan_and_store(config, activity_dir=Path("/tmp"))
     assert result is None
+
+
+def test_scan_and_store_preview_does_not_update_last_session(tmp_path):
+    config = ActivityConfig(enabled=True, repo_paths=[])
+    activity_dir = tmp_path / "activity"
+    result = scan_and_store(
+        config,
+        activity_dir=activity_dir,
+        persist_last_session=False,
+    )
+    assert result is None or isinstance(result, ActivitySummary)
+    assert load_last_session(activity_dir) is None
 
 
 def test_scan_and_store_no_repos():
@@ -1642,6 +1703,8 @@ Append to `archon/activity.py`:
 def scan_and_store(
     config: "ActivityConfig",
     activity_dir: Path,
+    *,
+    persist_last_session: bool = True,
 ) -> ActivitySummary | None:
     """Run all collectors, aggregate, store snapshot, return summary.
 
@@ -1676,7 +1739,8 @@ def scan_and_store(
     # Store
     try:
         store_snapshot(activity_dir, summary)
-        save_last_session(activity_dir, summary.scanned_at)
+        if persist_last_session:
+            save_last_session(activity_dir, summary.scanned_at)
         cleanup_old_snapshots(activity_dir, retention_days=config.retention_days)
     except Exception as exc:
         logger.debug("activity store failed: %s", exc)
@@ -1708,6 +1772,8 @@ git commit -m "feat(activity): add scan_and_store orchestrator"
 
 **Files:**
 - Modify: `archon/agent.py:140-155` (add `_activity_summary` attribute)
+- Modify: `archon/agent.py:196-216` (wire `run()` prompt build + consume summary after successful turn)
+- Modify: `archon/agent.py:268-282` (wire `run_stream()` prompt build + consume summary after successful stream)
 - Modify: `archon/agent.py:1280-1323` (inject activity text in `_build_turn_system_prompt`)
 - Test: `tests/test_activity.py`
 
@@ -1781,23 +1847,32 @@ After `_append_compaction_lines(lines, compactions)` (line 1299), before the mem
         lines.extend(["", activity_text])
 ```
 
-- [ ] **Step 5: Pass activity_summary when calling _build_turn_system_prompt**
+- [ ] **Step 5: Pass activity_summary at both call sites and consume it only after a successful turn**
 
-Find where `_build_turn_system_prompt` is called in `agent.py`. It is called from `Agent._build_system_prompt_for_turn` or similar. Search for the call site:
+`_build_turn_system_prompt(...)` is called from both `Agent.run()` and `Agent.run_stream()`. Update both call sites to pass `activity_summary=self._activity_summary`.
 
-In the call to `_build_turn_system_prompt(...)`, add `activity_summary=self._activity_summary` as the last argument.
+Do **not** clear `_activity_summary` immediately after prompt construction. If the turn fails before completion, the same session-start context should still be available for the retry/next first turn.
 
-After the first turn's injection, clear the summary so it doesn't repeat. In Agent's `run()` method or turn execution, after the first successful turn:
+Instead:
 
-In `_build_turn_system_prompt`, after building the activity text, the caller should clear it. The simplest approach: the caller (Agent) clears `_activity_summary` after the first turn. Find the turn loop in Agent.run() and add after the first iteration:
+In `run()`:
 
 ```python
-        # Clear activity summary after first injection
+        result = orchestrate_response(...)
+        if self._activity_summary is not None:
+            self._activity_summary = None
+        return result
+```
+
+In `run_stream()`:
+
+```python
+        yield from orchestrate_stream_response(...)
         if self._activity_summary is not None:
             self._activity_summary = None
 ```
 
-This should be placed right after the call to `_build_turn_system_prompt` returns.
+This keeps sync and streaming behavior aligned and only consumes the summary after a successful turn completion.
 
 - [ ] **Step 6: Run full test suite to verify no regressions**
 
@@ -1920,7 +1995,7 @@ from pathlib import Path
 from typing import Callable
 
 from archon.activity import (
-    build_injection_text,
+    format_activity_report,
     load_last_session,
     scan_and_store,
 )
@@ -1963,13 +2038,16 @@ def activity_summary_impl(
         echo_fn("Activity context: disabled")
         return
 
-    summary = scan_and_store(config, activity_dir=activity_dir)
+    summary = scan_and_store(
+        config,
+        activity_dir=activity_dir,
+        persist_last_session=False,
+    )
     if summary is None:
         echo_fn("No activity recorded.")
         return
 
-    # Uncapped — show full detail
-    text = build_injection_text(summary=summary, token_budget=10000)
+    text = format_activity_report(summary)
     if text:
         echo_fn(text)
     else:
@@ -2065,7 +2143,7 @@ from archon.config import ..., ACTIVITY_DIR
 In `archon/cli_commands.py`, add to the "Shell" group tuple (after `("/plugins", "plugins")`):
 
 ```python
-            ("/activity", "activity context"),
+            ("/activity", "show recent activity"),
 ```
 
 - [ ] **Step 6: Add handle_activity_command to cli_repl_commands.py**
@@ -2265,9 +2343,9 @@ In the command routing section (around line 344, after the `/help` handler and b
             from archon.cli_activity_commands import activity_summary_impl
             lines: list[str] = []
             try:
-                config = getattr(self, "_config", None) or load_config()
+                agent = self._get_or_create_chat_agent(chat_id)
                 activity_summary_impl(
-                    config=config.activity,
+                    config=agent.config.activity,
                     activity_dir=ACTIVITY_DIR,
                     echo_fn=lines.append,
                 )
@@ -2277,7 +2355,7 @@ In the command routing section (around line 344, after the `/help` handler and b
             return
 ```
 
-- [ ] **Step 3: Add /activity to Telegram /help text**
+- [ ] **Step 3: Add /activity to Telegram /help text and bot command catalog**
 
 In the `/help` command handler (around line 365), add `/activity` to the context line:
 
@@ -2289,6 +2367,12 @@ Also update the `/start` handler similarly (around line 353):
 
 ```python
                     context="/new, /clear, /compact, /context, /cost, /activity",
+```
+
+Update `_TELEGRAM_BOT_COMMANDS` near the top of `archon/adapters/telegram.py` to include:
+
+```python
+    ("activity", "Show recent activity"),
 ```
 
 - [ ] **Step 4: Add scan after Telegram /reset**

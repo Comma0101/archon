@@ -32,6 +32,7 @@ SLASH_COMMAND_GROUPS = (
             ("/approve", "replay pending request"),
             ("/deny", "deny pending request"),
             ("/approve_next", "arm one dangerous action"),
+            ("/activity", "show recent activity"),
             ("/skills", "skills"),
             ("/plugins", "plugins"),
         ),

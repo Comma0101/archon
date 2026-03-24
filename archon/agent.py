@@ -32,6 +32,7 @@ from archon.execution.turn_executor import execute_turn, execute_turn_stream
 from archon.llm import LLMClient, LLMResponse
 from archon.tools import ToolRegistry
 from archon.usage import UsageEvent, record_usage_event
+from archon.activity import ActivitySummary, build_injection_text as _build_activity_injection_text
 from archon.prompt import (
     build_runtime_capability_summary,
     build_skill_guidance,
@@ -150,6 +151,7 @@ class Agent:
         self.last_turn_id: str = ""
         self.last_suspension_request: SuspensionRequest | None = None
         self._pending_compactions: list[dict] = []
+        self._activity_summary: ActivitySummary | None = None
         self.session_id = f"session-{time.time_ns()}"
         self.tools.set_session_id(self.session_id)
         self.tools.hook_bus = self.hooks
@@ -212,8 +214,9 @@ class Agent:
             profile_name=active_profile,
             skill_guidance=skill_guidance,
             compactions=pending_compactions,
+            activity_summary=self._activity_summary,
         )
-        return orchestrate_response(
+        result = orchestrate_response(
             mode=self._orchestrator_mode(),
             turn_id=turn_id,
             user_message=user_message,
@@ -243,6 +246,9 @@ class Agent:
             ),
             emit_hook=self._emit_hook,
         )
+        if self._activity_summary is not None:
+            self._activity_summary = None
+        return result
 
     def run_stream(self, user_message: str, policy_profile: str | None = None) -> Generator[str, None, None]:
         """Run a user message, streaming the final text response.
@@ -277,6 +283,7 @@ class Agent:
             profile_name=active_profile,
             skill_guidance=skill_guidance,
             compactions=pending_compactions,
+            activity_summary=self._activity_summary,
         )
 
         yield from orchestrate_stream_response(
@@ -309,6 +316,8 @@ class Agent:
             ),
             emit_hook=self._emit_hook,
         )
+        if self._activity_summary is not None:
+            self._activity_summary = None
 
     @staticmethod
     def _make_assistant_msg(response) -> dict:
@@ -1284,6 +1293,7 @@ def _build_turn_system_prompt(
     profile_name: str = "default",
     skill_guidance: str = "",
     compactions: list[dict] | None = None,
+    activity_summary: ActivitySummary | None = None,
 ) -> str:
     """Augment the system prompt with best-effort indexed memory snippets for this turn."""
     lines = [base_prompt]
@@ -1297,6 +1307,12 @@ def _build_turn_system_prompt(
         lines.extend(["", skill_guidance])
 
     _append_compaction_lines(lines, compactions)
+    activity_text = _build_activity_injection_text(
+        summary=activity_summary,
+        token_budget=getattr(getattr(config, "activity", None), "token_budget", 200),
+    )
+    if activity_text:
+        lines.extend(["", activity_text])
 
     try:
         prefetched = memory_store.prefetch_for_query(user_message)

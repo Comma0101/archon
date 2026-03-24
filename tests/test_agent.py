@@ -2,6 +2,7 @@
 
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -26,6 +27,7 @@ from archon.execution.contracts import SuspensionRequest
 from archon.execution.turn_executor import execute_turn, execute_turn_stream
 from archon.prompt import build_runtime_capability_summary
 from archon.ux.events import UXEvent
+from archon.activity import ActivitySummary, PackageSummary, SystemSnapshot
 
 
 def make_agent(responses: list[LLMResponse], stream_chunks: list | None = None) -> Agent:
@@ -138,6 +140,97 @@ def test_agent_bootstraps_deep_research_recovery_once(monkeypatch):
     Agent(llm, ToolRegistry(archon_source_dir=None), Config())
 
     assert len(calls) == 1
+
+
+def _make_activity_summary() -> ActivitySummary:
+    return ActivitySummary(
+        scanned_at=datetime(2026, 3, 23, 12, 0, tzinfo=timezone.utc),
+        since=datetime(2026, 3, 23, 11, 0, tzinfo=timezone.utc),
+        git=[],
+        packages=PackageSummary(installed=[], removed=[], upgraded=[]),
+        working_trees=[],
+        system=SystemSnapshot(
+            uptime_seconds=3600.0,
+            load_1=0.2,
+            load_5=0.1,
+            load_15=0.1,
+            mem_used_gb=4.0,
+            mem_total_gb=16.0,
+            disk_used_gb=50.0,
+            disk_total_gb=200.0,
+        ),
+    )
+
+
+def test_build_turn_system_prompt_includes_activity_before_memory_early_return(monkeypatch):
+    monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+
+    prompt = agent_module._build_turn_system_prompt(
+        "test prompt",
+        "what changed?",
+        Config(),
+        activity_summary=_make_activity_summary(),
+    )
+
+    assert "[Recent Activity" in prompt
+
+
+def test_run_consumes_activity_summary_only_after_success(monkeypatch):
+    responses = [
+        LLMResponse(
+            text="ok",
+            tool_calls=[],
+            raw_content=[{"type": "text", "text": "ok"}],
+            input_tokens=10,
+            output_tokens=5,
+        ),
+    ]
+    agent = make_agent(responses)
+    monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+    monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+    agent._activity_summary = _make_activity_summary()
+
+    result = agent.run("continue where I left off")
+
+    assert result == "ok"
+    assert agent._activity_summary is None
+    assert "[Recent Activity" in agent.llm.chat.call_args[0][0]
+
+
+def test_run_preserves_activity_summary_when_turn_fails(monkeypatch):
+    llm = MagicMock()
+    llm.chat = MagicMock(side_effect=RuntimeError("boom"))
+    agent = Agent(llm, ToolRegistry(archon_source_dir=None), Config())
+    agent._system_prompt = "test prompt"
+    monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+    monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+    summary = _make_activity_summary()
+    agent._activity_summary = summary
+
+    with pytest.raises(RuntimeError, match="boom"):
+        agent.run("continue where I left off")
+
+    assert agent._activity_summary is summary
+
+
+def test_run_stream_consumes_activity_summary_only_after_success(monkeypatch):
+    final_resp = LLMResponse(
+        text="ok",
+        tool_calls=[],
+        raw_content=[{"type": "text", "text": "ok"}],
+        input_tokens=10,
+        output_tokens=5,
+    )
+    agent = make_agent([], stream_chunks=[["ok", final_resp]])
+    monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+    monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+    agent._activity_summary = _make_activity_summary()
+
+    chunks = list(agent.run_stream("continue where I left off"))
+
+    assert chunks == ["ok"]
+    assert agent._activity_summary is None
+    assert "[Recent Activity" in agent.llm.chat_stream.call_args[0][0]
 
 
 def test_run_prefers_native_news_brief_for_ai_news_request(monkeypatch):

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import threading
 
+from archon.activity import scan_and_store as _activity_scan_and_store
 from archon.cli_ui import _format_terminal_approval_required
 from archon.cli_repl_commands import _maybe_auto_activate_skill
+from archon.config import ACTIVITY_DIR
 from archon.control.contracts import HookEvent
 from archon.safety import Level
 from archon.ux.cli_renderer import CLIRenderer
@@ -77,6 +79,7 @@ def chat_cmd(
     telegram_adapter = None
     session_id = new_session_id_fn()
     agent.session_id = session_id
+    _refresh_activity_summary(agent)
     prompt_state = {"value": ""}
     visible_input_state = {"value": None}
 
@@ -479,6 +482,7 @@ def chat_cmd(
                     agent.reset()
                     session_id = new_session_id_fn()
                     agent.session_id = session_id
+                    _refresh_activity_summary(agent)
                     turn_count = 0
                     route_counts.clear()
                     counted_route_turn_ids.clear()
@@ -492,6 +496,8 @@ def chat_cmd(
                     approval_state["replay_guard_active"] = False
                     click_echo_fn(f"History cleared. New session: {session_id}")
                     continue
+                if action == "clear":
+                    _refresh_activity_summary(agent)
                 if action == "approve":
                     click_echo_fn(msg)
                     consume_replay = getattr(agent, "consume_terminal_pending_replay", None)
@@ -521,6 +527,7 @@ def chat_cmd(
                     "mcp",
                     "jobs",
                     "job",
+                    "activity",
                 }:
                     click_echo_fn(msg)
                     continue
@@ -654,6 +661,19 @@ def _make_terminal_activity_feed(make_terminal_activity_feed_fn, prompt_fn, inpu
         except TypeError:
             return make_terminal_activity_feed_fn(prompt_fn, input_fn)
     return TerminalActivityFeed(prompt_fn=prompt_fn, input_fn=input_fn, lock=lock)
+
+
+def _refresh_activity_summary(agent) -> None:
+    config = getattr(getattr(agent, "config", None), "activity", None)
+    if config is None:
+        return
+    try:
+        agent._activity_summary = _activity_scan_and_store(
+            config,
+            activity_dir=ACTIVITY_DIR,
+        )
+    except Exception:
+        return
 
 
 def run_cmd(
