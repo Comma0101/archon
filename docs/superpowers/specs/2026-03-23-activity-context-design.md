@@ -14,7 +14,7 @@ Archon starts every session with zero knowledge of what happened outside convers
 
 ## 2. Goals
 
-- Detect git activity, package changes, file change patterns, and system state between sessions.
+- Detect git activity, package changes, working tree state, and system state between sessions.
 - Inject relevant context into the system prompt at session start — no manual `/activity` required.
 - Keep it cheap: no LLM calls for v1, <500ms scan time, <200 tokens injected.
 - Fit Archon's existing patterns: dataclasses, dependency injection, XDG dirs, TOML config.
@@ -63,19 +63,18 @@ def collect_pacman_activity(
 - Direct file read + regex — no subprocess.
 - Returns empty list if file missing or unreadable.
 
-### 4.3 File Change Stats
+### 4.3 Working Tree Summary
 
 ```python
-def collect_file_changes(
+def collect_working_tree_summary(
     repo_paths: list[Path],
-    since: datetime,
-) -> list[FileChangeCluster]:
+) -> list[WorkingTreeSummary]:
 ```
 
-- Runs `git diff --stat HEAD@{<since>}` per repo.
-- Falls back to `git log --name-only --since` if reflog doesn't reach far enough.
-- Returns directory-level change counts (e.g., `archon/tools/: 12 files`).
-- No recursive `find`, no inotify — git is the source of truth for tracked repos.
+- Runs `git status --porcelain` and `git stash list` per repo.
+- Returns: count of untracked/modified/staged files, stash count, current branch, dirty flag.
+- This is a point-in-time snapshot of the working tree — not historical. It answers "what does the repo look like right now?" rather than duplicating the commit history from 4.1.
+- Complements git activity (4.1 = what was committed since last session, 4.3 = what's uncommitted right now).
 
 ### 4.4 System Stats
 
@@ -112,7 +111,7 @@ def collect_system_stats() -> SystemSnapshot:
 def aggregate_snapshot(
     git_events: list[GitEvent],
     package_events: list[PackageEvent],
-    file_changes: list[FileChangeCluster],
+    working_trees: list[WorkingTreeSummary],
     system: SystemSnapshot,
 ) -> ActivitySummary:
 ```
@@ -126,13 +125,13 @@ class ActivitySummary:
     since: datetime
     git: list[RepoSummary]
     packages: PackageSummary
-    file_changes: list[DirSummary]
+    working_trees: list[WorkingTreeSummary]
     system: SystemSnapshot
 ```
 
 - `RepoSummary`: repo path, commit count, top 5 changed directories, active branches, last commit message.
 - `PackageSummary`: installed/removed/upgraded lists with package names and versions.
-- `DirSummary`: repo path, directory → file count mapping.
+- `WorkingTreeSummary`: repo path, branch, dirty flag, untracked/modified/staged counts, stash count.
 
 ### 5.3 Size Budget
 
@@ -142,49 +141,74 @@ Each snapshot: ~2–5KB. 30 days at 2 sessions/day ≈ 300KB max. Negligible.
 
 ## 6. Injection Strategy
 
-### 6.1 Triggers
+### 6.1 Session Lifecycle
 
-Activity context is NOT always injected. Three triggers:
+Activity scans are tied to **session boundaries**, not `Agent.__init__()`. A "new session" in Archon occurs at:
 
-| Trigger | When | What's injected |
-|---------|------|-----------------|
-| Session start after gap >1h | First turn of session, `now - last_session > gap_threshold` | Full summary |
-| CWD matches tracked repo | Any turn where CWD is inside a configured `repo_paths` entry | That repo's activity only |
-| Explicit `/activity` command | User requests it | Full detail, uncapped |
+- **CLI**: `/reset` in the REPL (`cli_interactive_commands.py:478`), which calls `agent.reset()` and reassigns `session_id`.
+- **CLI**: `/new` (fresh chat context), which also resets and reassigns.
+- **Telegram**: `/reset` command (`telegram.py:373`), which pops and recreates the agent.
+- **Telegram**: First message from a new chat (`telegram.py:608`), which creates a fresh agent via `_get_or_create_chat_agent()`.
 
-**No injection when:** Gap <1h, no activity detected, activity config disabled, CWD not in tracked repos.
+The scan function `activity.scan_and_store()` is called by the **surface layer** (CLI REPL or Telegram adapter) at these session-boundary points — not by Agent itself. The surface passes the resulting `ActivitySummary` (or `None`) to the Agent, which stores it as `self._activity_summary` for prompt injection.
 
-### 6.2 Integration Point
+This means:
+- CLI calls `scan_and_store()` at REPL startup and after `/reset`/`/new`.
+- Telegram calls `scan_and_store()` when creating a new chat agent.
+- Agent receives the summary as data — it never calls collectors directly.
 
-`_build_turn_system_prompt()` in `agent.py`, after the memory prefetch block (around line 1323):
+### 6.2 Triggers
+
+Activity context is NOT always injected. Two automatic triggers plus one explicit:
+
+| Trigger | When | What's injected | Surface |
+|---------|------|-----------------|---------|
+| Session start after gap >1h | First turn, `now - last_session > gap_threshold` | Full summary | CLI + Telegram |
+| Repo-context match | First turn, when a `repo_path` from config matches the scan | That repo's activity only | CLI + Telegram |
+| Explicit `/activity` slash command | User requests it | Full detail, uncapped | CLI + Telegram |
+
+**Dropped: CWD-match trigger.** The original design used `Path.cwd()` to detect repo context, but this is meaningless in Telegram (CWD is the bot's process dir, not the user's). Instead, repo-context matching uses the configured `repo_paths` directly — all tracked repos are included in the session-start scan, and the summarizer formats them.
+
+**No injection when:** Gap <1h, no activity detected, activity config disabled, no `repo_paths` configured.
+
+### 6.3 Integration Point
+
+`_build_turn_system_prompt()` in `agent.py`. The activity text is appended to `lines` **before** the memory prefetch block, not after it. This avoids the early return at line 1306 (`if not prefetched: return`) which would silently drop activity context on turns with no matching memories.
 
 ```python
+# After compaction lines, before memory prefetch:
 activity_text = activity.build_injection_text(
     summary=self._activity_summary,
-    cwd=Path.cwd(),
-    trigger="session_start",  # or "cwd_match"
     token_budget=config.activity.token_budget,
 )
 if activity_text:
-    parts.append(activity_text)
+    lines.extend(["", activity_text])
+
+# Then the existing memory prefetch block follows...
+try:
+    prefetched = memory_store.prefetch_for_query(user_message)
+except Exception:
+    prefetched = []
+if not prefetched:
+    return "\n".join(lines)  # activity context is already in lines
 ```
 
-`self._activity_summary` is populated once at session start by calling `activity.scan_and_store()`.
+The `_activity_summary` is set by the surface layer at session start and cleared after first injection (session-start trigger fires once per session).
 
-### 6.3 Token Budget
+### 6.4 Token Budget
 
 Hard cap: 200 tokens (configurable). Output format:
 
 ```
 [Recent Activity — since 2026-03-22 09:15]
-Git: archon/ — 8 commits (tools.py 3, agent.py 2, tests/ 3). Branch: master.
+Git: archon/ — 8 commits (tools.py 3, agent.py 2, tests/ 3). Branch: master. Working tree: 3 modified, 1 untracked.
 Packages: installed python-httpx, python-pydantic. Updated linux 6.18.12→6.18.13.
 System: up 3d, load 0.4, mem 8.2/32GB, disk 45%.
 ```
 
-### 6.4 First-Turn Behavior
+### 6.5 First-Turn Behavior
 
-Session-start trigger fires on the first turn only, then is not repeated. CWD-match trigger can fire on subsequent turns but only when CWD changes between turns.
+Session-start trigger fires on the first turn only, then `_activity_summary` is set to `None` so it is not repeated on subsequent turns within the same session.
 
 ---
 
@@ -202,10 +226,10 @@ class ActivitySummarizer(Protocol):
 Template-based string formatting. No LLM call. Prioritizes sections by content:
 1. Git activity (highest signal)
 2. Package changes
-3. File change clusters (if space remains)
+3. Working tree state (if space remains)
 4. System stats (lowest priority, truncated first)
 
-Truncation: if formatted text exceeds `token_budget`, drop system stats first, then file changes, then truncate package list to top 5.
+Truncation: if formatted text exceeds `token_budget`, drop system stats first, then working tree, then truncate package list to top 5.
 
 ### 7.3 Future: LLMSummarizer
 
@@ -246,7 +270,9 @@ class ActivityConfig:
 
 ---
 
-## 9. CLI Commands
+## 9. Command Surfaces
+
+### 9.1 CLI Subcommands
 
 Three commands under `archon activity`:
 
@@ -257,6 +283,14 @@ Three commands under `archon activity`:
 | `archon activity reset` | Delete all snapshots, reset `last_session.json` |
 
 Implementations in `archon/cli_activity_commands.py` following the existing DI pattern.
+
+### 9.2 Slash Command
+
+`/activity` is registered in the REPL slash command palette (`cli_commands.py:SLASH_COMMAND_GROUPS`) and in the Telegram command handler. It runs all collectors and displays the full uncapped summary inline — same output as `archon activity summary` but within a chat session.
+
+Implementation: `handle_repl_command()` in `cli_repl_commands.py` gains an `"activity"` branch that calls `activity.scan_and_summarize()` and returns the formatted text. Telegram adapter gains a matching `/activity` branch in its command handler.
+
+This is the same function used by the CLI subcommand — one implementation, two surfaces.
 
 ---
 
@@ -277,7 +311,11 @@ Implementations in `archon/cli_activity_commands.py` following the existing DI p
 |------|--------|
 | `archon/config.py` | Add `ActivityConfig` dataclass, parse `[activity]` in `load_config()` |
 | `archon/cli.py` | Add `@main.group("activity")` with subcommands, wire DI |
-| `archon/agent.py` | Call `activity.scan_and_store()` at session init, call `activity.build_injection_text()` in `_build_turn_system_prompt()` |
+| `archon/agent.py` | Add `_activity_summary` attribute, call `activity.build_injection_text()` in `_build_turn_system_prompt()` before memory prefetch |
+| `archon/cli_interactive_commands.py` | Call `activity.scan_and_store()` at REPL start and after `/reset`/`/new`, pass summary to agent |
+| `archon/cli_repl_commands.py` | Add `/activity` branch in `handle_repl_command()` |
+| `archon/cli_commands.py` | Add `/activity` entry to `SLASH_COMMAND_GROUPS` |
+| `archon/adapters/telegram.py` | Call `activity.scan_and_store()` in `_get_or_create_chat_agent()`, add `/activity` command handler |
 
 ### Dependency Direction
 
@@ -311,10 +349,10 @@ Activity module does not import agent.
 
 ### Unit Tests (no filesystem, no subprocess)
 
-- **Collectors:** Mock `subprocess.run` return values and file reads. Verify parsing of known git log formats, pacman log formats. Test boundary cases (empty log, malformed entries, >50 commits).
+- **Collectors:** Mock `subprocess.run` return values and file reads. Verify parsing of known git log, git status, pacman log formats. Test boundary cases (empty log, malformed entries, >50 commits).
 - **Aggregator:** Pass known event lists, assert `ActivitySummary` field values. Test empty inputs, single-source inputs, multi-repo inputs.
-- **Summarizer:** Pass known `ActivitySummary`, assert output within token budget. Test truncation priority (system stats dropped first, then file changes).
-- **Injector:** Test all three triggers. Verify gap <1h produces empty string. Verify CWD match injects only matching repo. Verify disabled config produces empty string.
+- **Summarizer:** Pass known `ActivitySummary`, assert output within token budget. Test truncation priority (system stats dropped first, then working tree, then packages).
+- **Injector:** Test session-start trigger (gap >1h vs <1h). Verify first-turn-only behavior (second call returns empty). Verify disabled config produces empty string. Verify activity text survives the memory-prefetch early return path.
 - **Config:** Verify `ActivityConfig` defaults. Verify TOML round-trip.
 
 ### Integration Tests (temp dirs)
@@ -342,26 +380,32 @@ Activity module does not import agent.
 5. Git collector handles missing repo, missing git, empty log gracefully.
 6. Pacman collector parses install/remove/upgrade entries correctly.
 7. Pacman collector handles missing log file gracefully.
-8. File change collector produces directory-level summaries from git diff.
-9. System stats reads /proc correctly on Arch Linux.
-10. System stats returns None gracefully on non-Linux.
-11. Aggregator produces correct `ActivitySummary` from mixed collector outputs.
-12. Aggregator handles all-empty inputs (produces empty summary).
-13. `CodeOnlySummarizer` output fits within 200-token budget.
-14. `CodeOnlySummarizer` truncates lower-priority sections first.
-15. Injection fires on session start when gap >1h.
-16. Injection does NOT fire when gap <1h.
-17. Injection fires for CWD-matching repo on any turn.
-18. Injection does NOT fire when CWD is outside all tracked repos (non-session-start).
+8. Working tree collector parses `git status --porcelain` and `git stash list` correctly.
+9. Working tree collector handles missing repo gracefully.
+10. System stats reads /proc correctly on Arch Linux.
+11. System stats returns None gracefully on non-Linux.
+12. Aggregator produces correct `ActivitySummary` from mixed collector outputs.
+13. Aggregator handles all-empty inputs (produces empty summary).
+14. `CodeOnlySummarizer` output fits within 200-token budget.
+15. `CodeOnlySummarizer` truncates lower-priority sections first.
+16. Injection fires on session start when gap >1h.
+17. Injection does NOT fire when gap <1h.
+18. Injection fires on first turn only, not repeated within same session.
 19. Injection produces empty string when activity is disabled.
-20. `/activity` command shows full uncapped summary.
-21. Snapshots written as valid JSONL, readable on next session.
-22. `last_session.json` updated after each scan.
-23. Snapshots older than `retention_days` cleaned up on scan.
-24. `ActivityConfig` parsed correctly from TOML with all defaults.
-25. Collector failures (subprocess errors, file errors) don't propagate — empty results only.
-26. No new dependencies added (stdlib only: subprocess, datetime, json, shutil, re, dataclasses).
-27. All tests pass with no real git repos, no real pacman log, no real /proc reads.
+20. Activity context survives the early-return path in `_build_turn_system_prompt()` (injected before memory prefetch, not after).
+21. `/activity` slash command shows full uncapped summary in CLI REPL.
+22. `/activity` slash command shows full uncapped summary in Telegram.
+23. `archon activity summary` CLI subcommand produces same output as `/activity`.
+24. Scan is triggered by surface layer (CLI REPL / Telegram), not by Agent.__init__().
+25. CLI scan fires at REPL start and after `/reset` and `/new`.
+26. Telegram scan fires when creating a new chat agent.
+27. Snapshots written as valid JSONL, readable on next session.
+28. `last_session.json` updated after each scan.
+29. Snapshots older than `retention_days` cleaned up on scan.
+30. `ActivityConfig` parsed correctly from TOML with all defaults.
+31. Collector failures (subprocess errors, file errors) don't propagate — empty results only.
+32. No new dependencies added (stdlib only: subprocess, datetime, json, shutil, re, dataclasses).
+33. All tests pass with no real git repos, no real pacman log, no real /proc reads.
 
 ---
 
@@ -369,4 +413,4 @@ Activity module does not import agent.
 
 Single slice. The feature is behind `enabled = false` by default. Ship it all, let users opt in via config.
 
-No phased rollout needed — the feature is self-contained, has no effect when disabled, and touches only three existing files with minimal changes (config parsing, CLI registration, one injection call in agent).
+No phased rollout needed — the feature is self-contained and has no effect when disabled. Modified files: config parsing (`config.py`), CLI subcommand registration (`cli.py`), prompt injection (`agent.py`), scan triggering at session boundaries (`cli_interactive_commands.py`, `adapters/telegram.py`), slash command registration (`cli_commands.py`, `cli_repl_commands.py`), and Telegram command handler (`adapters/telegram.py`).
