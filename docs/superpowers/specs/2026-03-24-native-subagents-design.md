@@ -170,9 +170,9 @@ class SubagentRunner:
 - `max_consecutive_tool_errors` — hardcoded (3)
 - `total_input_tokens`, `total_output_tokens` — counters (start at 0)
 - `on_thinking` — `None` (no UI callback)
+- `on_tool_call` — `None` (no UI callback)
 - `last_turn_id` — static string like `"subagent"`
 - `last_suspension_request` — `None`
-- `log_label` — `f"subagent:{type}"`
 - `diagnostic_tool_error_threshold` — hardcoded (2)
 
 **Required methods (with subagent-appropriate implementations):**
@@ -180,7 +180,10 @@ class SubagentRunner:
 - `_emit_hook(kind, payload)` — no-op (parent handles hooks)
 - `_record_llm_usage(turn_id, source, response)` — no-op (token tracking via attributes)
 - `_consume_pending_compactions_into_prompt(prompt)` — returns prompt unchanged (no compaction)
-- `_shape_tool_result_for_history(result, name)` — truncation logic (can reuse Agent's or simplified version)
+- `_enforce_iteration_budget()` — no-op (subagents are short-lived, no budget enforcement)
+- `_shape_tool_result_for_history(tool_name, tool_args, result_text)` — truncation logic (can reuse Agent's or simplified version)
+
+**Note:** `log_label` and `terminal_activity_feed` are accessed via `getattr()` with defaults in print helpers — safe to omit from the shim.
 
 ### What SubagentRunner does NOT have
 
