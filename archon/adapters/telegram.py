@@ -789,7 +789,7 @@ class TelegramAdapter:
                     "route_progress_turn_id": None,
                 }
             streamed_result = self._stream_final_reply(chat_id, body, agent)
-            if streamed_result is None:
+            if streamed_result is None or not streamed_result.completed_turn:
                 response = agent.run(body)
                 response_sent = False
             else:
@@ -841,6 +841,7 @@ class TelegramAdapter:
         )
         response_parts: list[str] = []
         saw_chunk = False
+        history_before_stream = len(agent.history) if isinstance(getattr(agent, "history", None), list) else 0
 
         for chunk in run_stream(body):
             text_chunk = str(chunk or "")
@@ -856,18 +857,19 @@ class TelegramAdapter:
             editor.observe("".join(response_parts))
 
         if not saw_chunk:
-            final_text = self._extract_final_assistant_text(agent)
+            final_text = self._extract_final_assistant_text(agent, start_index=history_before_stream)
             return _StreamReplyResult(final_text=final_text, delivered_live=False, completed_turn=True)
 
         final_text = "".join(response_parts) or "(empty response)"
         delivered_live = editor.finalize(final_text)
         return _StreamReplyResult(final_text=final_text, delivered_live=delivered_live, completed_turn=True)
 
-    def _extract_final_assistant_text(self, agent) -> str:
+    def _extract_final_assistant_text(self, agent, start_index: int = 0) -> str:
         history = getattr(agent, "history", None)
         if not isinstance(history, list):
             return ""
-        for msg in reversed(history):
+        start = max(0, int(start_index))
+        for msg in reversed(history[start:]):
             if not isinstance(msg, dict) or msg.get("role") != "assistant":
                 continue
             content = msg.get("content")

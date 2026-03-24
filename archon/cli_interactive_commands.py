@@ -46,32 +46,12 @@ def _looks_like_safety_gate_rejection(response: str | None) -> bool:
     )
 
 
-def _recover_final_assistant_text(agent) -> str:
-    history = getattr(agent, "history", None)
-    if not isinstance(history, list) or not history:
-        return ""
-    last = history[-1]
-    if not isinstance(last, dict) or last.get("role") != "assistant":
-        return ""
-    content = last.get("content")
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return ""
-    parts: list[str] = []
-    for block in content:
-        if not isinstance(block, dict):
-            continue
-        if block.get("type") == "text":
-            parts.append(str(block.get("text", "") or ""))
-    return "".join(parts)
-
-
-def _extract_final_assistant_text(agent) -> str:
+def _extract_final_assistant_text_since(agent, start_index: int = 0) -> str:
     history = getattr(agent, "history", None)
     if not isinstance(history, list):
         return ""
-    for msg in reversed(history):
+    start = max(0, int(start_index))
+    for msg in reversed(history[start:]):
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
             continue
         content = msg.get("content")
@@ -622,6 +602,7 @@ def chat_cmd(
                     and callable(getattr(agent, "run_stream", None))
                 )
                 if use_streaming:
+                    history_before_stream = len(agent.history) if isinstance(getattr(agent, "history", None), list) else 0
                     for chunk in agent.run_stream(user_input):
                         text_chunk = str(chunk or "")
                         response_parts.append(text_chunk)
@@ -642,11 +623,9 @@ def chat_cmd(
                             stream_flush_fn()
                     response = "".join(response_parts)
                     if not response:
-                        response = _recover_final_assistant_text(agent)
+                        response = _extract_final_assistant_text_since(agent, history_before_stream)
                 else:
                     response = agent.run(user_input)
-                if not response and not streamed_live:
-                    response = _extract_final_assistant_text(agent)
                 elapsed = time_time_fn() - t0
                 spinner.stop()
                 blocked_pending_id = str(approval_state.get("blocked_pending_id") or "")
