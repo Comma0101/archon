@@ -41,6 +41,12 @@ class LLMConfig:
 
 
 @dataclass
+class TierConfig:
+    light: str = ""
+    standard: str = ""
+
+
+@dataclass
 class AgentConfig:
     max_iterations: int = 15
     temperature: float = 0.3
@@ -212,6 +218,7 @@ class ActivityConfig:
 @dataclass
 class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
+    tiers: TierConfig = field(default_factory=TierConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     profiles: dict[str, ProfileConfig] = field(
@@ -241,6 +248,11 @@ def load_config() -> Config:
         cfg.llm.model = llm.get("model", cfg.llm.model)
         cfg.llm.api_key = llm.get("api_key", "")
         cfg.llm.base_url = llm.get("base_url", "")
+
+        llm_tiers = llm.get("tiers", {})
+        if isinstance(llm_tiers, dict):
+            cfg.tiers.light = str(llm_tiers.get("light", cfg.tiers.light)).strip()
+            cfg.tiers.standard = str(llm_tiers.get("standard", cfg.tiers.standard)).strip()
 
         fallback = llm.get("fallback", {})
         cfg.llm.fallback_provider = fallback.get("provider", cfg.llm.fallback_provider)
@@ -640,6 +652,31 @@ def load_config() -> Config:
         cfg.web.brave_api_key = brave_key.strip()
 
     return cfg
+
+
+def resolve_tier_model(config: Config, tier: str) -> str:
+    tier_name = str(tier or "").strip().lower()
+    if tier_name == "light":
+        if config.tiers.light:
+            return config.tiers.light
+        return _resolve_light_model(config)
+    if tier_name == "standard":
+        if config.tiers.standard:
+            return config.tiers.standard
+        return config.llm.model
+    return config.llm.model
+
+
+def _resolve_light_model(config: Config) -> str:
+    provider = str(config.llm.provider or "").strip().lower()
+    base_url = str(config.llm.base_url or "").strip().lower()
+    if provider == "anthropic":
+        return "claude-haiku-4-5-20251001"
+    if provider == "google" or (provider == "openai" and "googleapis" in base_url):
+        return "gemini-2.5-flash"
+    if provider == "openai":
+        return "gpt-4o-mini"
+    return config.llm.model
 
 
 def _resolve_mcp_env_map(raw_env: dict) -> dict[str, str]:
