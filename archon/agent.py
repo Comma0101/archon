@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -39,6 +38,14 @@ from archon.prompt import (
 )
 from archon.config import Config
 from archon.context_metrics import estimate_tokens_from_chars
+from archon.execution.history_shaping import (
+    shape_read_file_result_for_history,
+    shape_sampled_result_for_history,
+    shape_shell_result_for_history,
+    shape_tool_result_for_history,
+    split_shell_exit_code as _split_shell_exit_code,
+    truncate_text_for_history as _truncate_text_for_history,
+)
 from archon.execution.llm_runtime import _chat_with_retry
 from archon.security.redaction import redact_secret_like_text
 from archon.research import store as research_store
@@ -51,19 +58,6 @@ ANSI_RESET = "\033[0m"
 ANSI_TOOL_CALL = "\033[96m"       # bright cyan
 ANSI_TOOL_RESULT = "\033[37m"     # readable light gray/white
 ANSI_TOOL_RESULT_META = "\033[90m"  # dim for truncation summaries
-
-_WORKER_TOOL_NAMES = {
-    "delegate_code_task",
-    "worker_start",
-    "worker_send",
-    "worker_status",
-    "worker_poll",
-    "worker_list",
-}
-
-_HISTORY_SAMPLE_TOOLS = {"list_dir", "glob", "grep"}
-_SHELL_EXIT_CODE_RE = re.compile(r"\n?\[exit_code=(-?\d+)\]\s*$")
-
 
 def _detect_tool_loop(recent_calls: list[tuple[str, dict]], window: int = 6, min_repeats: int = 3) -> bool:
     """Detect repetitive tool call patterns in recent history."""
@@ -653,11 +647,19 @@ class Agent:
         return f"t{self._turn_counter:03d}"
 
     def _truncate_tool_result_for_history(self, tool_name: str, result_text: str) -> str:
-        limit = self.tool_result_max_chars
-        name = (tool_name or "").strip().lower()
-        if name in _WORKER_TOOL_NAMES:
-            limit = min(limit, self.tool_result_worker_max_chars)
-        return _truncate_text_for_history(result_text, limit)
+        return _truncate_text_for_history(
+            result_text,
+            self.tool_result_worker_max_chars
+            if (tool_name or "").strip().lower() in {
+                "delegate_code_task",
+                "worker_start",
+                "worker_send",
+                "worker_status",
+                "worker_poll",
+                "worker_list",
+            }
+            else self.tool_result_max_chars,
+        )
 
     def _shape_tool_result_for_history(
         self,
@@ -665,58 +667,35 @@ class Agent:
         tool_args: dict,
         result_text: str,
     ) -> str:
-        name = (tool_name or "").strip().lower()
-        if name in _WORKER_TOOL_NAMES:
-            return self._truncate_tool_result_for_history(name, result_text)
-        if name == "shell":
-            return self._shape_shell_result_for_history(tool_args, result_text)
-        if name == "read_file":
-            return self._shape_read_file_result_for_history(tool_args, result_text)
-        if name in _HISTORY_SAMPLE_TOOLS:
-            return self._shape_sampled_result_for_history(name, tool_args, result_text)
-        return self._truncate_tool_result_for_history(name, result_text)
+        return shape_tool_result_for_history(
+            tool_name,
+            tool_args,
+            result_text,
+            tool_result_max_chars=self.tool_result_max_chars,
+            tool_result_worker_max_chars=self.tool_result_worker_max_chars,
+        )
 
     def _shape_shell_result_for_history(self, tool_args: dict, result_text: str) -> str:
-        body, exit_code = _split_shell_exit_code(result_text)
-        excerpt = _summarize_lines_with_head_tail(body or "(no output)", head=6, tail=4)
-        command = redact_secret_like_text(str(tool_args.get("command", "") or ""))
-        lines = []
-        if command:
-            lines.append(f"command: {command}")
-        if exit_code is not None:
-            lines.append(f"exit_code: {exit_code}")
-        lines.extend(["output:", excerpt])
-        return _truncate_text_for_history("\n".join(lines), self.tool_result_max_chars)
+        return shape_shell_result_for_history(
+            tool_args,
+            result_text,
+            tool_result_max_chars=self.tool_result_max_chars,
+        )
 
     def _shape_read_file_result_for_history(self, tool_args: dict, result_text: str) -> str:
-        lines = [
-            f"path: {redact_secret_like_text(str(tool_args.get('path', '') or ''))}",
-            f"offset: {int(tool_args.get('offset', 0) or 0)}",
-            f"limit: {int(tool_args.get('limit', 2000) or 2000)}",
-            "excerpt:",
-            _summarize_lines_head_only(result_text or "(empty file)", head=12),
-        ]
-        return _truncate_text_for_history("\n".join(lines), self.tool_result_max_chars)
+        return shape_read_file_result_for_history(
+            tool_args,
+            result_text,
+            tool_result_max_chars=self.tool_result_max_chars,
+        )
 
     def _shape_sampled_result_for_history(self, tool_name: str, tool_args: dict, result_text: str) -> str:
-        lines: list[str] = []
-        if tool_name == "list_dir":
-            lines.append(f"path: {redact_secret_like_text(str(tool_args.get('path', '.') or '.'))}")
-            label = "entries"
-        elif tool_name == "glob":
-            lines.append(f"root: {redact_secret_like_text(str(tool_args.get('root', '.') or '.'))}")
-            lines.append(f"pattern: {str(tool_args.get('pattern', '') or '')}")
-            label = "matches"
-        else:
-            lines.append(f"root: {redact_secret_like_text(str(tool_args.get('root', '.') or '.'))}")
-            lines.append(f"pattern: {str(tool_args.get('pattern', '') or '')}")
-            glob_value = str(tool_args.get("glob", "") or "").strip()
-            if glob_value:
-                lines.append(f"glob: {glob_value}")
-            label = "matches"
-        lines.append(f"{label}: {_count_result_items(result_text)}")
-        lines.extend(["sample:", _summarize_lines_head_only(result_text or "(no matches)", head=8)])
-        return _truncate_text_for_history("\n".join(lines), self.tool_result_max_chars)
+        return shape_sampled_result_for_history(
+            tool_name,
+            tool_args,
+            result_text,
+            tool_result_max_chars=self.tool_result_max_chars,
+        )
 
     def _repair_history_tool_sequence(self) -> None:
         """Drop malformed tool-turn fragments before provider calls.
@@ -1114,61 +1093,6 @@ def _estimate_message_chars(message: object) -> int:
     return len(str(message))
 
 
-def _truncate_text_for_history(text: str, limit: int) -> str:
-    if limit <= 0 or len(text) <= limit:
-        return text
-    omitted = len(text) - limit
-    head_size = int(limit * 0.65)
-    tail_size = int(limit * 0.25)
-    middle = f"\n... [{omitted} chars omitted] ...\n"
-    if head_size + tail_size + len(middle) >= len(text):
-        return text
-    return text[:head_size] + middle + text[-tail_size:]
-
-
-def _summarize_lines_head_only(text: str, *, head: int) -> str:
-    lines = text.splitlines()
-    if len(lines) <= head:
-        return text
-    omitted = len(lines) - head
-    return "\n".join(lines[:head] + [f"... [{omitted} lines omitted] ..."])
-
-
-def _summarize_lines_with_head_tail(text: str, *, head: int, tail: int) -> str:
-    lines = text.splitlines()
-    if len(lines) <= head + tail:
-        return text
-    omitted = len(lines) - head - tail
-    return "\n".join(lines[:head] + [f"... [{omitted} lines omitted] ..."] + lines[-tail:])
-
-
-def _split_shell_exit_code(result_text: str) -> tuple[str, int | None]:
-    match = _SHELL_EXIT_CODE_RE.search(result_text)
-    if not match:
-        return result_text, None
-    body = result_text[:match.start()].rstrip("\n")
-    try:
-        exit_code = int(match.group(1))
-    except (TypeError, ValueError):
-        exit_code = None
-    return body, exit_code
-
-
-def _count_result_items(result_text: str) -> int:
-    stripped = result_text.strip()
-    if not stripped or stripped in {"(no matches)", "(empty directory)"}:
-        return 0
-    count = 0
-    for line in result_text.splitlines():
-        cleaned = line.strip()
-        if not cleaned:
-            continue
-        if cleaned.startswith("... (") and cleaned.endswith("more entries)"):
-            continue
-        if cleaned.startswith("... (") and cleaned.endswith("more lines)"):
-            continue
-        count += 1
-    return count
 
 
 def _chat_stream_collect_with_retry(
