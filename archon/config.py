@@ -656,13 +656,15 @@ def load_config() -> Config:
 
 def resolve_tier_model(config: Config, tier: str) -> str:
     tier_name = str(tier or "").strip().lower()
+    light_override = str(config.tiers.light or "").strip()
+    standard_override = str(config.tiers.standard or "").strip()
     if tier_name == "light":
-        if config.tiers.light:
-            return config.tiers.light
+        if light_override:
+            return light_override
         return _resolve_light_model(config)
     if tier_name == "standard":
-        if config.tiers.standard:
-            return config.tiers.standard
+        if standard_override:
+            return standard_override
         return config.llm.model
     return config.llm.model
 
