@@ -2,6 +2,7 @@
 
 import io
 import re
+import threading
 from contextlib import redirect_stderr
 from types import SimpleNamespace
 
@@ -35,6 +36,7 @@ from archon.cli_interactive_commands import chat_cmd as _chat_cmd
 from archon.cli_interactive_commands import run_cmd as _run_cmd
 from archon.cli_interactive_commands import telegram_cmd as _telegram_cmd
 from archon.cli_interactive_commands import _tool_spinner_label
+from archon.cli_ui import _Spinner
 from archon.context_metrics import build_context_snapshot
 from archon.cli_repl_commands import _maybe_auto_activate_skill
 from archon.control.hooks import HookBus
@@ -64,6 +66,16 @@ class TestCliFormatting:
     def test_format_chat_response_uses_colored_archon_prompt(self):
         out = _format_chat_response("Hello")
         assert "\x1b[" in out
+
+
+def test_spinner_stop_is_noop_when_inactive(monkeypatch):
+    stderr = io.StringIO()
+    monkeypatch.setattr("archon.cli_ui.sys.stderr", stderr)
+
+    spinner = _Spinner(lock=threading.Lock())
+    spinner.stop()
+
+    assert stderr.getvalue() == ""
 
     def test_telegram_cmd_reports_telegram_mode_without_phase_label(self):
         outputs = []

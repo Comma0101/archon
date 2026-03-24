@@ -52,9 +52,13 @@ class _Spinner:
         self._thread.start()
 
     def stop(self):
-        if self._thread and self._thread.is_alive():
+        was_running = bool(self._thread and self._thread.is_alive())
+        if was_running:
             self._stop.set()
             self._thread.join(timeout=1)
+        self._thread = None
+        if not was_running:
+            return
         # Clear the spinner line
         with self._lock:
             sys.stderr.write("\r\033[K")
