@@ -3409,8 +3409,8 @@ def test_chat_cmd_streams_no_chunk_turn_uses_buffered_reply():
     plain_stream = re.sub(r"\x1b\[[0-9;]*m", "", "".join(streamed))
     plain_outputs = [re.sub(r"\x1b\[[0-9;]*m", "", text) for text, _err in outputs]
 
-    assert "buffered reply" in plain_stream
-    assert any("buffered reply" in text for text in plain_outputs)
+    assert "buffered reply" in "".join(plain_outputs)
+    assert "buffered reply" not in plain_stream
     assert saved == [("sess-1", "hello", "buffered reply")]
 
 

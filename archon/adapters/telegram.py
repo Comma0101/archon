@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import dataclass
 import secrets
 import sys
 import threading
@@ -73,6 +74,15 @@ if TYPE_CHECKING:
 
 
 MAX_TELEGRAM_MESSAGE_LEN = DEFAULT_TELEGRAM_MESSAGE_LIMIT
+
+
+@dataclass
+class _StreamReplyResult:
+    final_text: str
+    delivered_live: bool
+    completed_turn: bool
+
+
 _TELEGRAM_BOT_COMMANDS: tuple[tuple[str, str], ...] = (
     ("start", "Connect and show basics"),
     ("help", "Show command guide"),
@@ -778,11 +788,13 @@ class TelegramAdapter:
                     "blocked_approval_id": None,
                     "route_progress_turn_id": None,
                 }
-            streamed_response, response_sent = self._stream_final_reply(chat_id, body, agent)
-            if streamed_response is None:
+            streamed_result = self._stream_final_reply(chat_id, body, agent)
+            if streamed_result is None:
                 response = agent.run(body)
+                response_sent = False
             else:
-                response = streamed_response
+                response = streamed_result.final_text
+                response_sent = streamed_result.delivered_live
         except Exception as e:
             response = f"Error: {type(e).__name__}: {e}"
             response_sent = False
@@ -805,10 +817,10 @@ class TelegramAdapter:
             self._send_text_and_record(chat_id, history_user_text, final_text)
         return final_text
 
-    def _stream_final_reply(self, chat_id: int, body: str, agent) -> tuple[str | None, bool]:
+    def _stream_final_reply(self, chat_id: int, body: str, agent) -> _StreamReplyResult | None:
         run_stream = getattr(agent, "run_stream", None)
         if not callable(run_stream):
-            return None, False
+            return None
 
         editor = LiveReplyEditor(
             send_fn=lambda text: self._bot.send_message(
@@ -844,11 +856,35 @@ class TelegramAdapter:
             editor.observe("".join(response_parts))
 
         if not saw_chunk:
-            return None, False
+            final_text = self._extract_final_assistant_text(agent)
+            return _StreamReplyResult(final_text=final_text, delivered_live=False, completed_turn=True)
 
         final_text = "".join(response_parts) or "(empty response)"
         delivered_live = editor.finalize(final_text)
-        return final_text, delivered_live
+        return _StreamReplyResult(final_text=final_text, delivered_live=delivered_live, completed_turn=True)
+
+    def _extract_final_assistant_text(self, agent) -> str:
+        history = getattr(agent, "history", None)
+        if not isinstance(history, list):
+            return ""
+        for msg in reversed(history):
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                parts: list[str] = []
+                for block in content:
+                    if isinstance(block, dict):
+                        text = block.get("text")
+                        if isinstance(text, str) and text:
+                            parts.append(text)
+                    elif isinstance(block, str) and block:
+                        parts.append(block)
+                if parts:
+                    return "".join(parts)
+        return ""
 
     def _send_voice_reply_audio(self, chat_id: int, reply_text: str) -> None:
         text = str(reply_text or "").strip()
