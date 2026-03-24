@@ -88,15 +88,6 @@ class SubagentRunner:
                     iterations_used=iterations_used,
                 )
 
-            if iteration == self.max_iterations - 1:
-                return SubagentResult(
-                    status="iteration_limit",
-                    text=current_text or "[Iteration limit reached]",
-                    input_tokens=self.total_input_tokens,
-                    output_tokens=self.total_output_tokens,
-                    iterations_used=iterations_used,
-                )
-
             response = self._llm_step(task, context)
             iterations_used += 1
             self.total_input_tokens += response.input_tokens

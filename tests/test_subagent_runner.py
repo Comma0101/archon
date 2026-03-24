@@ -181,18 +181,19 @@ def test_runner_wall_clock_timeout_returns_timeout(monkeypatch):
     assert llm.chat.call_count == 1
 
 
-def test_runner_iteration_limit_returns_iteration_limit():
+def test_runner_max_iterations_one_still_allows_one_llm_step():
     llm = MagicMock()
-    llm.chat = MagicMock(return_value=_make_response("unused"))
+    llm.chat = MagicMock(return_value=_make_response("done"))
     config = Config()
     config.agent.max_iterations = 1
     runner = _make_runner(llm, ToolRegistry.empty(), config=config)
 
     result = runner.run("limit")
 
-    assert result.status == "iteration_limit"
-    assert result.iterations_used == 0
-    assert llm.chat.call_count == 0
+    assert result.status == "ok"
+    assert result.text == "done"
+    assert result.iterations_used == 1
+    assert llm.chat.call_count == 1
 
 
 def test_runner_fails_fast_on_suspension_request():
