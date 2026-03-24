@@ -9,6 +9,7 @@ from .types import (
     get_subagent_type,
     iter_subagent_types,
 )
+from .tools import register_subagent_tools
 
 __all__ = [
     "SubagentType",
@@ -18,4 +19,5 @@ __all__ = [
     "general",
     "get_subagent_type",
     "iter_subagent_types",
+    "register_subagent_tools",
 ]

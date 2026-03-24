@@ -61,7 +61,7 @@ def test_build_subagent_registry_freshly_registers_tools_and_excludes_spawn_suba
         config=Config(),
     )
 
-    assert "spawn_subagent" not in parent.tools
+    assert "spawn_subagent" in parent.tools
     assert "spawn_subagent" not in explore.tools
     assert explore.tools["read_file"] is not parent.tools["read_file"]
     assert explore.handlers["read_file"] is not parent.handlers["read_file"]

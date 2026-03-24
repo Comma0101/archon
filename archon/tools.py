@@ -18,6 +18,7 @@ from archon.tooling import (
     register_filesystem_tools,
     register_memory_tools,
     register_mcp_tools,
+    register_subagent_tools,
     register_setup_tools,
     register_worker_tools,
 )
@@ -270,6 +271,7 @@ class ToolRegistry:
         register_setup_tools(self)
         register_call_service_tools(self)
         register_call_mission_tools(self)
+        register_subagent_tools(self)
 
         register_worker_tools(self)
 

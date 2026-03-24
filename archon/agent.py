@@ -445,12 +445,58 @@ class Agent:
             if event is not None:
                 self._emit_hook(
                     "ux.tool_event",
-                    {
-                        "event": event,
-                        "status": str(hook_payload.get("status", "") or ""),
-                        "turn_id": self.last_turn_id,
-                    },
-                )
+                {
+                    "event": event,
+                    "status": str(hook_payload.get("status", "") or ""),
+                    "turn_id": self.last_turn_id,
+                },
+            )
+            return
+        if kind == "subagent_usage":
+            source = str(hook_payload.get("source", "") or "").strip() or "subagent"
+            provider = str(hook_payload.get("provider", "") or "").strip()
+            model = str(hook_payload.get("model", "") or "").strip()
+            input_tokens = max(0, int(hook_payload.get("input_tokens") or 0))
+            output_tokens = max(0, int(hook_payload.get("output_tokens") or 0))
+            self.total_input_tokens += input_tokens
+            self.total_output_tokens += output_tokens
+            self.last_input_tokens = input_tokens
+            self.last_output_tokens = output_tokens
+            recorded = False
+            if (
+                self.session_id
+                and provider
+                and model
+                and hook_payload.get("input_tokens") is not None
+                and hook_payload.get("output_tokens") is not None
+            ):
+                try:
+                    event = UsageEvent(
+                        event_id=f"{self.last_turn_id}:{source}:{time.time_ns()}",
+                        session_id=self.session_id,
+                        turn_id=self.last_turn_id,
+                        source=source,
+                        provider=provider,
+                        model=model,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        recorded_at=time.time(),
+                    )
+                    recorded = record_usage_event(event)
+                except Exception:
+                    recorded = False
+            self._emit_hook(
+                "usage.recorded",
+                {
+                    "source": source,
+                    "session_id": self.session_id,
+                    "provider": provider,
+                    "model": model,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "recorded": recorded,
+                },
+            )
             return
         if kind != "post_execute":
             return
