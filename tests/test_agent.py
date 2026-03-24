@@ -346,6 +346,89 @@ def test_run_prefers_native_worker_status_for_explicit_job_id(monkeypatch):
     assert agent.llm.chat.call_count == 0
 
 
+def test_run_prefers_explicit_native_subagent_request(monkeypatch):
+    agent = make_agent([])
+    monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+    monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+    executed = {}
+
+    def _spawn_subagent(task: str, type: str = "explore", context: str = "", _ctx=None) -> str:
+        executed["task"] = task
+        executed["type"] = type
+        executed["context"] = context
+        return "subagent_type: explore\nstatus: ok\n\nchild answer"
+
+    agent.tools.register(
+        "spawn_subagent",
+        "Stub subagent tool",
+        {
+            "properties": {
+                "task": {"type": "string"},
+                "type": {"type": "string"},
+                "context": {"type": "string"},
+            },
+            "required": ["task"],
+        },
+        _spawn_subagent,
+    )
+
+    result = agent.run("Use a native explore subagent to inspect archon/subagents/runner.py")
+
+    assert result == "subagent_type: explore\nstatus: ok\n\nchild answer"
+    assert executed == {
+        "task": "inspect archon/subagents/runner.py",
+        "type": "explore",
+        "context": "",
+    }
+    assert agent.llm.chat.call_count == 0
+    assert agent.history[-2] == {
+        "role": "user",
+        "content": "Use a native explore subagent to inspect archon/subagents/runner.py",
+    }
+    assert agent.history[-1] == {
+        "role": "assistant",
+        "content": "subagent_type: explore\nstatus: ok\n\nchild answer",
+    }
+
+
+def test_run_stream_prefers_explicit_native_subagent_request(monkeypatch):
+    agent = make_agent([], stream_chunks=[])
+    monkeypatch.setattr("archon.agent.memory_store.capture_preference_to_inbox", lambda *_a, **_k: None)
+    monkeypatch.setattr("archon.agent.memory_store.prefetch_for_query", lambda *_a, **_k: [])
+    executed = {}
+
+    def _spawn_subagent(task: str, type: str = "explore", context: str = "", _ctx=None) -> str:
+        executed["task"] = task
+        executed["type"] = type
+        executed["context"] = context
+        return "subagent_type: general\nstatus: ok\n\nchild answer"
+
+    agent.tools.register(
+        "spawn_subagent",
+        "Stub subagent tool",
+        {
+            "properties": {
+                "task": {"type": "string"},
+                "type": {"type": "string"},
+                "context": {"type": "string"},
+            },
+            "required": ["task"],
+        },
+        _spawn_subagent,
+    )
+
+    chunks = list(agent.run_stream("Use a native general subagent to summarize what changed."))
+
+    assert chunks == ["subagent_type: general\nstatus: ok\n\nchild answer"]
+    assert executed == {
+        "task": "summarize what changed.",
+        "type": "general",
+        "context": "",
+    }
+    assert agent.llm.chat.call_count == 0
+    assert not hasattr(agent.llm, "chat_stream") or agent.llm.chat_stream.call_count == 0
+
+
 def test_run_does_not_treat_reasoning_prompt_about_research_job_as_native_status(monkeypatch):
     responses = [
         LLMResponse(
@@ -2621,6 +2704,14 @@ class TestAgentLoop:
 
         assert lane == "operator"
         assert reason == "native_research_status_request"
+
+    def test_orchestrator_route_classifies_explicit_native_subagent_request(self):
+        lane, reason = orchestrator_module._classify_route(
+            "Use a native explore subagent to inspect archon/subagents/runner.py"
+        )
+
+        assert lane == "operator"
+        assert reason == "native_subagent_request"
 
     def test_orchestrator_legacy_route_hook_includes_default_metadata(self, monkeypatch):
         responses = [

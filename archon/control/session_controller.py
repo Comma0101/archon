@@ -67,6 +67,11 @@ _JOBS_LIST_PHRASES = (
     "show jobs",
     "what jobs are running",
 )
+_EXPLICIT_NATIVE_SUBAGENT_PATTERN = re.compile(
+    r"\b(?:use|spawn)\s+(?:a\s+)?native\s+"
+    r"(?P<type>explore|general)\s+subagent\s+to\s+(?P<task>.+)",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def runtime_quiet_seconds(active_run: Any) -> int | None:
@@ -222,6 +227,20 @@ def extract_explicit_job_status_ref(text: str) -> str:
     if not any(phrase in compact for phrase in _EXPLICIT_STATUS_PHRASES):
         return ""
     return ref
+
+
+def extract_explicit_native_subagent_request(text: str) -> tuple[str, str]:
+    raw = str(text or "").strip()
+    if not raw or raw.startswith("/"):
+        return "", ""
+    match = _EXPLICIT_NATIVE_SUBAGENT_PATTERN.search(raw)
+    if not match:
+        return "", ""
+    subagent_type = str(match.group("type") or "").strip().lower()
+    task = str(match.group("task") or "").strip()
+    if not subagent_type or not task:
+        return "", ""
+    return subagent_type, task
 
 
 def is_explicit_research_status_request(text: str) -> bool:

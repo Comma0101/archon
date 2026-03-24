@@ -7,6 +7,7 @@ from typing import Callable, TypeVar
 
 from archon.control.contracts import RouteDecision
 from archon.control.session_controller import (
+    extract_explicit_native_subagent_request,
     extract_explicit_job_status_ref,
     is_ai_news_request,
     is_broad_scope_request,
@@ -329,6 +330,9 @@ def _classify_route(user_message: str) -> tuple[str, str]:
     text_l = text.lower()
     if is_ai_news_request(text):
         return "operator", "native_news_request"
+    subagent_type, subagent_task = extract_explicit_native_subagent_request(text)
+    if subagent_type and subagent_task:
+        return "operator", "native_subagent_request"
     job_ref = extract_explicit_job_status_ref(text)
     if job_ref:
         if job_ref.startswith("research:"):

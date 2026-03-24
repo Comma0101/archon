@@ -18,6 +18,7 @@ from archon.control.orchestrator import (
 )
 from archon.control.policy import evaluate_mcp_policy, evaluate_tool_policy
 from archon.control.session_controller import (
+    extract_explicit_native_subagent_request,
     extract_explicit_job_status_ref,
     is_ai_news_request,
     split_job_ref,
@@ -576,6 +577,22 @@ class Agent:
                 },
                 route_path="native_news_direct",
                 route_reason="native_news_request",
+            )
+
+        subagent_type, subagent_task = extract_explicit_native_subagent_request(user_message)
+        if subagent_type and subagent_task:
+            return self._execute_native_tool_request(
+                user_message,
+                active_profile=active_profile,
+                turn_id=turn_id,
+                tool_name="spawn_subagent",
+                arguments={
+                    "type": subagent_type,
+                    "task": subagent_task,
+                    "context": "",
+                },
+                route_path="native_subagent_direct",
+                route_reason="native_subagent_request",
             )
 
         job_ref = extract_explicit_job_status_ref(user_message)
