@@ -18,6 +18,15 @@ def test_parent_registry_registers_spawn_subagent():
     assert "spawn_subagent" in registry.tools
 
 
+def test_spawn_subagent_description_includes_routing_guidance():
+    registry = ToolRegistry(archon_source_dir="/tmp/archon-src")
+    description = registry.tools["spawn_subagent"]["description"]
+
+    assert 'type="explore"' in description
+    assert 'type="general"' in description
+    assert "delegate_code_task" in description
+
+
 def test_spawn_subagent_rejects_invalid_type_and_empty_task():
     registry = ToolRegistry.empty(config=Config())
     subagent_tools.register_subagent_tools(registry)
@@ -163,3 +172,54 @@ def test_spawn_subagent_emits_usage_event_payload(monkeypatch):
     assert payload["output_tokens"] == 7
     assert payload["status"] == "ok"
     assert payload["iterations_used"] == 3
+
+
+def test_spawn_subagent_emits_usage_event_for_failed_result(monkeypatch):
+    cfg = Config()
+    cfg.llm.provider = "anthropic"
+    cfg.llm.api_key = "test-key"
+    cfg.llm.base_url = "https://example.test"
+    cfg.tiers.light = "light-model"
+    registry = ToolRegistry.empty(config=cfg)
+    subagent_tools.register_subagent_tools(registry)
+
+    class FakeLLMClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeRunner:
+        def __init__(self, *args, **kwargs) -> None:
+            self._result = SubagentResult(
+                status="failed",
+                text="Error: provider unavailable",
+                input_tokens=22,
+                output_tokens=9,
+                iterations_used=1,
+            )
+
+        def run(self, task: str, context: str = "") -> SubagentResult:
+            return self._result
+
+    events: list[tuple[str, dict]] = []
+
+    monkeypatch.setattr(subagent_tools, "LLMClient", FakeLLMClient)
+    monkeypatch.setattr(subagent_tools, "SubagentRunner", FakeRunner)
+    registry.set_execute_event_handler(lambda kind, payload: events.append((kind, payload)))
+
+    result = registry.execute(
+        "spawn_subagent",
+        {
+            "type": "explore",
+            "task": "inspect the repo",
+        },
+    )
+
+    assert "status: failed" in result
+    usage_payloads = [payload for kind, payload in events if kind == "subagent_usage"]
+    assert len(usage_payloads) == 1
+    payload = usage_payloads[0]
+    assert payload["source"] == "subagent:explore"
+    assert payload["input_tokens"] == 22
+    assert payload["output_tokens"] == 9
+    assert payload["status"] == "failed"
+    assert payload["iterations_used"] == 1

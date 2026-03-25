@@ -7,12 +7,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from archon.agent import _is_transient_llm_error
 from archon.config import Config
 from archon.control.policy import evaluate_tool_policy
 from archon.execution.contracts import SuspensionRequest
 from archon.execution.history_shaping import shape_tool_result_for_history
-from archon.execution.llm_runtime import _chat_with_retry
+from archon.execution.llm_runtime import _chat_with_retry, _is_transient_llm_error
 from archon.llm import LLMClient, LLMResponse, ToolCall
 from archon.security.redaction import redact_secret_like_text
 from archon.tools import ToolRegistry
@@ -109,7 +108,16 @@ class SubagentRunner:
                     iterations_used=iterations_used,
                 )
 
-            response = self._llm_step(task, context)
+            try:
+                response = self._llm_step(task, context)
+            except Exception as exc:
+                return SubagentResult(
+                    status="failed",
+                    text=f"Error: {type(exc).__name__}: {exc}",
+                    input_tokens=self.total_input_tokens,
+                    output_tokens=self.total_output_tokens,
+                    iterations_used=iterations_used,
+                )
             iterations_used += 1
             self.total_input_tokens += response.input_tokens
             self.total_output_tokens += response.output_tokens

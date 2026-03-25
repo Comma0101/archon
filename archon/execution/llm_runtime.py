@@ -14,6 +14,23 @@ from archon.llm import LLMResponse
 T = TypeVar("T")
 
 
+def _is_transient_llm_error(exc: Exception) -> bool:
+    text = str(exc).upper()
+    transient_markers = (
+        "503",
+        "500",
+        "502",
+        "504",
+        "429",
+        "UNAVAILABLE",
+        "RATE LIMIT",
+        "TIMEOUT",
+        "TEMPORAR",
+        "TRY AGAIN",
+    )
+    return any(marker in text for marker in transient_markers)
+
+
 def _chat_with_retry(
     llm,
     system_prompt: str,

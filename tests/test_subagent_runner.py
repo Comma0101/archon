@@ -344,3 +344,40 @@ def test_runner_rejects_unsupported_worker_session_before_llm_call():
     assert "worker" in result.text.lower() or "background" in result.text.lower()
     assert result.iterations_used == 0
     assert llm.chat.call_count == 0
+
+
+def test_runner_returns_structured_failure_when_later_llm_step_raises(monkeypatch):
+    first_response = _make_response(
+        None,
+        tool_calls=[ToolCall(id="tool-1", name="read_file", arguments={"path": "/tmp/example.py"})],
+        input_tokens=11,
+        output_tokens=5,
+    )
+    calls = {"n": 0}
+
+    def _fake_chat_with_retry(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return first_response
+        raise RuntimeError("503 service unavailable")
+
+    monkeypatch.setattr("archon.subagents.runner._chat_with_retry", _fake_chat_with_retry)
+
+    llm = MagicMock()
+    registry = ToolRegistry.empty()
+    registry.register(
+        "read_file",
+        "Read a file",
+        {"properties": {"path": {"type": "string"}}, "required": ["path"]},
+        lambda path, _ctx=None: "line 1\nline 2",
+    )
+    runner = _make_runner(llm, registry)
+
+    result = runner.run("inspect")
+
+    assert result.status == "failed"
+    assert "503" in result.text
+    assert result.input_tokens == 11
+    assert result.output_tokens == 5
+    assert result.iterations_used == 1
+    assert calls["n"] == 2

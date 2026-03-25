@@ -91,7 +91,10 @@ def register_subagent_tools(registry) -> None:
 
     registry.register(
         "spawn_subagent",
-        "Run a bounded native subagent with a fresh context window.",
+        'Run a bounded native subagent with a fresh context window. '
+        'Use spawn_subagent(type="explore") for bounded exploration/research, '
+        'use spawn_subagent(type="general") for bounded in-process task execution, '
+        "and use delegate_code_task for heavy, sandboxed, or durable worker work.",
         {
             "properties": {
                 "task": {"type": "string"},

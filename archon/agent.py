@@ -48,6 +48,7 @@ from archon.execution.history_shaping import (
     truncate_text_for_history as _truncate_text_for_history,
 )
 from archon.execution.llm_runtime import _chat_with_retry
+from archon.execution.llm_runtime import _is_transient_llm_error
 from archon.security.redaction import redact_secret_like_text
 from archon.research import store as research_store
 from archon.streaming import chat_once_with_timeout, stream_chat_with_retry
@@ -1202,25 +1203,6 @@ def _collect_stream_response(
         elif isinstance(chunk, LLMResponse):
             response = chunk
     return collected_text, response
-
-
-def _is_transient_llm_error(exc: Exception) -> bool:
-    text = str(exc).upper()
-    transient_markers = (
-        "503",
-        "500",
-        "502",
-        "504",
-        "429",
-        "UNAVAILABLE",
-        "RATE LIMIT",
-        "TIMEOUT",
-        "TEMPORAR",
-        "TRY AGAIN",
-    )
-    return any(marker in text for marker in transient_markers)
-
-
 def _maybe_capture_preference_memory(user_message: str) -> None:
     """Best-effort capture of explicit user preference statements into the memory inbox."""
     try:
